@@ -3,6 +3,9 @@
 Portable project memory for the **wasmrt** Rust WebAssembly runtime. Travels with the repo.
 Detailed design notes: [`docs/port/`](docs/port/). Last updated 2026-07-17.
 
+**Repo:** `origin` = https://github.com/jrmarcum/wasmrt.git (`main` tracks `origin/main`). Synced —
+push doc/memory updates so the project memory stays current on GitHub.
+
 ## Objective
 
 Port the Zig runtime **`wazmrt`** (sibling repo `../wazmrt`) to Rust as **`wasmrt`** — a small, fast,
