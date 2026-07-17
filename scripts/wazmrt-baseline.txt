@@ -1,0 +1,4 @@
+BASELINE_HEAD=52841546398456aa420d36d1adfa6f1a9b5ae631
+BASELINE_SUBJ=5284154 2026-07-17 18:05:30 -0400 feat(interp): Phase 6 — exception handling (exnref) core: decode/validate/execute
+BASELINE_DATE=2026-07-17 18:05:30 -0400
+BASELINE_CAPTURED=2026-07-17 initial deep-read; wazmrt actively changing (Phase 6 EH just landed, src/wat.zig dirty). NOT a freeze point — this is the "where we started watching" marker.

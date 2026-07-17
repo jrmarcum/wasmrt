@@ -1,0 +1,193 @@
+/*
+ * wasmrt.h — DRAFT PROPOSAL (v0, for review; not yet in the repo).
+ *
+ * SPDX-License-Identifier: MIT OR Apache-2.0
+ * Copyright (c) 2026 Jon Marcum
+ *
+ * The public C ABI of wasmrt: a small, wasmtime-SHAPED engine surface (our own
+ * wasmrt_* names — NOT the standard wasm-c-api, NOT wasmtime's exact symbols)
+ * covering exactly what the universalWasmLoader-* projects call. The loaders do
+ * the Component-Model Canonical ABI marshalling (cabi_realloc / cabi_post_<name>
+ * / WIT) themselves on top of this — wasmrt only provides the engine primitives.
+ *
+ * Design rules driving this surface (see scratchpad port-notes/08):
+ *   - Host imports use a CALLER-based callback so a host fn can read/write guest
+ *     memory and return a value (wasm-c-api's callback can't — that's the gap).
+ *   - Exports: call-by-name, typed args, 0-or-1 result (loaders never use >1).
+ *   - Raw linear-memory ptr+size exposed (loaders marshal strings by hand).
+ *   - WASI preview 1, inherit-stdio config (preopen/env/args are optional adds).
+ *   - No tables, no multi-value, no memory.grow, no threads, no component API in
+ *     the HOST surface. (The ENGINE still EXECUTES full wasmtime-parity modules —
+ *     SIMD/GC/etc. inside a module are transparent to this API.)
+ */
+#ifndef WASMRT_H
+#define WASMRT_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- Version / ABI handshake ---------------------------------------------- */
+uint32_t    wasmrt_abi_version(void);        /* bump on any breaking ABI change */
+const char *wasmrt_version_string(void);     /* static "0.1.0"; do not free      */
+
+/* ---- Opaque handles ------------------------------------------------------- */
+typedef struct wasmrt_engine     wasmrt_engine_t;
+typedef struct wasmrt_config     wasmrt_config_t;
+typedef struct wasmrt_store      wasmrt_store_t;   /* owns instances + their memory */
+typedef struct wasmrt_module     wasmrt_module_t;
+typedef struct wasmrt_linker     wasmrt_linker_t;
+typedef struct wasmrt_functype   wasmrt_functype_t;
+typedef struct wasmrt_trap       wasmrt_trap_t;    /* guest trap (has a message)    */
+typedef struct wasmrt_error      wasmrt_error_t;   /* host-side error (compile/link)*/
+typedef struct wasmrt_caller     wasmrt_caller_t;  /* valid only during a host call */
+typedef struct wasmrt_wasi_config wasmrt_wasi_config_t;
+
+/* Lightweight, copyable references into a store (not owned; no delete needed). */
+typedef struct { uint64_t id; } wasmrt_instance_t;
+typedef struct { uint64_t id; } wasmrt_func_t;
+typedef struct { uint64_t id; } wasmrt_memory_t;
+typedef struct { uint64_t id; } wasmrt_global_t;
+
+/* ---- Values --------------------------------------------------------------- */
+typedef enum {
+    WASMRT_I32 = 0, WASMRT_I64 = 1, WASMRT_F32 = 2, WASMRT_F64 = 3,
+    WASMRT_FUNCREF = 4, WASMRT_EXTERNREF = 5   /* refs opaque to the loaders */
+} wasmrt_valkind_t;
+
+typedef struct {
+    wasmrt_valkind_t kind;
+    union { int32_t i32; int64_t i64; float f32; double f64; uint64_t ref; } of;
+} wasmrt_val_t;
+
+/* ---- Engine / config ------------------------------------------------------ */
+/* Config toggles which proposals the engine ACCEPTS/EXECUTES. Default: all on
+ * (full wasmtime browser-standard parity: SIMD, multi-memory, threads, tail
+ * calls, GC, function-references, exceptions). WASI stays preview 1 always. */
+wasmrt_config_t *wasmrt_config_new(void);
+void wasmrt_config_set_simd(wasmrt_config_t *, bool);
+void wasmrt_config_set_threads(wasmrt_config_t *, bool);
+void wasmrt_config_set_multi_memory(wasmrt_config_t *, bool);
+void wasmrt_config_set_tail_call(wasmrt_config_t *, bool);
+void wasmrt_config_set_gc(wasmrt_config_t *, bool);
+void wasmrt_config_set_exceptions(wasmrt_config_t *, bool);
+void wasmrt_config_delete(wasmrt_config_t *);
+
+wasmrt_engine_t *wasmrt_engine_new(void);                         /* default config */
+wasmrt_engine_t *wasmrt_engine_new_with_config(wasmrt_config_t *); /* consumes cfg  */
+void wasmrt_engine_delete(wasmrt_engine_t *);
+
+/* ---- Store ---------------------------------------------------------------- */
+wasmrt_store_t *wasmrt_store_new(wasmrt_engine_t *);
+void wasmrt_store_delete(wasmrt_store_t *);
+
+/* ---- Module: compile / validate / introspect ------------------------------ */
+/* Returns NULL on success; a wasmrt_error_t* to delete on failure. */
+wasmrt_error_t *wasmrt_module_new(wasmrt_engine_t *, const uint8_t *bytes,
+                                  size_t len, wasmrt_module_t **out);
+bool wasmrt_module_validate(wasmrt_engine_t *, const uint8_t *bytes, size_t len);
+void wasmrt_module_delete(wasmrt_module_t *);
+
+/* Enumeration for loaders that inspect signatures (py/dotnet iterate these). */
+size_t wasmrt_module_export_count(const wasmrt_module_t *);
+/* name is a borrowed, NUL-terminated view valid for the module's lifetime. */
+const char *wasmrt_module_export_name(const wasmrt_module_t *, size_t i);
+size_t wasmrt_module_import_count(const wasmrt_module_t *);
+void   wasmrt_module_import_name(const wasmrt_module_t *, size_t i,
+                                 const char **module_out, const char **name_out);
+
+/* ---- Function types (for host imports) ------------------------------------ */
+wasmrt_functype_t *wasmrt_functype_new(const wasmrt_valkind_t *params, size_t nparams,
+                                       const wasmrt_valkind_t *results, size_t nresults);
+void wasmrt_functype_delete(wasmrt_functype_t *);
+
+/* ---- Host callbacks (CALLER-based — the load-bearing shape) ---------------- */
+/* Return NULL for success, or a wasmrt_trap_t* to signal a trap (ownership
+ * transfers to the engine). Write up to nresults into results[]. */
+typedef wasmrt_trap_t *(*wasmrt_func_callback_t)(
+    void *env, wasmrt_caller_t *caller,
+    const wasmrt_val_t *args, size_t nargs,
+    wasmrt_val_t *results, size_t nresults);
+
+/* Inside a host callback: reach the caller's exported memory. */
+wasmrt_memory_t wasmrt_caller_get_memory(wasmrt_caller_t *, const char *name); /* "memory" */
+wasmrt_store_t *wasmrt_caller_store(wasmrt_caller_t *);
+
+/* ---- Linker: imports + WASI + instantiate --------------------------------- */
+wasmrt_linker_t *wasmrt_linker_new(wasmrt_engine_t *);
+void wasmrt_linker_delete(wasmrt_linker_t *);
+
+wasmrt_error_t *wasmrt_linker_define_func(
+    wasmrt_linker_t *, const char *module, const char *name,
+    const wasmrt_functype_t *, wasmrt_func_callback_t, void *env,
+    void (*env_finalizer)(void *));
+
+wasmrt_error_t *wasmrt_linker_define_wasi(wasmrt_linker_t *);
+/* Any import the module declares but nothing satisfies becomes a trap-if-called. */
+wasmrt_error_t *wasmrt_linker_define_unknown_imports_as_traps(
+    wasmrt_linker_t *, const wasmrt_module_t *);
+
+/* Instantiates into `store`. Runs the module's start function if present, but
+ * a reactor's `_initialize` is called explicitly (below). NULL return = ok;
+ * on a start trap sets *trap; on a link error returns the error. */
+wasmrt_error_t *wasmrt_linker_instantiate(
+    wasmrt_linker_t *, wasmrt_store_t *, const wasmrt_module_t *,
+    wasmrt_instance_t *out, wasmrt_trap_t **trap_out);
+
+/* ---- WASI preview 1 config ------------------------------------------------ */
+wasmrt_wasi_config_t *wasmrt_wasi_config_new(void);
+void wasmrt_wasi_config_inherit_stdout(wasmrt_wasi_config_t *);
+void wasmrt_wasi_config_inherit_stderr(wasmrt_wasi_config_t *);
+void wasmrt_wasi_config_inherit_stdin(wasmrt_wasi_config_t *);
+/* Optional adds (map onto wazmrt's --dir/--ro-dir/--env; not used by loaders yet): */
+void wasmrt_wasi_config_preopen_dir(wasmrt_wasi_config_t *, const char *host,
+                                    const char *guest, bool read_only);
+void wasmrt_wasi_config_set_env(wasmrt_wasi_config_t *, const char *const *kv, size_t n);
+void wasmrt_wasi_config_set_args(wasmrt_wasi_config_t *, const char *const *argv, size_t n);
+/* Attach to a store (consumes the config). */
+wasmrt_error_t *wasmrt_store_set_wasi(wasmrt_store_t *, wasmrt_wasi_config_t *);
+
+/* ---- Exports: lookup + call ----------------------------------------------- */
+bool wasmrt_instance_get_func(wasmrt_store_t *, wasmrt_instance_t, const char *name,
+                              wasmrt_func_t *out);
+bool wasmrt_instance_get_memory(wasmrt_store_t *, wasmrt_instance_t, const char *name,
+                                wasmrt_memory_t *out);
+bool wasmrt_instance_get_global(wasmrt_store_t *, wasmrt_instance_t, const char *name,
+                                wasmrt_global_t *out);
+
+/* Reactor convention: call _initialize once after instantiate, if exported. */
+wasmrt_error_t *wasmrt_instance_initialize(wasmrt_store_t *, wasmrt_instance_t,
+                                           wasmrt_trap_t **trap_out);
+
+wasmrt_functype_t *wasmrt_func_type(wasmrt_store_t *, wasmrt_func_t); /* owned; delete */
+
+/* Typed-val call. args/results are caller-provided buffers. nresults is 0 or 1
+ * for loader use (the engine supports more). NULL return = ok; a runtime trap
+ * sets *trap and returns NULL; misuse (arity/type) returns an error. */
+wasmrt_error_t *wasmrt_func_call(wasmrt_store_t *, wasmrt_func_t,
+                                 const wasmrt_val_t *args, size_t nargs,
+                                 wasmrt_val_t *results, size_t nresults,
+                                 wasmrt_trap_t **trap_out);
+
+/* ---- Linear memory (raw view — for hand-rolled canonical ABI) ------------- */
+uint8_t *wasmrt_memory_data(wasmrt_store_t *, wasmrt_memory_t);
+size_t   wasmrt_memory_data_size(wasmrt_store_t *, wasmrt_memory_t);
+
+/* ---- Globals -------------------------------------------------------------- */
+bool wasmrt_global_get(wasmrt_store_t *, wasmrt_global_t, wasmrt_val_t *out);
+
+/* ---- Traps / errors (message + free) -------------------------------------- */
+/* Both write a borrowed-until-delete, NUL-terminated message. */
+const char *wasmrt_trap_message(const wasmrt_trap_t *);   /* + backtrace text */
+void        wasmrt_trap_delete(wasmrt_trap_t *);
+const char *wasmrt_error_message(const wasmrt_error_t *);
+void        wasmrt_error_delete(wasmrt_error_t *);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+#endif /* WASMRT_H */
