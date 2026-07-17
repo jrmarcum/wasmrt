@@ -1,0 +1,36 @@
+wasmrt
+Copyright (c) 2026 Jon Marcum
+
+This product is licensed under the terms of either:
+
+  * the MIT license (see LICENSE-MIT), or
+  * the Apache License, Version 2.0 (see LICENSE-APACHE),
+
+at your option.
+
+    SPDX-License-Identifier: MIT OR Apache-2.0
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+Portions of this software may incorporate or adapt code from third-party
+projects. Each such component is retained under its own original license, and
+its use is documented in:
+
+    third_party/LICENSES.md
+
+Where a component is distributed under the Apache License, Version 2.0, this
+NOTICE file (together with the component's own NOTICE, if any) is preserved and
+propagated as required by Section 4 of that license. Any modifications made to
+incorporated Apache-2.0 code carry prominent change notices in the adapting
+source file, as required by Section 4(b).
+
+Incorporated components (see third_party/LICENSES.md for the full ledger):
+
+  * None at this time.
+
+    wasmrt is 100% original Rust and ships its OWN C ABI header ("wasmrt.h") —
+    it does NOT vendor the standard wasm-c-api "wasm.h" that the source project
+    wazmrt vendored. Should any third-party code ever be adopted, it will be
+    listed here and in third_party/LICENSES.md per the Adoption Checklist.
