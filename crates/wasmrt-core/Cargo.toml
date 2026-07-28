@@ -1,0 +1,18 @@
+[package]
+name = "wasmrt-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "wasmrt runtime core (no_std-friendly): decode, validate, and interpret WebAssembly."
+
+[features]
+# `std` on by default for native builds. Turn it OFF for the freestanding wasm32
+# build: `cargo build -p wasmrt-core --no-default-features --target wasm32-unknown-unknown`.
+default = ["std"]
+std = []
+
+[lints]
+workspace = true

@@ -34,6 +34,13 @@ linking needs only the bundled `rust-lld`. **Pointer-width rule:** type ABI poin
 pointers / `#[repr(C)]` structs (`*const u32`, `*mut c_void`), never hardcoded `i32` — lowers to `i32`
 on `wasm32` and true 64-bit on native, C-ABI-correct on both.
 
+**Windows build host (decided at T0, 2026-07-27):** use the **`x86_64-pc-windows-gnullvm`** host
+(LLVM-MinGW toolchain + UCRT) — it links with `lld`/`compiler-rt`/`libunwind` and needs no MSVC and no
+classic `libgcc`, which fits the libc-free / no-MSVC ethos carried from wazmrt. The plain
+`x86_64-pc-windows-gnu` host fails to link here (missing `libgcc`/`libgcc_eh`), and `-msvc` would
+reintroduce the MSVC dependency wazmrt deliberately avoided. `rust-toolchain.toml` pins bare `nightly`
+(portable across OSes); the machine's rustup **default-host** selects gnullvm on Windows.
+
 ## Interpreter shape — Option A (carried from wazmrt)
 
 Switch dispatch over a **pre-decoded IR**, untyped `u64` value slots (validation proves types). Keep

@@ -1,0 +1,5 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Keep Cargo.lock tracked (this workspace ships binaries).

@@ -1,0 +1,33 @@
+# wasmrt — an idiomatic-Rust WebAssembly runtime (port of the Zig runtime wazmrt).
+# Workspace of three crates (see cmem/architecture.md):
+#   wasmrt-core  — the runtime library, no_std-friendly + wasm32-freestanding-clean
+#   wasmrt-capi  — the wasmrt.h C ABI (cdylib + staticlib) over core
+#   wasmrt-cli   — the `wasmrt` command-line binary
+[workspace]
+resolver = "3"
+members = ["crates/wasmrt-core", "crates/wasmrt-capi", "crates/wasmrt-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Jon Marcum"]
+repository = "https://github.com/jrmarcum/wasmrt"
+description = "An idiomatic-Rust WebAssembly runtime — a port of the Zig runtime wazmrt."
+
+[workspace.dependencies]
+wasmrt-core = { path = "crates/wasmrt-core", version = "0.1.0" }
+
+# Shared lint posture — keep the port clean from the first line (cmem/testing.md discipline).
+[workspace.lints.clippy]
+all = "warn"
+
+# Size is a first-class goal (cmem/design-decisions.md size levers). Applied to the
+# shipped artifacts; pick per-artifact tuning later (ReleaseSmall-equivalent).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

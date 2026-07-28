@@ -1,0 +1,19 @@
+[package]
+name = "wasmrt-capi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "wasmrt C ABI — the wasmrt.h surface (cdylib + staticlib) over wasmrt-core."
+
+[lib]
+# staticlib/cdylib = the shipped C-ABI artifacts; rlib so the surface is unit-testable.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+wasmrt-core = { workspace = true }
+
+[lints]
+workspace = true

@@ -23,8 +23,10 @@ in `docs/port/00-synthesis.md` (+ 6 subsystem maps).
 the conversion has begun. Prep is complete: scope reconciled, full deep-read of wazmrt, the
 `universalWasmLoader` survey, the `wasmrt.h` v0 draft, and the (now drift-watching) oracle monitor.
 Scope was refreshed at the freeze: **memory64 is in** (owner, 2026-07-27); the oracle covers everything
-wasmrt targets **except tail calls**. Next: crate scaffold → bottom-up port, parity-gated. See the
-phased task list in [roadmap.md](roadmap.md).
+wasmrt targets **except tail calls**. **T0 (the 3-crate workspace scaffold) is DONE** — `wasmrt-core` /
+`wasmrt-capi` / `wasmrt-cli` build on all four surfaces (native CLI, staticlib, cdylib, freestanding
+`wasm32`). Next: **T1 (types + reader)**, bottom-up and parity-gated. See the task list in
+[roadmap.md](roadmap.md).
 
 ## Planned repo / crate layout
 

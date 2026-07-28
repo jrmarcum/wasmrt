@@ -7,7 +7,7 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27).
+is in scope** (owner, 2026-07-27). **T0 (crate scaffold) is DONE; next is T1 (types + reader).**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -24,11 +24,18 @@ Each task is DONE only when it adds unit tests **and** passes its parity/conform
 regressions across all build surfaces** (`cargo test` / native / `wasm32` / c-smoke where relevant) —
 diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
 
-- **T0 — Crate scaffold + dual-target build.** ⛔ *Decision-gate:* **core+capi crate split vs single
-  multi-target crate** (recommended: split). Then create `wasmrt-core` (`no_std`-friendly), `wasmrt-capi`
-  (`staticlib`+`cdylib`), `wasmrt` CLI; wire the dual-target build (native via `cargo-zigbuild`; `wasm32`
-  freestanding via build-std/`rust-lld`) and CI skeleton (`cargo test` + `clippy` + size report). Gate:
-  all four surfaces build empty; `wasm32` links libc-free. `[ ]`
+- **T0 — Crate scaffold + dual-target build. ✅ DONE 2026-07-27.** *Decision-gate resolved (owner):*
+  **workspace of 3** — `crates/wasmrt-core` (`no_std`-friendly, `default=["std"]`; `wasi` behind `std`),
+  `crates/wasmrt-capi` (`staticlib`+`cdylib`+`rlib`, ships `include/wasmrt.h`), `crates/wasmrt-cli` (bin
+  `wasmrt`). Edition 2024, size-first `[profile.release]` (`opt-level="z"`+LTO+`codegen-units=1`+strip+
+  `panic="abort"`), workspace clippy lints. core's module tree is stubbed to mirror wazmrt `src/` (each
+  stub cites its port task + invariant). **Gate met:** all four surfaces build — CLI bin, `libwasmrt_capi.a`,
+  `wasmrt_capi.dll`, and freestanding `wasm32-unknown-unknown` core (`--no-default-features`, no_std,
+  libc-free); `cargo test` 3/0, `cargo clippy` clean. **Build-host note:** on Windows use the
+  **`x86_64-pc-windows-gnullvm`** host (LLVM-MinGW + UCRT — matches the libc-free/no-MSVC ethos); plain
+  `-gnu` fails to link (no classic `libgcc`). `rust-toolchain.toml` pins bare `nightly` (portable) — set
+  the machine default-host to gnullvm. `cargo-zigbuild` + build-std tuning deferred to when cross-native/
+  size builds are actually needed. `[x]`
 - **T1 — `types` + `reader`.** `ValType` `u32` newtype (bit-packed concrete refs — invariant), `SectionId`,
   the `DecodeError` set; zero-copy `Reader` with spec-correct LEB128 (over-long / too-large rejection).
   Gate: port wazmrt's LEB accept/reject + ValType-bit-op vectors 1:1. **Highest-value first task after
