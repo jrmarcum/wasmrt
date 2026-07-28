@@ -7,7 +7,7 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0 (crate scaffold) is DONE; next is T1 (types + reader).**
+is in scope** (owner, 2026-07-27). **T0–T1 DONE (v0.1.0, v0.2.0); next is T2 (opcode IR table).**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -36,10 +36,12 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   `-gnu` fails to link (no classic `libgcc`). `rust-toolchain.toml` pins bare `nightly` (portable) — set
   the machine default-host to gnullvm. `cargo-zigbuild` + build-std tuning deferred to when cross-native/
   size builds are actually needed. `[x]`
-- **T1 — `types` + `reader`.** `ValType` `u32` newtype (bit-packed concrete refs — invariant), `SectionId`,
-  the `DecodeError` set; zero-copy `Reader` with spec-correct LEB128 (over-long / too-large rejection).
-  Gate: port wazmrt's LEB accept/reject + ValType-bit-op vectors 1:1. **Highest-value first task after
-  scaffold.** `[ ]`
+- **T1 — `types` + `reader`. ✅ DONE 2026-07-28 (v0.2.0).** `ValType` `u32` newtype (bit-packed concrete
+  refs — invariant held), `RefHeap` + GC subtyping (`is_subtype_of`), `SectionId`/`ExternKind`/`DecodeError`;
+  zero-copy `Reader` with spec-correct LEB128 (`u32`/`u64`/`i32`/`i64`/`s33`, over-long / too-large
+  rejection) + fixed/float reads. **Gate met:** wazmrt's LEB accept/reject vectors ported 1:1 (+ u64/s33/
+  skip/vec-len) and ValType bit-op/subtyping vectors; 20 core tests pass, clippy clean, native +
+  `wasm32` no_std green. `[x]`
 - **T2 — `opcode` (the shared IR table).** `Op`/`Imm`/`Instr` + `decodeBody`; the `fc`/`gc` reverse maps
   (internal tags ≠ wire bytes — invariant). One shared table for validate + interp + assembler. Gate:
   decode-coverage snapshot == wazmrt for the `wasm_mod` corpus. `[ ]`
