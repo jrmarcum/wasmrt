@@ -80,10 +80,13 @@ and **keep the suite green — diff the OUTPUT (N passed / N failed), not exit c
 | [reference-projects.md](reference-projects.md) | The runtimes evaluated (same set as wazmrt) + **wasmtime is the feature-parity target** ("run what it runs") and the thing being replaced under the loaders. 100% original |
 | [roadmap.md](roadmap.md) | Current status (**PORT phase; gate OPEN, oracle frozen @dadc727**) + the **conversion task list** T0–T9 (scaffold → types/reader → opcode → decode → validate → interp slices → text → wasi → C-ABI → licensing/size), parity-gated, with the 4 decision-gates inlined. Loader phases 1–4 |
 | [known-issues.md](known-issues.md) | Issue tracker — the wazmrt residuals relevant to the port (#17/#18/#23 Zig-std-specific → Rust does the clean version), the **collapsed scope gap (only tail-calls lack a wazmrt oracle)**, and the open decisions (now task-list gates) |
+| [releasing.md](releasing.md) | **Versioning + publishing.** Port-progress ladder (`0.x` → `1.0` = full oracle parity); the 3 crates share one version, CLI is published as `wasmrt`; per-task manual releases; the per-release checklist + the binding "update the public ROADMAP/CHANGELOG matrix on every release" trigger; crates.io names reserved |
 
 ## Related files outside cmem
 
 - `README.md` — the public, user-facing doc. NOT project memory.
+- `ROADMAP.md` + `CHANGELOG.md` — the **public progress trackers** (stage ladder + use-case matrix +
+  release notes). Kept in lockstep with each release per the `releasing.md` trigger. NOT project memory.
 - `docs/port/*.md` — the detailed wazmrt deep-read maps (6 subsystems) + the loader survey + `wasmrt.h.draft`.
 - `scripts/check-wazmrt.sh` + `scripts/wazmrt-baseline.txt` — the oracle monitor. Baseline frozen at
   `wazmrt@dadc727` (2026-07-27); the script now watches for **drift** from the freeze, not readiness.

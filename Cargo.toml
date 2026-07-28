@@ -2,10 +2,10 @@
 # Workspace of three crates (see cmem/architecture.md):
 #   wasmrt-core  — the runtime library, no_std-friendly + wasm32-freestanding-clean
 #   wasmrt-capi  — the wasmrt.h C ABI (cdylib + staticlib) over core
-#   wasmrt-cli   — the `wasmrt` command-line binary
+#   wasmrt       — the `wasmrt` command-line binary (published as `wasmrt`)
 [workspace]
 resolver = "3"
-members = ["crates/wasmrt-core", "crates/wasmrt-capi", "crates/wasmrt-cli"]
+members = ["crates/wasmrt-core", "crates/wasmrt-capi", "crates/wasmrt"]
 
 [workspace.package]
 version = "0.1.0"

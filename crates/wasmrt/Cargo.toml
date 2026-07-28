@@ -1,0 +1,19 @@
+[package]
+# Published as `wasmrt` so the CLI installs via `cargo install wasmrt` (bin: `wasmrt`).
+# The library crate is `wasmrt-core`; the C ABI is `wasmrt-capi`.
+name = "wasmrt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "wasmrt — a fast, small WebAssembly runtime CLI (run/assemble/validate/pin)."
+
+# package name is already `wasmrt`, so the default bin target is `wasmrt` (src/main.rs).
+
+[dependencies]
+wasmrt-core = { workspace = true }
+
+[lints]
+workspace = true

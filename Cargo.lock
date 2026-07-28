@@ -3,14 +3,14 @@
 version = 4
 
 [[package]]
-name = "wasmrt-capi"
+name = "wasmrt"
 version = "0.1.0"
 dependencies = [
  "wasmrt-core",
 ]
 
 [[package]]
-name = "wasmrt-cli"
+name = "wasmrt-capi"
 version = "0.1.0"
 dependencies = [
  "wasmrt-core",
