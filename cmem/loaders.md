@@ -49,7 +49,9 @@ C-ABI surface must expose it.
 
 - **Strategy:** clean lean **`wasmrt_*` C ABI (wasmtime-*shaped*, our names) + a native `wasmrt` Rust
   crate.** No exact-wasmtime-symbol compat shim. Owner owns the loaders and updates them.
-- **Draft:** `docs/port/wasmrt.h.draft` (v0, ~40 fns) — **held for review until wazmrt finalizes.**
+- **Draft:** `docs/port/wasmrt.h.draft` (v0, ~40 fns). The "held until wazmrt finalizes" review-block is
+  **lifted** (oracle frozen 2026-07-27) → finalize the header with the owner at the **C-ABI task (T8** in
+  `roadmap.md`) before writing `wasmrt-capi`.
 
 Three substrates today; **all 10 loaders are eventual targets, phased by effort:**
 

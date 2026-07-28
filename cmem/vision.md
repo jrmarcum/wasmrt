@@ -8,9 +8,10 @@ wasmtime.** "Canonically similar to what wasmtime can run, without being wasmtim
 ## Success = three measurable axes (owner, 2026-07-17)
 
 1. **Canonical** — runs the same WebAssembly **wasmtime** can run. Feature/spec conformance is the bar,
-   not API-symbol parity. Scope = **full wasmtime browser-standard parity** (SIMD, multi-memory,
-   threads/atomics, tail calls, GC, function-references, exceptions), with **one caveat: WASI stays
-   preview 1** — preview 2/3 and the component model are OUT (non-browser-standard).
+   not API-symbol parity. Scope = **full wasmtime browser-standard parity + memory64** (SIMD,
+   multi-memory, threads/atomics, tail calls, GC, function-references, exceptions, **memory64** — added
+   to scope 2026-07-27 once the frozen oracle had it), with **one caveat: WASI stays preview 1** —
+   preview 2/3 and the component model are OUT (non-browser-standard).
 2. **Fast** — beat wasmtk/Deno/V8. Preserve wazmrt's confirmed **cold-start win** (2.4× on a trivial
    call, 1.5× on `sum(1e6)` vs Deno/V8, which pays ~110 ms of V8 init + JIT + JS marshalling per run).
    wasmrt cedes sustained hot loops to a JIT — **accepted**; win short-lived / native-FFI, not hot loops.

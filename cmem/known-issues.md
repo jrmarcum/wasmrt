@@ -1,8 +1,9 @@
 # Known Issues
 
-Prep-phase tracker. **No wasmrt code exists yet**, so there are no wasmrt bugs — this records the
-**inherited concerns** from the wazmrt oracle that shape the port, plus the **open decisions**. As the
-port proceeds, log real wasmrt issues here (file:line + surfacing condition), mirroring wazmrt's ledger.
+Issue tracker. The **gate is open** (2026-07-27) but **no wasmrt code exists yet** (port starts at T0 in
+`roadmap.md`), so there are no wasmrt bugs — this records the **inherited concerns** from the frozen
+wazmrt oracle that shape the port, plus the **open decisions** (now task-list gates). As the port
+proceeds, log real wasmrt issues here (file:line + surfacing condition), mirroring wazmrt's ledger.
 
 ## Inherited from wazmrt — relevant to the port
 
