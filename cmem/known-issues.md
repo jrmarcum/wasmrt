@@ -19,19 +19,26 @@ port proceeds, log real wasmrt issues here (file:line + surfacing condition), mi
 - **wazmrt deferred C-ABI residuals** (shared-mutable imported globals; externref via `wasm_table_get`)
   — likely moot: none of the loaders need them (`docs/port/08`).
 
-## Scope gap (not a bug — a work item)
+## Scope gap (not a bug — a work item) — SHRUNK TO ONE ITEM at the 2026-07-27 freeze
 
-- **wazmrt lacks SIMD, multi-memory, threads/atomics, tail calls.** wasmrt's scope requires them (full
-  wasmtime browser-standard parity). No wazmrt oracle exists for these → conform against **wasmtime +
-  the official spec testsuite**. Exception handling (exnref) core landed in wazmrt 2026-07-17, so it
-  *does* have an oracle once stable. Re-check at each wazmrt freeze.
+- **Only the tail-call proposal (`return_call`/`return_call_indirect`) has no wazmrt oracle.** wazmrt
+  has `return_call_ref` (function-references) but not base tail calls. wasmrt's scope requires them
+  (full browser-standard parity) → conform against **wasmtime + the official spec testsuite**.
+- **Everything else wasmrt targets now HAS a wazmrt oracle.** SIMD (full 0xFD incl. relaxed),
+  multi-memory, threads/atomics (0xFE), memory64, and exception handling (both exnref and legacy) all
+  landed in wazmrt before the freeze — they moved from the wasmtime side of the oracle split to the
+  wazmrt side. memory64 is **in scope** (owner, 2026-07-27). Re-check only if the frozen oracle drifts.
 
-## Open decisions (owner — from `design-decisions.md`)
+## Open decisions (owner — from `design-decisions.md`) — deferred as task-list GATES (2026-07-27)
 
-- `random_get`: keep wazmrt's non-crypto PRNG (exact parity) or upgrade to an OS CSPRNG?
-- Zero-dep (wazmrt has zero deps) vs. allow `cap-std`/`openat2` to close the #17 TOCTOU cleanly?
-- `wasmrt.h` review — **held until wazmrt finalizes** (naming, store simplification, `{id}`-handle model).
-- core+capi crate split (recommended) vs. single multi-target crate.
+The owner chose (2026-07-27) to **defer these as decision-gates at the relevant conversion step** rather
+than resolve them up front. Decide each when the port reaches its task (see `roadmap.md`):
+
+- `random_get`: parity PRNG vs OS CSPRNG → **WASI task** (wazmrt now uses a ChaCha CSPRNG, so parity ≈ CSPRNG).
+- Zero-dep vs. `cap-std`/`openat2` to close #17 TOCTOU → **WASI-sandbox task**.
+- `wasmrt.h` review — the "held until wazmrt finalizes" block is now **lifted** (oracle frozen) →
+  **C-ABI task** (finalize with the owner before writing `wasmrt-capi`).
+- core+capi crate split vs. single multi-target crate → **scaffold task**.
 
 ## Triggers (from `INDEX.md`)
 

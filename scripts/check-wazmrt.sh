@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# check-wazmrt.sh — monitor the wazmrt (Zig) oracle for changes and freeze-readiness.
+# check-wazmrt.sh — monitor the wazmrt (Zig) oracle for changes and (now) drift.
 #
-# The wasmrt Rust port must NOT begin until wazmrt is complete and its tests pass
-# (see CLAUDE.md ⛔ GATE). This script diffs wazmrt against a recorded baseline and
-# runs its test suite, so you (or Claude) can judge whether the gate can open.
+# GATE STATUS: OPEN as of 2026-07-27 (see CLAUDE.md / cmem/roadmap.md). The freeze
+# baseline is wazmrt@dadc727 (full parity; zig build test green). The port has begun,
+# so this script's role has INVERTED: it no longer waits for the gate to open — it
+# detects whether the oracle has DRIFTED out from under the in-flight port. A
+# "CHANGED since baseline" result now means: review the new wazmrt commits, decide
+# whether the port must follow, and re-baseline deliberately (--rebaseline) — never
+# silently chase HEAD mid-port. Still diffs wazmrt against the baseline and runs its
+# test suite.
 #
 # Usage:
 #   scripts/check-wazmrt.sh            # report changes + run `zig build test`
@@ -63,7 +68,8 @@ else
 fi
 
 echo "feature markers (files touching each): EH=$f_eh SIMD=$f_simd multi-mem=$f_mm"
-echo "  (extended scope for wasmrt beyond current wazmrt: SIMD, multi-memory, threads, tail calls)"
+echo "  (as of the 2026-07-27 freeze wazmrt has EH/SIMD/multi-mem/threads/memory64 — the ONLY wasmrt-target"
+echo "   feature with no wazmrt oracle is the tail-call proposal: return_call/return_call_indirect)"
 
 test_green=0
 if [ "$RUN_TEST" -eq 1 ]; then

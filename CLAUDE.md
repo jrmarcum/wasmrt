@@ -3,11 +3,18 @@
 An idiomatic-**Rust** WebAssembly runtime — a port of the Zig runtime **`wazmrt`** (`../wazmrt`),
 built to **replace wasmtime** as the engine beneath the owner's `universalWasmLoader-*` projects.
 
-## ⛔ GATE — do not start the port yet
+## ✅ GATE — OPEN (2026-07-27). The port has begun.
 
-**Write no runtime port code until `wazmrt` is complete and `zig build test` passes** (it is the
-reference oracle). As of 2026-07-17 wazmrt is actively changing. Run `scripts/check-wazmrt.sh` for
-freeze-readiness. Until then: design + prep only.
+The gate condition is **met**: `wazmrt` reached **full parity** (every wasm proposal it targets is
+implemented; it runs the whole wasmtk WASI suite; ~60k spec-testsuite assertions pass; the WAT
+assembler is gap-free; the C ABI is complete 319/319) and **`zig build test` passes** (489/493, 4 skip;
+green under Debug AND ReleaseSafe). The oracle is **frozen** at `wazmrt@dadc727` — recorded in
+`scripts/wazmrt-baseline.txt`. **Port code is now permitted.** Follow the phased task list in
+[`cmem/roadmap.md`](cmem/roadmap.md), parity-gated against the frozen oracle at each step.
+
+`scripts/check-wazmrt.sh`'s role has **inverted**: it no longer waits for freeze — it detects whether
+the frozen oracle has **drifted** under the in-flight port. A "CHANGED since baseline" result means:
+review the new wazmrt commits, decide whether the port must follow, then re-baseline deliberately.
 
 ## Project memory lives in `cmem/` — read it first
 

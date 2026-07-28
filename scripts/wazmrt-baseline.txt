@@ -1,4 +1,4 @@
-BASELINE_HEAD=52841546398456aa420d36d1adfa6f1a9b5ae631
-BASELINE_SUBJ=5284154 2026-07-17 18:05:30 -0400 feat(interp): Phase 6 — exception handling (exnref) core: decode/validate/execute
-BASELINE_DATE=2026-07-17 18:05:30 -0400
-BASELINE_CAPTURED=2026-07-17 initial deep-read; wazmrt actively changing (Phase 6 EH just landed, src/wat.zig dirty). NOT a freeze point — this is the "where we started watching" marker.
+BASELINE_HEAD=dadc72724e20fd32bafef9192066c2feaa5734fc
+BASELINE_SUBJ=dadc727 2026-07-27 20:19:46 -0400 docs(cmem): resolve dync out-of-scope contradiction in the ledger/roadmap
+BASELINE_DATE=2026-07-27 20:19:46 -0400
+BASELINE_CAPTURED=2026-07-27 FREEZE POINT (owner-declared full parity; gate OPEN). wazmrt implements every wasm proposal it targets — reference types, multi-table, bulk memory/table, extended-const, function-references, full WasmGC, sat-trunc, SIMD (full 0xFD incl. relaxed), multi-memory, threads/atomics (0xFE), memory64, and exception handling (both exnref and legacy). It runs the WHOLE wasmtk WASI suite (400/400 runnable), ~60k spec-testsuite assertions pass, the WAT assembler has no remaining gaps, and the C ABI is complete (319/319). Gate verified in this env 2026-07-27: `zig build test` = 5/5 steps, 489/493 tests pass (4 skip), exit 0, green under Debug AND ReleaseSafe. THE PORT IS UNBLOCKED. From here the monitor's job inverts: any drift from this HEAD means the oracle moved under the in-flight port — investigate and re-baseline deliberately, don't just follow it. (NOTE: the only wasmrt-target feature with NO wazmrt oracle is the tail-call proposal — return_call/return_call_indirect; wazmrt has return_call_ref via function-references but not base tail calls. Oracle those against wasmtime + the spec testsuite.)

@@ -11,12 +11,16 @@ and revised without wading through one giant file. Keep files small and single-t
 repo `../wazmrt`), built to **replace wasmtime** as the engine beneath the owner's
 `universalWasmLoader-*` projects. See [overview.md](overview.md).
 
-## ⛔ GATE (read first)
+## ✅ GATE — OPEN (2026-07-27). Port in progress. (read first)
 
-**Do not write runtime port code until `wazmrt` is complete and `zig build test` passes** — the
-passing Zig build is the reference oracle. As of 2026-07-17 wazmrt is **actively changing** (Phase 6
-exception-handling core just landed). Run `scripts/check-wazmrt.sh` for freeze-readiness. Until then:
-design + prep only. See [roadmap.md](roadmap.md).
+The gate is **open**: `wazmrt` reached **full parity** and **`zig build test` passes** (489/493, 4 skip;
+Debug + ReleaseSafe green), so the passing Zig build is now a **frozen** reference oracle at
+`wazmrt@dadc727` (`scripts/wazmrt-baseline.txt`). **Runtime port code is permitted** — follow the phased
+conversion task list in [roadmap.md](roadmap.md), parity-gated at each step. `scripts/check-wazmrt.sh`
+now watches for **oracle drift** (a change since the freeze), not for freeze-readiness. Scope note: the
+oracle covers every wasmrt-target feature **except the tail-call proposal** (`return_call`/
+`return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
+scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
 ## Policy (durable — mirrors the wazmrt owner policy, adopted 2026-07-17)
 
@@ -68,18 +72,19 @@ and **keep the suite green — diff the OUTPUT (N passed / N failed), not exit c
 | [overview.md](overview.md) | What wasmrt is, the oracle, planned repo/crate layout, mental model, current status |
 | [vision.md](vision.md) | The goal — fast + smallest-binary + wasm-compilable runtime that **replaces wasmtime** under the `universalWasmLoader-*` projects. The three success axes: **canonical / fast / small** |
 | [architecture.md](architecture.md) | Planned Rust architecture — `wasmrt-core` (no_std-friendly) + `wasmrt-capi` (cdylib/staticlib, the `wasmrt.h` surface) + `wasmrt` CLI; decode→validate→instantiate→execute; the dual-target contract; the shared opcode IR seam |
-| [design-decisions.md](design-decisions.md) | Load-bearing decisions + invariants NOT to drift — boundary-faithful/idiomatic-Rust; **public API = own `wasmrt.h`** (clean `wasmrt_*` + native Rust crate, NOT wasm-c-api/wasmtime symbols); **feature scope = full wasmtime browser-standard parity, WASI p1 only**; Option-A interpreter; the ValType/slot/opcode/trap invariants; size levers; the oracle split |
+| [design-decisions.md](design-decisions.md) | Load-bearing decisions + invariants NOT to drift — boundary-faithful/idiomatic-Rust; **public API = own `wasmrt.h`** (clean `wasmrt_*` + native Rust crate, NOT wasm-c-api/wasmtime symbols); **feature scope = full wasmtime browser-standard parity + memory64, WASI p1 only**; Option-A interpreter; the ValType/slot/opcode/trap invariants; size levers; the collapsed oracle split (tail-calls only); the 4 open decisions now as task-list gates |
 | [loaders.md](loaders.md) | **The consumers.** How `universalWasmLoader-*` work (hand-rolled Canonical ABI over core modules + WIT sidecar), the ~38-fn engine surface that drives `wasmrt.h`, the caller-based host-callback requirement, the 3 substrates + 10 targets (phased), the `wasmrt.h` v0 draft (held for review) |
 | [testing.md](testing.md) | Parity/oracle strategy — Rust↔wazmrt golden vectors for shared features; **wasmtime + official spec testsuite** for extended proposals; `wasmrt-capi` under Miri + a lifecycle fuzz; a wasi-gate compiling real guests; bench cold vs steady; DoD = full parity on both targets |
 | [security-model.md](security-model.md) | Carry wazmrt's design to replicate — sandbox **secure by construction** (`walkFull` handle-stack; Rust may use cap-std/openat2 to close the #17 residual TOCTOU); rights-narrowing preopens; pin verify (hash the in-memory bytes you run; root-owned DB; enforce denies before opt-out); authenticity vs authority |
 | [licensing.md](licensing.md) | **License = `MIT OR Apache-2.0`** (dual). Carry `LICENSE-MIT`/`LICENSE-APACHE`/`NOTICE`/`third_party/LICENSES.md` verbatim, name wazmrt→wasmrt, "Jon Marcum" 2026. Vendored-`wasm.h` attribution only if that code is reused (it is NOT — we ship our own `wasmrt.h`) |
 | [reference-projects.md](reference-projects.md) | The runtimes evaluated (same set as wazmrt) + **wasmtime is the feature-parity target** ("run what it runs") and the thing being replaced under the loaders. 100% original |
-| [roadmap.md](roadmap.md) | Current status (PREP; gate closed) + the port plan — freeze wait → `wasmrt.h` review → scaffold crates → bottom-up port order → extended proposals oracle'd vs wasmtime → parity DONE. Loader phases 1–4 |
-| [known-issues.md](known-issues.md) | Prep-phase issue tracker — the wazmrt residuals relevant to the port (#17/#18/#23 are Zig-std-specific → Rust does the clean version), the oracle-split gap (wazmrt lacks SIMD/multi-mem/threads/tail-calls), and the open decisions |
+| [roadmap.md](roadmap.md) | Current status (**PORT phase; gate OPEN, oracle frozen @dadc727**) + the **conversion task list** T0–T9 (scaffold → types/reader → opcode → decode → validate → interp slices → text → wasi → C-ABI → licensing/size), parity-gated, with the 4 decision-gates inlined. Loader phases 1–4 |
+| [known-issues.md](known-issues.md) | Issue tracker — the wazmrt residuals relevant to the port (#17/#18/#23 Zig-std-specific → Rust does the clean version), the **collapsed scope gap (only tail-calls lack a wazmrt oracle)**, and the open decisions (now task-list gates) |
 
 ## Related files outside cmem
 
 - `README.md` — the public, user-facing doc. NOT project memory.
 - `docs/port/*.md` — the detailed wazmrt deep-read maps (6 subsystems) + the loader survey + `wasmrt.h.draft`.
-- `scripts/check-wazmrt.sh` + `scripts/wazmrt-baseline.txt` — the oracle freeze-readiness monitor.
+- `scripts/check-wazmrt.sh` + `scripts/wazmrt-baseline.txt` — the oracle monitor. Baseline frozen at
+  `wazmrt@dadc727` (2026-07-27); the script now watches for **drift** from the freeze, not readiness.
 - `LICENSE` — current; `LICENSE-MIT`/`LICENSE-APACHE`/`NOTICE`/`third_party/LICENSES.md` to be added at scaffold time.

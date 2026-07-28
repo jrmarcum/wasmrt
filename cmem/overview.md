@@ -8,17 +8,23 @@ projects (see [loaders.md](loaders.md)).
 
 ## The oracle
 
-The **passing `wazmrt` Zig build is the reference oracle.** wasmrt reproduces its behavior/outputs
-(byte-for-byte at the boundary) for every feature wazmrt implements; for features wazmrt does not yet
-have (SIMD, multi-memory, threads, tail calls), the oracle is **wasmtime + the official spec testsuite**
+The **passing `wazmrt` Zig build is the reference oracle**, now **frozen** at `wazmrt@dadc727`
+(2026-07-27; `scripts/wazmrt-baseline.txt`). wasmrt reproduces its behavior/outputs (byte-for-byte at
+the boundary) for every feature wazmrt implements — which, at the freeze, is **every wasm proposal
+wasmrt targets except the tail-call proposal** (`return_call`/`return_call_indirect`). SIMD,
+multi-memory, threads/atomics, memory64, exception handling, and full WasmGC are all in the oracle now.
+Only tail calls have no wazmrt oracle → conform those against **wasmtime + the official spec testsuite**
 (see [testing.md](testing.md), [design-decisions.md](design-decisions.md)). Full deep-read of wazmrt is
 in `docs/port/00-synthesis.md` (+ 6 subsystem maps).
 
-## Status (2026-07-17)
+## Status (2026-07-27)
 
-**PREP phase — port gate CLOSED.** No Rust runtime code yet. wazmrt is still changing (Phase 6
-exception-handling core just landed). Done so far: scope reconciled, full deep-read of wazmrt, the
-`universalWasmLoader` survey, the `wasmrt.h` v0 draft, and the oracle monitor. See [roadmap.md](roadmap.md).
+**PORT phase — gate OPEN.** The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and
+the conversion has begun. Prep is complete: scope reconciled, full deep-read of wazmrt, the
+`universalWasmLoader` survey, the `wasmrt.h` v0 draft, and the (now drift-watching) oracle monitor.
+Scope was refreshed at the freeze: **memory64 is in** (owner, 2026-07-27); the oracle covers everything
+wasmrt targets **except tail calls**. Next: crate scaffold → bottom-up port, parity-gated. See the
+phased task list in [roadmap.md](roadmap.md).
 
 ## Planned repo / crate layout
 

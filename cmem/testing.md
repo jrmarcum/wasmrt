@@ -1,23 +1,29 @@
 # Testing
 
 The port's **definition of done = full Rust↔oracle parity on both targets** (native + wasm). Detail:
-`docs/port/06-build-docs-licensing.md`; the test tree layout is in `tests/README.md`. Nothing is built
-yet (gate closed) — this file fixes the strategy.
+`docs/port/06-build-docs-licensing.md`; the test tree layout is in `tests/README.md`. The gate is
+**open** and the oracle is **frozen** at `wazmrt@dadc727` (2026-07-27) — this file fixes the strategy.
 
-## Oracle strategy (the split)
+## Oracle strategy (the split) — re-checked at the 2026-07-27 freeze
 
 - **Features wazmrt implements** → **golden-vector parity Rust↔wazmrt**: identical inputs must yield
   identical outputs. The proven technique — native `bench` result == wasm `bench` result == wazmrt
   result for the same seed. Diff decode-coverage snapshots, validation snapshots, and `.wast`
-  pass/fail counts against the oracle.
-- **Features wazmrt lacks** (SIMD, multi-memory, threads/atomics, tail calls; EH until stable) → no
-  wazmrt oracle → conform against **wasmtime + the official WebAssembly spec testsuite** directly.
-- Re-check the split at each wazmrt freeze (wazmrt gains features over time — EH core landed 2026-07-17).
+  pass/fail counts against the oracle. **At the freeze this covers nearly the whole scope** — incl.
+  SIMD, multi-memory, threads/atomics, memory64, and exception handling (both encodings), which the
+  frozen oracle now implements (they were *not* in the oracle before the freeze).
+- **The only feature wazmrt lacks** is the **tail-call proposal** (`return_call`/`return_call_indirect`;
+  wazmrt has `return_call_ref` but not base tail calls) → no wazmrt oracle → conform against **wasmtime
+  + the official WebAssembly spec testsuite** directly.
+- **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
+  item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
 ## Test layers (mirror wazmrt, ported)
 
-- **Unit tests** — port wazmrt's ~132 distinct tests module-by-module (decode/validate/interp/text/
-  wasi/pin). Start with the LEB accept/reject vectors and the ValType-packing bit ops (pure, high-value).
+- **Unit tests** — port wazmrt's test corpus module-by-module (decode/validate/interp/text/wasi/pin).
+  At the freeze wazmrt prints **489/493 pass (4 skip)** — ~216 distinct tests, roughly doubled because
+  the `cabi` target re-runs the core tests (see wazmrt `testing.md` "Reading the test count"). Start with
+  the LEB accept/reject vectors and the ValType-packing bit ops (pure, high-value).
 - **C-ABI behavior** — `tests/c_smoke.c` equivalent: compile → instantiate (with a host import) → call
   → read memory → global → trap. Plus `tests/abi_symbols.c`, a **link-time completeness gate** for every
   `wasmrt.h` symbol.
