@@ -29,6 +29,13 @@ impl<'a> Reader<'a> {
         self.pos
     }
 
+    /// The full underlying input slice — for capturing a consumed sub-range
+    /// (e.g. the raw bytes of a constant expression, `&r.input()[start..r.pos()]`).
+    #[must_use]
+    pub const fn input(&self) -> &'a [u8] {
+        self.bytes
+    }
+
     /// Bytes left to read.
     #[must_use]
     pub const fn remaining(&self) -> usize {

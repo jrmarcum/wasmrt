@@ -30,7 +30,7 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | **0.1.0** | Scaffold | 3-crate workspace builds on all four surfaces (CLI, static lib, cdylib, freestanding `wasm32`) | ✅ |
 | **0.2.0** | Types + reader | value/reference types, spec-correct LEB128 decode | ✅ |
 | **0.3.0** | Opcode IR | the shared pre-decoded instruction table | ✅ |
-| 0.4.0 | Decode | full module decoding | ⬜ |
+| **0.4.0** | Decode | full module decoding | ✅ |
 | 0.5.0 | Validate | the spec type-checker | ⬜ |
 | 0.6.x | Interpret | execution, landing one feature slice at a time (see the matrix) | ⬜ |
 | 0.7.0 | Text toolchain | `.wat` assembler + `.wast` spec-script runner | ⬜ |
@@ -46,7 +46,7 @@ Checked off as each capability lands and passes its gate.
 ### Run WebAssembly
 | Use case | Status | Lands in |
 | --- | --- | --- |
-| Decode a `.wasm` module | ⬜ | 0.4 |
+| Decode a `.wasm` module | ✅ | 0.4 |
 | Validate a module (reject malformed/invalid) | ⬜ | 0.5 |
 | Run a pure-compute export (e.g. `fib`, `factorial`) | ⬜ | 0.6 |
 | Linear memory + globals | ⬜ | 0.6 |

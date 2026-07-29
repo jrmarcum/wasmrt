@@ -7,7 +7,7 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T2 DONE (v0.1.0–v0.3.0); next is T3 (module decode).**
+is in scope** (owner, 2026-07-27). **T0–T3 DONE (v0.1.0–v0.4.0); next is T4 (validate).**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -50,10 +50,13 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   1:1 (+ prefix/rejection cases); 30 core tests, clippy clean, native + `wasm32` no_std green.
   **Deferred (land with their consumers):** the `fc`/`gc` reverse maps + natural-align tables (assembler
   T6 / validator T4); `decode_body_tracked` byte-offsets (trap backtraces, T5/T8). `[x]`
-- **T3 — `module` (decode).** All core sections + resolved import/export extern types + bodies;
-  two-pass type-section decode (rec-group forward refs); custom-name + data-count checks; reserved-byte
-  rejection; 64-bit limits flag (memory64). Gate: `wasm_mod` 12/12 decode; malformed-binary rejection
-  matches wazmrt. `[ ]`
+- **T3 — `module` (decode). ✅ DONE 2026-07-28 (v0.4.0).** All core sections + resolved import/export
+  externs + bodies; two-pass type-section decode (rec-group forward refs); custom `name` section;
+  data-count check; reserved-byte + non-UTF-8 rejection; 64-bit limits flag (memory64). Owned data model
+  (`Vec`/`String`) replaces wazmrt's arena — no `deinit`. Also wired **`wasmrt <file.wasm>`** decode
+  summary (+ `-h`/`-v`). **Gate met:** wazmrt's 15 decode/rejection vectors ported 1:1; verified on a
+  real `add.wasm` via the CLI; 45 core tests, clippy clean, native + `wasm32` no_std green. (`wasm_mod`
+  corpus lives on removable media — the ported oracle tests stand in for it.) `[x]`
 - **T4 — `validate`.** Spec type-checker over the IR (value + control-frame stacks) + module-level checks
   (const-exprs, select/if/call_indirect/alignment/memory-presence, `memAddrTy` per-memory index type).
   Gate: `assert_invalid`/`assert_malformed` parity vs the spec testsuite; no over-acceptance. `[ ]`

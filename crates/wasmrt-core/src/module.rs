@@ -1,6 +1,1445 @@
-//! `module` — the decoded module + `decode`: all core sections, resolved import/export
-//! extern types, function bodies, globals/memories/data; owned data model.
+//! A decoded WebAssembly module — pipeline stage 1 (decode).
 //!
-//! Ported at **T3** (`cmem/roadmap.md`). **Invariants:** two-pass type-section decode
-//! (pre-scan kinds) for rec-group forward references; reject reserved flag/valtype bytes;
-//! parse the 64-bit limits flag (memory64, in scope). Custom-name + data-count checks.
+//! Ported from wazmrt `src/Module.zig` (T3). Validate the header, index the top-level
+//! sections, and decode the type / import / function / tag / table / memory / global /
+//! export / element / code / data sections. Every import and export is resolved to its
+//! full [`Extern`] type. Validation, instantiation, and execution build on this type.
+//!
+//! **Ownership:** unlike wazmrt (which arena-owns everything), a `Module` holds owned
+//! `Vec`/`String` fields, so it is independent of the input `bytes` and frees itself on
+//! drop — there is no `deinit`.
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::opcode::HeapType;
+use crate::reader::Reader;
+use crate::types::{
+    DecodeError, DecodeResult, ExternKind, RefHeap, SectionId, ValType, MAGIC, SUPPORTED_VERSION,
+};
+
+/// A top-level section, indexed by id and payload location (metadata only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Section {
+    pub id: SectionId,
+    pub offset: usize,
+    pub size: usize,
+}
+
+/// A function signature from the type section (§5.3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuncType {
+    pub params: Vec<ValType>,
+    pub results: Vec<ValType>,
+}
+
+/// A struct/array field's storage type (GC, §5.3.6). Packed `i8`/`i16` store narrow and
+/// widen on read; an unpacked field holds an ordinary value type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageType {
+    Val(ValType),
+    I8,
+    I16,
+}
+
+impl StorageType {
+    /// The value type this field projects onto the operand stack (packed → i32).
+    #[must_use]
+    pub const fn unpacked(self) -> ValType {
+        match self {
+            StorageType::Val(v) => v,
+            StorageType::I8 | StorageType::I16 => ValType::I32,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_packed(self) -> bool {
+        !matches!(self, StorageType::Val(_))
+    }
+}
+
+/// A struct field / array element type (GC): storage type + mutability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldType {
+    pub storage: StorageType,
+    pub mutable: bool,
+}
+
+/// The composite-type kind of a type-section entry (GC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompKind {
+    Func,
+    Struct,
+    Array,
+}
+
+/// A composite type from the type section (§5.3): a function signature, a struct (a
+/// vector of fields), or an array (a single element field).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompType {
+    Func(FuncType),
+    Struct(Vec<FieldType>),
+    Array(FieldType),
+}
+
+impl CompType {
+    #[must_use]
+    pub const fn kind(&self) -> CompKind {
+        match self {
+            CompType::Func(_) => CompKind::Func,
+            CompType::Struct(_) => CompKind::Struct,
+            CompType::Array(_) => CompKind::Array,
+        }
+    }
+}
+
+/// Resizable-range limits shared by tables and memories (§5.3.7). `shared` (threads) and
+/// `is64` (memory64) apply only to memories. `min`/`max` are PAGE counts (a 64-bit memory
+/// may declare up to 2^48 pages, so they are `u64`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub min: u64,
+    pub max: Option<u64>,
+    pub shared: bool,
+    pub is64: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableType {
+    pub element: ValType,
+    pub limits: Limits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryType {
+    pub limits: Limits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalType {
+    pub content: ValType,
+    pub mutable: bool,
+}
+
+/// The resolved type of an import or export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Extern {
+    Func(FuncType),
+    Table(TableType),
+    Memory(MemoryType),
+    Global(GlobalType),
+    /// An imported/exported exception tag (EH): a function type whose params are the
+    /// exception's value types.
+    Tag(FuncType),
+}
+
+impl Extern {
+    #[must_use]
+    pub const fn kind(&self) -> ExternKind {
+        match self {
+            Extern::Func(_) => ExternKind::Func,
+            Extern::Table(_) => ExternKind::Table,
+            Extern::Memory(_) => ExternKind::Memory,
+            Extern::Global(_) => ExternKind::Global,
+            Extern::Tag(_) => ExternKind::Tag,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    pub module: String,
+    pub name: String,
+    pub ty: Extern,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    pub name: String,
+    /// Index into the module's combined space for its kind (§5.5.10).
+    pub index: u32,
+    pub ty: Extern,
+}
+
+/// A data segment (§5.5.14). Active segments initialize linear memory at a const-expr
+/// offset; passive segments are copied by `memory.init`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSegment {
+    pub active: bool,
+    pub mem_index: u32,
+    /// Raw constant-expression bytes (including the terminating `end`); empty for passive.
+    pub offset_expr: Vec<u8>,
+    pub bytes: Vec<u8>,
+}
+
+/// The mode of an element segment (§5.5.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementMode {
+    Active,
+    Passive,
+    Declarative,
+}
+
+/// An element segment (§5.5.12). Either a function-index list (`funcs`) or a vector of
+/// const-expressions (`exprs`); exactly one is non-empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Element {
+    pub mode: ElementMode,
+    pub table_index: u32,
+    pub offset_expr: Vec<u8>,
+    pub funcs: Vec<u32>,
+    pub exprs: Vec<Vec<u8>>,
+    pub elem_type: ValType,
+}
+
+/// A run of consecutive locals of the same type in a code entry (§5.4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Local {
+    pub count: u32,
+    pub ty: ValType,
+}
+
+/// A defined function's body from the code section (§5.5.13): its declared locals and the
+/// raw instruction bytes (including the terminating `end`). Instructions are decoded later
+/// (with [`crate::opcode::decode_body`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Code {
+    pub locals: Vec<Local>,
+    pub body: Vec<u8>,
+    /// Absolute byte offset of `body` within the original module binary (for truthful
+    /// trap backtraces).
+    pub body_offset: u32,
+}
+
+impl Code {
+    /// Total number of declared locals (excludes parameters).
+    #[must_use]
+    pub fn local_count(&self) -> u64 {
+        self.locals.iter().map(|l| u64::from(l.count)).sum()
+    }
+}
+
+/// A decoded WebAssembly module. All fields are owned; a `Module` outlives its input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Module {
+    pub version: u32,
+    pub sections: Vec<Section>,
+    /// The type index space (§5.3): func / struct / array composite types, in declaration
+    /// order (rec groups flattened into consecutive indices).
+    pub comp_types: Vec<CompType>,
+    /// Declared supertype of each type index (GC sub types), or `None`. Read by
+    /// [`Module::is_subtype`].
+    pub supertypes: Vec<Option<u32>>,
+    /// Type index of each *defined* function, in order.
+    pub functions: Vec<u32>,
+    /// Type index of each *defined* exception tag (§5.5.14, EH).
+    pub tags: Vec<u32>,
+    pub imports: Vec<Import>,
+    pub exports: Vec<Export>,
+    /// Body of each defined function, positionally matching `functions`.
+    pub code: Vec<Code>,
+    /// The global index space (imported globals first, then defined).
+    pub globals: Vec<GlobalType>,
+    /// Init const-expr bytes for each *defined* global (the tail of `globals`).
+    pub global_inits: Vec<Vec<u8>>,
+    /// The memory index space (imported memories first, then defined).
+    pub memories: Vec<MemoryType>,
+    /// The table index space (imported tables first, then defined).
+    pub tables: Vec<TableType>,
+    pub data: Vec<DataSegment>,
+    pub elements: Vec<Element>,
+    /// The start function's index (§5.5.11).
+    pub start: Option<u32>,
+    /// Raw `vec(nameassoc)` payload of the name section's function-name subsection
+    /// (§7.4.2), or `None`. Read via [`Module::func_name`] (consulted only on a trap).
+    pub func_names: Option<Vec<u8>>,
+}
+
+impl Module {
+    /// Return the first section with `id`, or `None`.
+    #[must_use]
+    pub fn section(&self, id: SectionId) -> Option<Section> {
+        self.sections.iter().copied().find(|s| s.id == id)
+    }
+
+    /// Number of imported functions (they occupy the low function indices).
+    #[must_use]
+    pub fn imported_func_count(&self) -> u32 {
+        self.imports.iter().filter(|i| matches!(i.ty, Extern::Func(_))).count() as u32
+    }
+
+    /// Number of imported tables.
+    #[must_use]
+    pub fn imported_table_count(&self) -> u32 {
+        self.imports.iter().filter(|i| matches!(i.ty, Extern::Table(_))).count() as u32
+    }
+
+    /// Number of imported memories.
+    #[must_use]
+    pub fn imported_memory_count(&self) -> u32 {
+        self.imports.iter().filter(|i| matches!(i.ty, Extern::Memory(_))).count() as u32
+    }
+
+    /// Resolve a function index (imports first, then defined) to its signature.
+    #[must_use]
+    pub fn func_type(&self, index: u32) -> Option<FuncType> {
+        let mut i: u32 = 0;
+        for imp in &self.imports {
+            if let Extern::Func(ft) = &imp.ty {
+                if i == index {
+                    return Some(ft.clone());
+                }
+                i += 1;
+            }
+        }
+        let defined = (index - i) as usize;
+        let ti = *self.functions.get(defined)?;
+        self.func_sig(ti)
+    }
+
+    /// The type index of a function (imports first, then defined), or `None` for an
+    /// imported function.
+    #[must_use]
+    pub fn func_type_index(&self, func_index: u32) -> Option<u32> {
+        let imported = self.imported_func_count();
+        if func_index < imported {
+            return None;
+        }
+        let defined = (func_index - imported) as usize;
+        self.functions.get(defined).copied()
+    }
+
+    /// The function signature at type index `ti`, or `None` if out of range or a
+    /// non-function composite type.
+    #[must_use]
+    pub fn func_sig(&self, ti: u32) -> Option<FuncType> {
+        match self.comp_types.get(ti as usize)? {
+            CompType::Func(f) => Some(f.clone()),
+            _ => None,
+        }
+    }
+
+    /// The function type an exception `tag` names (imports first, then defined).
+    #[must_use]
+    pub fn tag_type(&self, tag_index: u32) -> Option<FuncType> {
+        let mut i: u32 = 0;
+        for imp in &self.imports {
+            if let Extern::Tag(ft) = &imp.ty {
+                if i == tag_index {
+                    return Some(ft.clone());
+                }
+                i += 1;
+            }
+        }
+        let defined = (tag_index - i) as usize;
+        let ti = *self.tags.get(defined)?;
+        self.func_sig(ti)
+    }
+
+    /// The struct field vector at type index `ti`, or `None` if not a struct.
+    #[must_use]
+    pub fn struct_fields(&self, ti: u32) -> Option<&[FieldType]> {
+        match self.comp_types.get(ti as usize)? {
+            CompType::Struct(fs) => Some(fs),
+            _ => None,
+        }
+    }
+
+    /// The array element field at type index `ti`, or `None` if not an array.
+    #[must_use]
+    pub fn array_field(&self, ti: u32) -> Option<FieldType> {
+        match self.comp_types.get(ti as usize)? {
+            CompType::Array(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Resolve a GC heap type to a reference-hierarchy head, mapping a concrete type index
+    /// to its composite family. Errors if a concrete index is out of range.
+    pub fn ref_head(&self, ht: HeapType) -> DecodeResult<RefHeap> {
+        Ok(match ht {
+            HeapType::Func | HeapType::NoFunc => RefHeap::Func,
+            HeapType::Extern | HeapType::NoExtern => RefHeap::Extern,
+            HeapType::Any => RefHeap::Any,
+            HeapType::Eq => RefHeap::Eq,
+            HeapType::I31 => RefHeap::I31,
+            HeapType::Struct => RefHeap::Struct,
+            HeapType::Array => RefHeap::Array,
+            HeapType::None => RefHeap::None,
+            HeapType::Exn => RefHeap::Exn,
+            HeapType::Concrete(ti) => {
+                let ct = self
+                    .comp_types
+                    .get(ti as usize)
+                    .ok_or(DecodeError::IndexOutOfRange)?;
+                match ct.kind() {
+                    CompKind::Func => RefHeap::Func,
+                    CompKind::Struct => RefHeap::Struct,
+                    CompKind::Array => RefHeap::Array,
+                }
+            }
+        })
+    }
+
+    /// Is type index `a` a (reflexive/transitive) subtype of `b`, walking the declared GC
+    /// supertype chain?
+    #[must_use]
+    pub fn is_subtype(&self, a: u32, b: u32) -> bool {
+        let mut cur = Some(a);
+        while let Some(c) = cur {
+            if c == b {
+                return true;
+            }
+            cur = self.supertypes.get(c as usize).copied().flatten();
+        }
+        false
+    }
+
+    /// The name recorded for function `index` in the name section, if any. Scans linearly;
+    /// a malformed entry just ends the scan (a bad name section is never a decode error).
+    #[must_use]
+    pub fn func_name(&self, index: u32) -> Option<&[u8]> {
+        let bytes = self.func_names.as_deref()?;
+        let mut r = Reader::new(bytes);
+        let count = r.read_var_u32().ok()?;
+        for _ in 0..count {
+            let idx = r.read_var_u32().ok()?;
+            let len = r.read_var_u32().ok()? as usize;
+            let name = r.read_bytes(len).ok()?;
+            if idx == index {
+                return Some(name);
+            }
+            if idx > index {
+                return None; // the vec is sorted by index
+            }
+        }
+        None
+    }
+}
+
+/// Working state threaded through the section decoders, accumulating the per-kind index
+/// spaces (imported entries first, then defined) needed to resolve export indices.
+#[derive(Default)]
+struct Decoder {
+    comp_types: Vec<CompType>,
+    supertypes: Vec<Option<u32>>,
+    /// Composite kind of each type index, pre-scanned before bodies are decoded so a
+    /// `(ref $t)` value type can collapse to the right family even for a forward reference.
+    type_kinds: Vec<CompKind>,
+    func_space: Vec<FuncType>,
+    table_space: Vec<TableType>,
+    mem_space: Vec<MemoryType>,
+    global_space: Vec<GlobalType>,
+    tag_space: Vec<FuncType>,
+    global_init_space: Vec<Vec<u8>>,
+}
+
+/// Decode a WebAssembly binary into an owned [`Module`]. `bytes` may be freed afterward.
+pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
+    let mut r = Reader::new(bytes);
+    if r.read_bytes(4)? != MAGIC {
+        return Err(DecodeError::BadMagic);
+    }
+    let version = r.read_u32_le()?;
+    if version != SUPPORTED_VERSION {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+
+    let mut d = Decoder::default();
+    let mut sections: Vec<Section> = Vec::new();
+    let mut functions: Vec<u32> = Vec::new();
+    let mut tags: Vec<u32> = Vec::new();
+    let mut imports: Vec<Import> = Vec::new();
+    let mut exports: Vec<Export> = Vec::new();
+    let mut code: Vec<Code> = Vec::new();
+    let mut data: Vec<DataSegment> = Vec::new();
+    let mut elements: Vec<Element> = Vec::new();
+    let mut start: Option<u32> = None;
+    let mut data_count: Option<u32> = None;
+    let mut func_names: Option<Vec<u8>> = None;
+
+    while !r.at_end() {
+        let raw_id = r.read_byte()?;
+        if raw_id > SectionId::MAX {
+            return Err(DecodeError::InvalidSectionId);
+        }
+        let id = SectionId::from_u8(raw_id).ok_or(DecodeError::InvalidSectionId)?;
+        let size = r.read_var_u32()? as usize;
+        let offset = r.pos();
+        let payload = r.read_bytes(size)?;
+        sections.push(Section { id, offset, size });
+
+        let mut sub = Reader::new(payload);
+        match id {
+            SectionId::Custom => {
+                let nlen = sub.read_var_u32()? as usize;
+                let cname = sub.read_bytes(nlen)?;
+                // A custom section's id is a name (§5.2.4), so it must be UTF-8.
+                if core::str::from_utf8(cname).is_err() {
+                    return Err(DecodeError::InvalidUtf8);
+                }
+                if cname == b"name" {
+                    func_names = find_func_name_subsection(&mut sub);
+                }
+            }
+            SectionId::Type => decode_type_section(&mut d, &mut sub)?,
+            SectionId::Import => imports = decode_import_section(&mut d, &mut sub)?,
+            SectionId::Function => functions = decode_function_section(&mut d, &mut sub)?,
+            SectionId::Tag => tags = decode_tag_section(&mut d, &mut sub)?,
+            SectionId::Table => decode_table_section(&mut d, &mut sub)?,
+            SectionId::Memory => decode_memory_section(&mut d, &mut sub)?,
+            SectionId::Global => decode_global_section(&mut d, &mut sub)?,
+            SectionId::Export => exports = decode_export_section(&d, &mut sub)?,
+            SectionId::Element => elements = decode_element_section(&d, &mut sub)?,
+            SectionId::Code => code = decode_code_section(&d, &mut sub, offset)?,
+            SectionId::Data => data = decode_data_section(&mut sub)?,
+            SectionId::DataCount => data_count = Some(sub.read_var_u32()?),
+            SectionId::Start => start = Some(sub.read_var_u32()?),
+        }
+    }
+
+    // If present, the data-count section must equal the data-segment count (§5.5.16).
+    if let Some(dc) = data_count {
+        if dc as usize != data.len() {
+            return Err(DecodeError::DataCountMismatch);
+        }
+    }
+
+    Ok(Module {
+        version,
+        sections,
+        comp_types: d.comp_types,
+        supertypes: d.supertypes,
+        functions,
+        tags,
+        imports,
+        exports,
+        code,
+        globals: d.global_space,
+        global_inits: d.global_init_space,
+        memories: d.mem_space,
+        tables: d.table_space,
+        data,
+        elements,
+        start,
+        func_names,
+    })
+}
+
+/// Find the function-name subsection (id 1) inside a `name` custom section and return an
+/// owned copy of its `vec(nameassoc)` payload. The name section is a convention: every
+/// error degrades to "no names".
+fn find_func_name_subsection(sub: &mut Reader) -> Option<Vec<u8>> {
+    while !sub.at_end() {
+        let kind = sub.read_byte().ok()?;
+        let size = sub.read_var_u32().ok()? as usize;
+        let payload = sub.read_bytes(size).ok()?;
+        if kind == 1 {
+            return Some(payload.to_vec());
+        }
+        if kind > 1 {
+            break; // subsections are ordered; 2+ means we passed it
+        }
+    }
+    None
+}
+
+// --- Low-level readers -------------------------------------------------------
+
+/// Read one value type. Numeric types are themselves; abstract reference shorthands map to
+/// their family head, and `(ref null? ht)` (0x63/0x64) resolves a concrete `$t` to its
+/// family via the pre-scanned `kinds`.
+fn read_val_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<ValType> {
+    let b = r.read_byte()?;
+    Ok(match b {
+        0x7f => ValType::I32,
+        0x7e => ValType::I64,
+        0x7d => ValType::F32,
+        0x7c => ValType::F64,
+        0x7b => ValType::V128,
+        0x70 | 0x73 => ValType::FUNCREF,   // funcref, nullfuncref (nofunc)
+        0x6f | 0x72 => ValType::EXTERNREF, // externref, nullexternref (noextern)
+        0x6e => ValType::ANYREF,
+        0x6d => ValType::EQREF,
+        0x6c => ValType::I31REF,
+        0x6b => ValType::STRUCTREF,
+        0x6a => ValType::ARRAYREF,
+        0x71 => ValType::NULLREF, // none
+        0x69 => ValType::EXNREF,
+        0x74 => ValType::NULLREF, // nullexnref — closest modelled bottom
+        0x68 => ValType::FUNCREF_NN,
+        0x67 => ValType::EXTERNREF_NN,
+        0x66 => ValType::ANYREF_NN,
+        0x65 => ValType::EQREF_NN,
+        0x62 => ValType::I31REF_NN,
+        0x61 => ValType::STRUCTREF_NN,
+        0x59 => ValType::ARRAYREF_NN,
+        0x58 => ValType::NULLREF_NN,
+        0x63 => read_heap_type_ref(r, true, kinds)?, // (ref null ht)
+        0x64 => read_heap_type_ref(r, false, kinds)?, // (ref ht) — non-nullable
+        _ => return Err(DecodeError::BadValType),
+    })
+}
+
+/// Map a `heaptype` (following a `0x63`/`0x64` ref prefix) to a reference value type. A
+/// non-negative `s33` is a concrete type index collapsing to its family head; negative
+/// encodings are the abstract heap types.
+fn read_heap_type_ref(r: &mut Reader, nullable: bool, kinds: &[CompKind]) -> DecodeResult<ValType> {
+    let ht = r.read_var_s33()?;
+    if ht >= 0 {
+        if ht > u32::MAX as i64 {
+            return Err(DecodeError::IndexOutOfRange);
+        }
+        let ti = ht as u32;
+        let kind = kinds
+            .get(ti as usize)
+            .ok_or(DecodeError::IndexOutOfRange)?;
+        let head = match kind {
+            CompKind::Func => RefHeap::Func,
+            CompKind::Struct => RefHeap::Struct,
+            CompKind::Array => RefHeap::Array,
+        };
+        return Ok(ValType::concrete_ref(nullable, head, ti));
+    }
+    let (n, nn) = match ht {
+        -0x10 | -0x0d => (ValType::FUNCREF, ValType::FUNCREF_NN), // func, nofunc
+        -0x11 | -0x0e => (ValType::EXTERNREF, ValType::EXTERNREF_NN), // extern, noextern
+        -0x12 => (ValType::ANYREF, ValType::ANYREF_NN),
+        -0x13 => (ValType::EQREF, ValType::EQREF_NN),
+        -0x14 => (ValType::I31REF, ValType::I31REF_NN),
+        -0x15 => (ValType::STRUCTREF, ValType::STRUCTREF_NN),
+        -0x16 => (ValType::ARRAYREF, ValType::ARRAYREF_NN),
+        -0x0f => (ValType::NULLREF, ValType::NULLREF_NN),
+        -0x17 => (ValType::EXNREF, ValType::EXNREF_NN),
+        _ => return Err(DecodeError::BadValType),
+    };
+    Ok(if nullable { n } else { nn })
+}
+
+fn read_val_types(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<Vec<ValType>> {
+    let n = r.read_vec_len()?;
+    let mut vts = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        vts.push(read_val_type(r, kinds)?);
+    }
+    Ok(vts)
+}
+
+/// Copy a length-prefixed name (§5.2.4) into an owned `String`, rejecting non-UTF-8.
+fn read_name(r: &mut Reader) -> DecodeResult<String> {
+    let n = r.read_var_u32()? as usize;
+    let src = r.read_bytes(n)?;
+    match core::str::from_utf8(src) {
+        Ok(s) => Ok(s.to_string()),
+        Err(_) => Err(DecodeError::InvalidUtf8),
+    }
+}
+
+fn read_limits(r: &mut Reader) -> DecodeResult<Limits> {
+    let flag = r.read_byte()?;
+    // bit 0 = has max, bit 1 = shared (threads), bit 2 = i64 index (memory64).
+    if flag > 0x07 {
+        return Err(DecodeError::MalformedFlag);
+    }
+    let is64 = flag & 0x04 != 0;
+    let min: u64 = if is64 {
+        r.read_var_u64()?
+    } else {
+        u64::from(r.read_var_u32()?)
+    };
+    let max: Option<u64> = if flag & 0x01 != 0 {
+        Some(if is64 {
+            r.read_var_u64()?
+        } else {
+            u64::from(r.read_var_u32()?)
+        })
+    } else {
+        None
+    };
+    Ok(Limits {
+        min,
+        max,
+        shared: flag & 0x02 != 0,
+        is64,
+    })
+}
+
+fn read_table_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<TableType> {
+    let element = read_val_type(r, kinds)?;
+    let limits = read_limits(r)?;
+    if limits.shared || limits.is64 {
+        return Err(DecodeError::MalformedFlag); // tables are 32-bit, unshared
+    }
+    Ok(TableType { element, limits })
+}
+
+fn read_global_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<GlobalType> {
+    let content = read_val_type(r, kinds)?;
+    let mutb = r.read_byte()?;
+    if mutb > 0x01 {
+        return Err(DecodeError::MalformedFlag);
+    }
+    Ok(GlobalType {
+        content,
+        mutable: mutb != 0,
+    })
+}
+
+fn read_field_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<FieldType> {
+    let storage = read_storage_type(r, kinds)?;
+    let mutb = r.read_byte()?;
+    if mutb > 0x01 {
+        return Err(DecodeError::MalformedFlag);
+    }
+    Ok(FieldType {
+        storage,
+        mutable: mutb != 0,
+    })
+}
+
+/// Read a storage type: a packed `i8` (0x78) / `i16` (0x77), else a value type.
+fn read_storage_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<StorageType> {
+    match r.peek_byte()? {
+        0x78 => {
+            r.read_byte()?;
+            Ok(StorageType::I8)
+        }
+        0x77 => {
+            r.read_byte()?;
+            Ok(StorageType::I16)
+        }
+        _ => Ok(StorageType::Val(read_val_type(r, kinds)?)),
+    }
+}
+
+/// Skip a constant init expression (§5.4.9): a short instruction sequence terminated by
+/// `end` (0x0B), handling const-expr opcodes so an operand byte is never mistaken for the
+/// terminator.
+fn skip_const_expr(r: &mut Reader) -> DecodeResult<()> {
+    loop {
+        match r.read_byte()? {
+            0x0b => return Ok(()), // end
+            0x41 | 0x23 | 0xd2 => r.skip_leb(5)?, // i32.const / global.get / ref.func
+            0x42 => r.skip_leb(10)?,              // i64.const
+            0x43 => {
+                r.read_bytes(4)?; // f32.const
+            }
+            0x44 => {
+                r.read_bytes(8)?; // f64.const
+            }
+            0xd0 => {
+                r.read_var_s33()?; // ref.null (heaptype s33)
+            }
+            0xfd => {
+                // SIMD prefix — only `v128.const` is a constant instruction.
+                if r.read_var_u32()? == 0x0c {
+                    r.read_bytes(16)?;
+                }
+            }
+            0xfb => {
+                // GC prefix — the constant GC instructions carry immediates to skip.
+                match r.read_var_u32()? {
+                    0x00 | 0x01 | 0x06 | 0x07 => {
+                        r.read_var_u32()?; // struct.new* / array.new* : type index
+                    }
+                    0x08 => {
+                        r.read_var_u32()?; // array.new_fixed : type index + count
+                        r.read_var_u32()?;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {} // other zero-operand ops (extended-const arithmetic, etc.)
+        }
+    }
+}
+
+// --- Section decoders --------------------------------------------------------
+
+/// Decode the type section (§5.5.4, GC §5.3): a vector of *rec types*. Runs a cheap kind
+/// pre-scan first so a `(ref $t)` inside a field can collapse to the right family even for
+/// a forward reference in the same rec group.
+fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
+    let mut scan = r.clone(); // Reader is a value cursor — clone for the pre-scan pass.
+    d.type_kinds = prescan_type_kinds(&mut scan)?;
+
+    let mut comp: Vec<CompType> = Vec::new();
+    let mut supers: Vec<Option<u32>> = Vec::new();
+    let mut nrec = r.read_var_u32()?;
+    while nrec > 0 {
+        nrec -= 1;
+        if r.peek_byte()? == 0x4e {
+            r.read_byte()?; // rec group
+            let mut k = r.read_var_u32()?;
+            while k > 0 {
+                k -= 1;
+                decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers)?;
+            }
+        } else {
+            decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers)?;
+        }
+    }
+    d.comp_types = comp;
+    d.supertypes = supers;
+    Ok(())
+}
+
+/// Decode one sub type: an optional `0x50`/`0x4f` wrapper carrying a supertype list (GC
+/// MVP: at most one), then a composite type.
+fn decode_sub_type(
+    kinds: &[CompKind],
+    r: &mut Reader,
+    comp: &mut Vec<CompType>,
+    supers: &mut Vec<Option<u32>>,
+) -> DecodeResult<()> {
+    let mut super_idx: Option<u32> = None;
+    let tag = r.peek_byte()?;
+    if tag == 0x50 || tag == 0x4f {
+        r.read_byte()?;
+        let ns = r.read_var_u32()?;
+        if ns > 1 {
+            return Err(DecodeError::BadType); // MVP allows at most one supertype
+        }
+        if ns == 1 {
+            let s = r.read_var_u32()?;
+            // A supertype must be a PRIOR type (lower index than this one, whose index is
+            // `comp.len()` — not yet appended), so the chain strictly decreases and
+            // `is_subtype`'s walk can't loop.
+            if s as usize >= comp.len() {
+                return Err(DecodeError::BadType);
+            }
+            super_idx = Some(s);
+        }
+    }
+    comp.push(decode_comp_type(kinds, r)?);
+    supers.push(super_idx);
+    Ok(())
+}
+
+/// Decode a composite type: `0x60` func / `0x5f` struct / `0x5e` array.
+fn decode_comp_type(kinds: &[CompKind], r: &mut Reader) -> DecodeResult<CompType> {
+    match r.read_byte()? {
+        0x60 => {
+            let params = read_val_types(r, kinds)?;
+            let results = read_val_types(r, kinds)?;
+            Ok(CompType::Func(FuncType { params, results }))
+        }
+        0x5f => {
+            let n = r.read_vec_len()?;
+            let mut fs = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                fs.push(read_field_type(r, kinds)?);
+            }
+            Ok(CompType::Struct(fs))
+        }
+        0x5e => Ok(CompType::Array(read_field_type(r, kinds)?)),
+        _ => Err(DecodeError::BadType),
+    }
+}
+
+// --- Type-kind pre-scan (pass A): record each type's kind without resolving inner
+// reference types (whose family may forward-reference a later type). Mirrors pass B.
+
+fn prescan_type_kinds(r: &mut Reader) -> DecodeResult<Vec<CompKind>> {
+    let mut kinds: Vec<CompKind> = Vec::new();
+    let mut nrec = r.read_var_u32()?;
+    while nrec > 0 {
+        nrec -= 1;
+        if r.peek_byte()? == 0x4e {
+            r.read_byte()?;
+            let mut k = r.read_var_u32()?;
+            while k > 0 {
+                k -= 1;
+                scan_sub_type(r, &mut kinds)?;
+            }
+        } else {
+            scan_sub_type(r, &mut kinds)?;
+        }
+    }
+    Ok(kinds)
+}
+
+fn scan_sub_type(r: &mut Reader, kinds: &mut Vec<CompKind>) -> DecodeResult<()> {
+    let tag = r.peek_byte()?;
+    if tag == 0x50 || tag == 0x4f {
+        r.read_byte()?;
+        let mut ns = r.read_var_u32()?;
+        while ns > 0 {
+            ns -= 1;
+            r.read_var_u32()?; // supertype indices
+        }
+    }
+    match r.read_byte()? {
+        0x60 => {
+            skip_val_type_vec(r)?;
+            skip_val_type_vec(r)?;
+            kinds.push(CompKind::Func);
+        }
+        0x5f => {
+            let mut n = r.read_var_u32()?;
+            while n > 0 {
+                n -= 1;
+                skip_field_type(r)?;
+            }
+            kinds.push(CompKind::Struct);
+        }
+        0x5e => {
+            skip_field_type(r)?;
+            kinds.push(CompKind::Array);
+        }
+        _ => return Err(DecodeError::BadType),
+    }
+    Ok(())
+}
+
+fn skip_val_type_vec(r: &mut Reader) -> DecodeResult<()> {
+    let mut n = r.read_var_u32()?;
+    while n > 0 {
+        n -= 1;
+        skip_val_type(r)?;
+    }
+    Ok(())
+}
+
+/// Advance past one value type without resolving it (bytes only).
+fn skip_val_type(r: &mut Reader) -> DecodeResult<()> {
+    let b = r.read_byte()?;
+    if b == 0x63 || b == 0x64 {
+        r.read_var_s33()?; // (ref null? ht): + heaptype s33
+    }
+    Ok(())
+}
+
+fn skip_field_type(r: &mut Reader) -> DecodeResult<()> {
+    let b = r.peek_byte()?;
+    if b == 0x77 || b == 0x78 {
+        r.read_byte()?; // packed i16 / i8
+    } else {
+        skip_val_type(r)?;
+    }
+    r.read_byte()?; // mutability
+    Ok(())
+}
+
+fn func_type_at(d: &Decoder, type_index: u32) -> DecodeResult<FuncType> {
+    match d
+        .comp_types
+        .get(type_index as usize)
+        .ok_or(DecodeError::IndexOutOfRange)?
+    {
+        CompType::Func(f) => Ok(f.clone()),
+        _ => Err(DecodeError::BadType),
+    }
+}
+
+fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Import>> {
+    let count = r.read_vec_len()?;
+    let mut list = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let module = read_name(r)?;
+        let name = read_name(r)?;
+        let kind = ExternKind::from_u8(r.read_byte()?).ok_or(DecodeError::UnknownExternKind)?;
+        let ty = match kind {
+            ExternKind::Func => {
+                let ti = r.read_var_u32()?;
+                let ft = func_type_at(d, ti)?;
+                d.func_space.push(ft.clone());
+                Extern::Func(ft)
+            }
+            ExternKind::Table => {
+                let tt = read_table_type(r, &d.type_kinds)?;
+                d.table_space.push(tt);
+                Extern::Table(tt)
+            }
+            ExternKind::Memory => {
+                let mt = MemoryType {
+                    limits: read_limits(r)?,
+                };
+                d.mem_space.push(mt);
+                Extern::Memory(mt)
+            }
+            ExternKind::Global => {
+                let gt = read_global_type(r, &d.type_kinds)?;
+                d.global_space.push(gt);
+                Extern::Global(gt)
+            }
+            ExternKind::Tag => {
+                // Tag import: an attribute byte (0 = exception) + a type index.
+                if r.read_byte()? != 0x00 {
+                    return Err(DecodeError::MalformedFlag);
+                }
+                let ti = r.read_var_u32()?;
+                let ft = func_type_at(d, ti)?;
+                d.tag_space.push(ft.clone());
+                Extern::Tag(ft)
+            }
+        };
+        list.push(Import { module, name, ty });
+    }
+    Ok(list)
+}
+
+fn decode_function_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<u32>> {
+    let count = r.read_vec_len()?;
+    let mut list = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let ti = r.read_var_u32()?;
+        let ft = func_type_at(d, ti)?;
+        d.func_space.push(ft);
+        list.push(ti);
+    }
+    Ok(list)
+}
+
+/// Tag section (§5.5.14, EH): each tag is an attribute byte (0x00 = exception) + a type
+/// index. Returns the type indices.
+fn decode_tag_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<u32>> {
+    let count = r.read_vec_len()?;
+    let mut list = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let attr = r.read_byte()?;
+        if attr != 0x00 {
+            return Err(DecodeError::MalformedFlag);
+        }
+        let ti = r.read_var_u32()?;
+        let ft = func_type_at(d, ti)?;
+        d.tag_space.push(ft);
+        list.push(ti);
+    }
+    Ok(list)
+}
+
+fn decode_table_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
+    let mut count = r.read_var_u32()?;
+    while count > 0 {
+        count -= 1;
+        let tt = read_table_type(r, &d.type_kinds)?;
+        d.table_space.push(tt);
+    }
+    Ok(())
+}
+
+fn decode_memory_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
+    let mut count = r.read_var_u32()?;
+    while count > 0 {
+        count -= 1;
+        let mt = MemoryType {
+            limits: read_limits(r)?,
+        };
+        d.mem_space.push(mt);
+    }
+    Ok(())
+}
+
+fn decode_global_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
+    let mut count = r.read_var_u32()?;
+    while count > 0 {
+        count -= 1;
+        let gt = read_global_type(r, &d.type_kinds)?;
+        d.global_space.push(gt);
+        let init = read_const_expr_bytes(r)?;
+        d.global_init_space.push(init);
+    }
+    Ok(())
+}
+
+fn decode_export_section(d: &Decoder, r: &mut Reader) -> DecodeResult<Vec<Export>> {
+    let count = r.read_vec_len()?;
+    let mut list = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let name = read_name(r)?;
+        let kind = ExternKind::from_u8(r.read_byte()?).ok_or(DecodeError::UnknownExternKind)?;
+        let index = r.read_var_u32()?;
+        let ty = match kind {
+            ExternKind::Func => Extern::Func(space_at(&d.func_space, index)?),
+            ExternKind::Table => Extern::Table(space_at(&d.table_space, index)?),
+            ExternKind::Memory => Extern::Memory(space_at(&d.mem_space, index)?),
+            ExternKind::Global => Extern::Global(space_at(&d.global_space, index)?),
+            ExternKind::Tag => Extern::Tag(space_at(&d.tag_space, index)?),
+        };
+        list.push(Export { name, index, ty });
+    }
+    Ok(list)
+}
+
+fn space_at<T: Clone>(space: &[T], index: u32) -> DecodeResult<T> {
+    space
+        .get(index as usize)
+        .cloned()
+        .ok_or(DecodeError::IndexOutOfRange)
+}
+
+fn decode_locals(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<Vec<Local>> {
+    let n = r.read_vec_len()?;
+    let mut locals = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let count = r.read_var_u32()?;
+        let ty = read_val_type(r, kinds)?;
+        locals.push(Local { count, ty });
+    }
+    Ok(locals)
+}
+
+/// Copy a length-prefixed byte vector into owned memory.
+fn read_byte_vec(r: &mut Reader) -> DecodeResult<Vec<u8>> {
+    let n = r.read_var_u32()? as usize;
+    Ok(r.read_bytes(n)?.to_vec())
+}
+
+/// Capture the raw bytes of a constant expression (through its `end`).
+fn read_const_expr_bytes(r: &mut Reader) -> DecodeResult<Vec<u8>> {
+    let start = r.pos();
+    skip_const_expr(r)?;
+    Ok(r.input()[start..r.pos()].to_vec())
+}
+
+fn read_func_vec(r: &mut Reader) -> DecodeResult<Vec<u32>> {
+    let n = r.read_vec_len()?;
+    let mut funcs = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        funcs.push(r.read_var_u32()?);
+    }
+    Ok(funcs)
+}
+
+/// Read a vector of element const-expressions (each terminated by `end`).
+fn read_expr_vec(r: &mut Reader) -> DecodeResult<Vec<Vec<u8>>> {
+    let n = r.read_vec_len()?;
+    let mut exprs = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        exprs.push(read_const_expr_bytes(r)?);
+    }
+    Ok(exprs)
+}
+
+/// Decode the element section (§5.5.12): all 8 flag variants.
+fn decode_element_section(d: &Decoder, r: &mut Reader) -> DecodeResult<Vec<Element>> {
+    let count = r.read_vec_len()?;
+    let mut list = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let flags = r.read_var_u32()?;
+        let mut table_index = 0u32;
+        let mut offset_expr: Vec<u8> = Vec::new();
+        let mut funcs: Vec<u32> = Vec::new();
+        let mut exprs: Vec<Vec<u8>> = Vec::new();
+        let mut elem_type = ValType::FUNCREF;
+        // bit0: 0 = active; bit1 (when bit0=1): 0 = passive, 1 = declarative.
+        let mode = if flags & 0b001 == 0 {
+            ElementMode::Active
+        } else if flags & 0b010 == 0 {
+            ElementMode::Passive
+        } else {
+            ElementMode::Declarative
+        };
+        // bit1 (of active) selects an explicit table index; bit2 selects the expr form.
+        if mode == ElementMode::Active && (flags & 0b010) != 0 {
+            table_index = r.read_var_u32()?;
+        }
+        if mode == ElementMode::Active {
+            offset_expr = read_const_expr_bytes(r)?;
+        }
+        if flags & 0b100 == 0 {
+            // Func-index form. Non-flag-0 variants carry a leading elemkind byte.
+            if flags != 0 {
+                r.read_byte()?; // elemkind (0x00 = funcref)
+            }
+            funcs = read_func_vec(r)?;
+        } else {
+            // Const-expr form. Non-flag-4 variants carry a leading reftype byte.
+            if flags != 4 {
+                elem_type = read_val_type(r, &d.type_kinds)?;
+            }
+            exprs = read_expr_vec(r)?;
+        }
+        list.push(Element {
+            mode,
+            table_index,
+            offset_expr,
+            funcs,
+            exprs,
+            elem_type,
+        });
+    }
+    Ok(list)
+}
+
+fn decode_data_section(r: &mut Reader) -> DecodeResult<Vec<DataSegment>> {
+    let count = r.read_vec_len()?;
+    let mut list = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let seg = match r.read_var_u32()? {
+            // segment flags (§5.5.14)
+            0 => {
+                let offset_expr = read_const_expr_bytes(r)?;
+                let bytes = read_byte_vec(r)?;
+                DataSegment { active: true, mem_index: 0, offset_expr, bytes }
+            }
+            1 => DataSegment {
+                active: false,
+                mem_index: 0,
+                offset_expr: Vec::new(),
+                bytes: read_byte_vec(r)?,
+            },
+            2 => {
+                let mem_index = r.read_var_u32()?;
+                let offset_expr = read_const_expr_bytes(r)?;
+                let bytes = read_byte_vec(r)?;
+                DataSegment { active: true, mem_index, offset_expr, bytes }
+            }
+            _ => return Err(DecodeError::UnsupportedOpcode),
+        };
+        list.push(seg);
+    }
+    Ok(list)
+}
+
+/// `payload_base` is the code section payload's absolute offset in the module, so each
+/// body can record where its bytes live in the original binary.
+fn decode_code_section(d: &Decoder, r: &mut Reader, payload_base: usize) -> DecodeResult<Vec<Code>> {
+    let count = r.read_vec_len()?;
+    let mut list = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        // Each entry is a byte-counted (locals ++ body) blob; decode within it so a
+        // malformed local vector can't run past the entry.
+        let entry_len = r.read_var_u32()? as usize;
+        let entry_start = r.pos();
+        let entry = r.read_bytes(entry_len)?;
+        let mut er = Reader::new(entry);
+        let locals = decode_locals(&mut er, &d.type_kinds)?;
+        let body = entry[er.pos()..].to_vec(); // instruction bytes, incl. terminating end
+        // The body starts `er.pos()` into the entry, which began at `entry_start`.
+        // Saturate rather than truncate (only used to label a trap backtrace).
+        let body_offset = u32::try_from(payload_base + entry_start + er.pos()).unwrap_or(u32::MAX);
+        list.push(Code {
+            locals,
+            body,
+            body_offset,
+        });
+    }
+    Ok(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// Prepend the wasm magic + version to a section byte sequence.
+    fn m(rest: &[u8]) -> Vec<u8> {
+        let mut v = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        v.extend_from_slice(rest);
+        v
+    }
+
+    #[test]
+    fn decodes_empty_module() {
+        let md = decode(&m(&[])).unwrap();
+        assert_eq!(md.version, 1);
+        assert_eq!(md.sections.len(), 0);
+        assert_eq!(md.comp_types.len(), 0);
+    }
+
+    #[test]
+    fn indexes_a_custom_section() {
+        // custom: id 0, size 1, payload = name-length 0.
+        let md = decode(&m(&[0x00, 0x01, 0x00])).unwrap();
+        assert_eq!(md.sections.len(), 1);
+        let s = md.section(SectionId::Custom).unwrap();
+        assert_eq!(s.size, 1);
+        assert_eq!(s.offset, 10);
+    }
+
+    #[test]
+    fn names_must_be_valid_utf8() {
+        // custom-section id = a lone continuation byte (0x80) — never valid UTF-8.
+        assert_eq!(
+            decode(&m(&[0x00, 0x02, 0x01, 0x80])),
+            Err(DecodeError::InvalidUtf8)
+        );
+        // The same framing with a valid 1-byte name decodes.
+        assert!(decode(&m(&[0x00, 0x02, 0x01, b'x'])).is_ok());
+        // An EXPORT name that is a truncated 2-byte UTF-8 sequence is rejected.
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type [] -> []
+            0x03, 0x02, 0x01, 0x00, // function: one func of type 0
+            0x07, 0x05, 0x01, 0x01, 0xC3, 0x00, 0x00, // export "\xC3" func 0
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // code: one empty body
+        ]);
+        assert_eq!(decode(&bytes), Err(DecodeError::InvalidUtf8));
+    }
+
+    #[test]
+    fn rejects_bad_magic() {
+        assert_eq!(
+            decode(&[b'n', b'o', b'p', b'e', 0x01, 0x00, 0x00, 0x00]),
+            Err(DecodeError::BadMagic)
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        assert_eq!(
+            decode(&[0x00, 0x61, 0x73, 0x6d, 0x02, 0x00, 0x00, 0x00]),
+            Err(DecodeError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn rejects_undefined_valtype() {
+        // type section: one func type with a param byte 0x50 (not a valtype).
+        let bytes = m(&[0x01, 0x05, 0x01, 0x60, 0x01, 0x50, 0x00]);
+        assert_eq!(decode(&bytes), Err(DecodeError::BadValType));
+    }
+
+    #[test]
+    fn rejects_reserved_global_mutability() {
+        // global i32 with mutability byte 0x02 (only 0/1 valid).
+        let bytes = m(&[0x06, 0x04, 0x01, 0x7f, 0x02, 0x0b]);
+        assert_eq!(decode(&bytes), Err(DecodeError::MalformedFlag));
+    }
+
+    #[test]
+    fn rejects_self_referential_supertype() {
+        // one type = sub (0x50) with supertype [0] (itself), func [] -> [].
+        let bytes = m(&[0x01, 0x07, 0x01, 0x50, 0x01, 0x00, 0x60, 0x00, 0x00]);
+        assert_eq!(decode(&bytes), Err(DecodeError::BadType));
+    }
+
+    #[test]
+    fn decodes_type_import_function_export() {
+        // (i32,i32)->i32 ; import env.add ; one defined func of type 0 ; export "run" func 1.
+        let bytes = m(&[
+            0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+            0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'a', b'd', b'd', 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+        ]);
+        let md = decode(&bytes).unwrap();
+        assert_eq!(md.sections.len(), 4);
+        assert_eq!(md.comp_types.len(), 1);
+        assert_eq!(md.func_sig(0).unwrap().params, vec![ValType::I32, ValType::I32]);
+        assert_eq!(md.func_sig(0).unwrap().results, vec![ValType::I32]);
+
+        assert_eq!(md.imports.len(), 1);
+        assert_eq!(md.imports[0].module, "env");
+        assert_eq!(md.imports[0].name, "add");
+        assert_eq!(md.imports[0].ty.kind(), ExternKind::Func);
+
+        assert_eq!(md.functions, vec![0]);
+
+        assert_eq!(md.exports.len(), 1);
+        assert_eq!(md.exports[0].name, "run");
+        assert_eq!(md.exports[0].index, 1);
+        // export "run" resolves to the (i32,i32)->i32 signature of defined func 1.
+        let Extern::Func(ft) = &md.exports[0].ty else {
+            panic!("expected a func export");
+        };
+        assert_eq!(ft.results, vec![ValType::I32]);
+        // and func_type resolves the same across the imports-then-defined index space.
+        assert_eq!(md.func_type(1).unwrap().results, vec![ValType::I32]);
+    }
+
+    #[test]
+    fn decodes_gc_struct_and_array() {
+        // type section, 2 types: struct{(mut i32), i64}; array{(mut i8)}.
+        let payload = [0x02, 0x5f, 0x02, 0x7f, 0x01, 0x7e, 0x00, 0x5e, 0x78, 0x01];
+        let mut section = vec![0x01, payload.len() as u8];
+        section.extend_from_slice(&payload);
+        let md = decode(&m(&section)).unwrap();
+        assert_eq!(md.comp_types.len(), 2);
+        let st = md.struct_fields(0).unwrap();
+        assert_eq!(st.len(), 2);
+        assert_eq!(st[0].storage, StorageType::Val(ValType::I32));
+        assert!(st[0].mutable);
+        assert_eq!(st[1].storage, StorageType::Val(ValType::I64));
+        assert!(!st[1].mutable);
+        let arr = md.array_field(1).unwrap();
+        assert_eq!(arr.storage, StorageType::I8);
+        assert!(arr.mutable && arr.storage.is_packed());
+        assert_eq!(arr.storage.unpacked(), ValType::I32);
+    }
+
+    #[test]
+    fn gc_rec_group_forward_reference() {
+        // (rec (struct (field (ref 1))) (struct (field i32)))
+        let payload = [
+            0x01, 0x4e, 0x02, 0x5f, 0x01, 0x64, 0x01, 0x00, 0x5f, 0x01, 0x7f, 0x00,
+        ];
+        let mut section = vec![0x01, payload.len() as u8];
+        section.extend_from_slice(&payload);
+        let md = decode(&m(&section)).unwrap();
+        assert_eq!(md.comp_types.len(), 2);
+        let StorageType::Val(f0) = md.struct_fields(0).unwrap()[0].storage else {
+            panic!("expected a value-typed field");
+        };
+        assert!(f0.is_concrete() && f0.is_non_null_ref());
+        assert_eq!(f0.concrete_index(), 1);
+        assert_eq!(f0.ref_heap(), RefHeap::Struct);
+        assert_eq!(
+            md.struct_fields(1).unwrap()[0].storage,
+            StorageType::Val(ValType::I32)
+        );
+    }
+
+    #[test]
+    fn decodes_code_section() {
+        // (func (param i32 i32) (result i32) (local i32) local.get 0 local.get 1 i32.add)
+        let bytes = m(&[
+            0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type
+            0x03, 0x02, 0x01, 0x00, // function: 1 func of type 0
+            0x0a, 0x0b, 0x01, 0x09, 0x01, 0x01, 0x7f, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // code
+            0x07, 0x07, 0x01, 0x03, b'a', b'd', b'd', 0x00, 0x00, // export
+        ]);
+        let md = decode(&bytes).unwrap();
+        assert_eq!(md.code.len(), 1);
+        assert_eq!(md.code[0].locals.len(), 1);
+        assert_eq!(md.code[0].locals[0].count, 1);
+        assert_eq!(md.code[0].locals[0].ty, ValType::I32);
+        assert_eq!(md.code[0].local_count(), 1);
+        assert_eq!(md.code[0].body, vec![0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b]);
+    }
+
+    #[test]
+    fn resolves_memory_export_with_limits() {
+        // memory: count 1, flag 1 (has max), min 1, max 2; export "mem" memory 0.
+        let bytes = m(&[
+            0x05, 0x04, 0x01, 0x01, 0x01, 0x02,
+            0x07, 0x07, 0x01, 0x03, b'm', b'e', b'm', 0x02, 0x00,
+        ]);
+        let md = decode(&bytes).unwrap();
+        assert_eq!(md.exports.len(), 1);
+        let Extern::Memory(mt) = &md.exports[0].ty else {
+            panic!("expected a memory export");
+        };
+        assert_eq!(mt.limits.min, 1);
+        assert_eq!(mt.limits.max, Some(2));
+    }
+
+    #[test]
+    fn reads_function_names_from_name_section() {
+        // custom "name": subsection 0 (module name, skipped) + subsection 1 (func names).
+        let namemap = [0x02, 0x00, 0x02, b'h', b'i', 0x03, 0x03, b'b', b'y', b'e'];
+        let mut payload = vec![0x00, 0x16, 0x04, b'n', b'a', b'm', b'e'];
+        payload.extend_from_slice(&[0x00, 0x03, 0x02, b'm', b'd']); // subsection 0
+        payload.extend_from_slice(&[0x01, 0x0a]); // subsection 1, size 10
+        payload.extend_from_slice(&namemap);
+        let md = decode(&m(&payload)).unwrap();
+        assert_eq!(md.func_name(0), Some(&b"hi"[..]));
+        assert_eq!(md.func_name(3), Some(&b"bye"[..]));
+        assert_eq!(md.func_name(1), None); // gap in the vec
+        assert_eq!(md.func_name(9), None); // past the end
+    }
+
+    #[test]
+    fn malformed_name_section_is_not_an_error() {
+        let m1 = decode(&m(&[])).unwrap();
+        assert_eq!(m1.func_names, None);
+        assert_eq!(m1.func_name(0), None);
+        // A name section whose function subsection is truncated mid-entry must not fail.
+        let truncated = m(&[
+            0x00, 0x0b, 0x04, b'n', b'a', b'm', b'e', 0x01, 0x04, 0x02, 0x00, 0x05, b'h',
+        ]);
+        let m2 = decode(&truncated).unwrap();
+        assert_eq!(m2.func_name(0), None);
+    }
+}

@@ -11,7 +11,28 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: 0.4.0 — full module decoding (T3)._
+_Next: 0.5.0 — the spec type-checking validator (T4)._
+
+## [0.4.0] — Module decode (stage T3)
+
+wasmrt can now decode a whole WebAssembly module — the first release you can point at a `.wasm`.
+
+### Added
+- `wasmrt-core::module` — a full binary decoder: header + every core section (type, import,
+  function, tag, table, memory, global, export, element, code, data, data-count, start) and the custom
+  `name` section. Every import and export is resolved to its full `Extern` type.
+- Two-pass type-section decode (a kind pre-scan) so a `(ref $t)` can forward-reference a later type in
+  the same rec group; GC struct/array composite types with packed fields and declared subtyping.
+- memory64 support in limits (the 64-bit index flag → u64 page counts); multi-value, reference, and
+  typed-ref value types; all 8 element-segment variants and the 3 data-segment forms.
+- Malformed-binary rejection ported from the oracle: bad magic/version, undefined value types, reserved
+  mutability/limits flags, non-UTF-8 names (§5.2.4), self-referential supertypes, data-count mismatch.
+- **`wasmrt <file.wasm>`** now decodes a module and prints a summary (sections, types, functions,
+  imports/exports, memories/tables/globals, data/element segments, start) — plus `-h`/`--help`.
+- Owned data model (`Vec`/`String`), so a decoded `Module` outlives its input bytes and frees on drop.
+
+### Changed
+- 15 decode/rejection test vectors ported from wazmrt 1:1.
 
 ## [0.3.0] — Opcode IR + body decoder (stage T2)
 
@@ -63,7 +84,8 @@ First release: the crate exists and the build is real on every target surface. N
 - Size-first release profile; builds verified on native (CLI + static lib + cdylib) and freestanding
   `wasm32-unknown-unknown` (no_std, libc-free).
 
-[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jrmarcum/wasmrt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jrmarcum/wasmrt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jrmarcum/wasmrt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jrmarcum/wasmrt/releases/tag/v0.1.0
