@@ -7,7 +7,7 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T1 DONE (v0.1.0, v0.2.0); next is T2 (opcode IR table).**
+is in scope** (owner, 2026-07-27). **T0–T2 DONE (v0.1.0–v0.3.0); next is T3 (module decode).**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -42,9 +42,14 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   rejection) + fixed/float reads. **Gate met:** wazmrt's LEB accept/reject vectors ported 1:1 (+ u64/s33/
   skip/vec-len) and ValType bit-op/subtyping vectors; 20 core tests pass, clippy clean, native +
   `wasm32` no_std green. `[x]`
-- **T2 — `opcode` (the shared IR table).** `Op`/`Imm`/`Instr` + `decodeBody`; the `fc`/`gc` reverse maps
-  (internal tags ≠ wire bytes — invariant). One shared table for validate + interp + assembler. Gate:
-  decode-coverage snapshot == wazmrt for the `wasm_mod` corpus. `[ ]`
+- **T2 — `opcode` (the shared IR table). ✅ DONE 2026-07-28 (v0.3.0).** Complete `Op` table (macro-defined
+  enum + `from_u8`; PascalCase variants), `Imm`/`Instr` with `Vec`-owning immediates (Drop replaces
+  wazmrt `freeBody`), `immediate_kind`, all four prefix decoders (`0xFC`/`0xFD`/`0xFB`/`0xFE`), and
+  `decode_body`. Invariant held: internal tags `0xD7`–`0xFA` ≠ wire bytes, raw ones rejected;
+  lane/heap/block-type range-checked at decode. **Gate met:** wazmrt's `decodeBody` test vectors ported
+  1:1 (+ prefix/rejection cases); 30 core tests, clippy clean, native + `wasm32` no_std green.
+  **Deferred (land with their consumers):** the `fc`/`gc` reverse maps + natural-align tables (assembler
+  T6 / validator T4); `decode_body_tracked` byte-offsets (trap backtraces, T5/T8). `[x]`
 - **T3 — `module` (decode).** All core sections + resolved import/export extern types + bodies;
   two-pass type-section decode (rec-group forward refs); custom-name + data-count checks; reserved-byte
   rejection; 64-bit limits flag (memory64). Gate: `wasm_mod` 12/12 decode; malformed-binary rejection

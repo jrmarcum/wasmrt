@@ -11,7 +11,28 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: 0.3.0 — the shared opcode IR table (T2)._
+_Next: 0.4.0 — full module decoding (T3)._
+
+## [0.3.0] — Opcode IR + body decoder (stage T2)
+
+The shared instruction authority, ported from the wazmrt oracle.
+
+### Added
+- `wasmrt-core::opcode` — the complete `Op` table (every core, reference, GC, SIMD, atomic,
+  bulk-memory, table, and exception-handling opcode), the `Instr` IR with pre-parsed immediates, and
+  `decode_body`, which turns a function body's raw bytes into a `Vec<Instr>`.
+- All four prefix families decode: `0xFC` (saturating truncation, bulk memory, table ops), `0xFD` (the
+  full v128 SIMD set), `0xFB` (WasmGC), and `0xFE` (threads/atomics). Immediates that own data
+  (`br_table`, typed `select`, `try_table`) hold a `Vec` and free themselves — no manual cleanup.
+- The internal-tag-vs-wire-byte invariant is enforced: a raw byte in `0xD7`–`0xFA` (a tag whose real
+  encoding is a prefix + sub-opcode) is rejected, and lane/heap/block-type immediates are range-checked
+  at decode.
+- Decode test vectors ported from wazmrt 1:1 (local/add, block+const+load, br_table, s33-range
+  rejection, typed-select validation, SIMD `v128.const`, unknown-opcode and raw-internal-tag rejection).
+
+### Note
+- Consistent with the oracle, the saturating-truncation bytes `0xC5`–`0xCC` are also accepted as raw
+  single-byte forms (their canonical encoding is `0xFC 0x00`–`0x07`).
 
 ## [0.2.0] — Types + reader (stage T1)
 
@@ -42,6 +63,7 @@ First release: the crate exists and the build is real on every target surface. N
 - Size-first release profile; builds verified on native (CLI + static lib + cdylib) and freestanding
   `wasm32-unknown-unknown` (no_std, libc-free).
 
-[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jrmarcum/wasmrt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jrmarcum/wasmrt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jrmarcum/wasmrt/releases/tag/v0.1.0
