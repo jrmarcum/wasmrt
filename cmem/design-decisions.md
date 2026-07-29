@@ -67,6 +67,24 @@ later). Decide A→B with benchmarks, not upfront.
 - **Pin verify hashes the in-memory bytes it runs** (bytes-hashed == bytes-run); `enforce` denies
   before consulting the opt-out; DB parse fails closed.
 
+## Port-implementation decisions (as built, T0–T3)
+
+Choices made while porting; consistent with "boundary-faithful behavior, idiomatic-Rust internals."
+
+- **Workspace of 3 crates** (`wasmrt-core` / `wasmrt-capi` / `wasmrt`), **edition 2024**
+  (`#[unsafe(no_mangle)]` on the C ABI), size-first `[profile.release]` (`opt-level="z"` + LTO +
+  `codegen-units=1` + strip + `panic="abort"`). **Windows build host = `x86_64-pc-windows-gnullvm`**
+  (see [architecture.md](architecture.md)).
+- **Owned data model over an arena.** The decoder returns owned `Vec`/`String`; a `Module` frees on drop
+  (no `deinit`, no allocator-error threading). Idiomatic-Rust divergence, behavior identical.
+- **`Op` = a macro-defined `#[repr(u8)]` enum** (PascalCase variants) with `from_u8` generated from one
+  wire/internal list; **immediates that own data hold a `Vec`**, so dropping the IR frees them (replaces
+  wazmrt's manual `freeBody`). The internal-tag-vs-wire-byte invariant is preserved (raw `0xD7`–`0xFA`
+  rejected). Raw `0xC5`–`0xCC` accepted as sat-trunc to mirror the oracle (see [known-issues.md](known-issues.md)).
+- **CLI `summarize`** (`wasmrt <file.wasm>`) landed early with T3 — faithful to wazmrt's "summarize a
+  module" CLI role; run/validate/wasi come at their tasks.
+- **Versioning = port-progress ladder**, per-task release to crates.io (see [releasing.md](releasing.md)).
+
 ## Open decisions — now carried as task-list GATES (owner, 2026-07-27: defer, don't resolve up front)
 
 These four were "raise before/at scaffolding." At the freeze the owner chose to **defer them as explicit

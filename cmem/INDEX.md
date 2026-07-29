@@ -11,7 +11,7 @@ and revised without wading through one giant file. Keep files small and single-t
 repo `../wazmrt`), built to **replace wasmtime** as the engine beneath the owner's
 `universalWasmLoader-*` projects. See [overview.md](overview.md).
 
-## ✅ GATE — OPEN (2026-07-27). Port in progress. (read first)
+## ✅ GATE — OPEN (2026-07-27). Port in progress — decode pipeline landing. (read first)
 
 The gate is **open**: `wazmrt` reached **full parity** and **`zig build test` passes** (489/493, 4 skip;
 Debug + ReleaseSafe green), so the passing Zig build is now a **frozen** reference oracle at
@@ -21,6 +21,11 @@ now watches for **oracle drift** (a change since the freeze), not for freeze-rea
 oracle covers every wasmrt-target feature **except the tail-call proposal** (`return_call`/
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
+
+**Progress (2026-07-28): T0–T3 DONE, released v0.1.0 → v0.4.0.** `wasmrt-core` has `types` + `reader` +
+`opcode` (shared IR + `decode_body`) + `module` (full binary decode); `wasmrt <file.wasm>` prints a
+decode summary. ~45 core tests green, clippy clean, all four build surfaces. **Next: T4 (validate).** Each
+task ships a crates.io release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix.
 
 ## Policy (durable — mirrors the wazmrt owner policy, adopted 2026-07-17)
 

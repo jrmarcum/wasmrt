@@ -17,16 +17,24 @@ Only tail calls have no wazmrt oracle → conform those against **wasmtime + the
 (see [testing.md](testing.md), [design-decisions.md](design-decisions.md)). Full deep-read of wazmrt is
 in `docs/port/00-synthesis.md` (+ 6 subsystem maps).
 
-## Status (2026-07-27)
+## Status (2026-07-28) — PORT phase; decode pipeline landing
 
-**PORT phase — gate OPEN.** The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and
-the conversion has begun. Prep is complete: scope reconciled, full deep-read of wazmrt, the
-`universalWasmLoader` survey, the `wasmrt.h` v0 draft, and the (now drift-watching) oracle monitor.
-Scope was refreshed at the freeze: **memory64 is in** (owner, 2026-07-27); the oracle covers everything
-wasmrt targets **except tail calls**. **T0 (the 3-crate workspace scaffold) is DONE** — `wasmrt-core` /
-`wasmrt-capi` / `wasmrt-cli` build on all four surfaces (native CLI, staticlib, cdylib, freestanding
-`wasm32`). Next: **T1 (types + reader)**, bottom-up and parity-gated. See the task list in
-[roadmap.md](roadmap.md).
+The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the port is underway,
+released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
+**memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
+
+**Done — T0–T3 (v0.1.0 → v0.4.0):**
+- **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
+  surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
+- **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`
+  (zero-copy cursor, spec-correct LEB128).
+- **T2 (v0.3.0)** — `opcode` (the complete shared `Op`/`Imm`/`Instr` table + `decode_body`, all four
+  prefix families).
+- **T3 (v0.4.0)** — `module` (full binary decode of every core section; owned data model). **`wasmrt
+  <file.wasm>` decodes a module and prints a summary** — the first user-facing command.
+
+**Next: T4 (validate)** — the spec §3 type-checker, bottom-up and parity-gated. See the task list in
+[roadmap.md](roadmap.md). ~45 core unit tests green; clippy clean; native + `wasm32` no_std all build.
 
 ## Planned repo / crate layout
 

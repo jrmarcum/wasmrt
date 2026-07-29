@@ -72,19 +72,19 @@ are **part of the definition of done** — not optional docs. A release that adv
 advancing the matrix misreports progress to the people following along. Keep them in lockstep with the
 version.
 
-## Before the FIRST publish (one-time prep, tomorrow)
+## Who runs the publish
 
-- `cargo login` with the owner's crates.io token.
-- Add per-crate crates.io listing metadata (not done yet — deferred from T0): `keywords`
-  (e.g. webassembly/wasm/runtime/interpreter/wasi), `categories` (`wasm`, `development-tools`, `no-std`),
-  and a `readme` each crate actually contains (cargo packages the readme, so a `../../README.md` path is
-  rejected — give `wasmrt-core`/`wasmrt-capi`/`wasmrt` their own short README or set `readme = false`).
-- `cargo publish -p wasmrt-core --dry-run` first (catches missing fields / packaging issues) before the
-  real publish.
-- Optionally reserve the unused `wasmrt-cli` + `wazmrt` names with a placeholder publish (defensive).
+The **owner** runs `cargo publish` + `git tag` + `gh release` for each version (needs the crates.io
+token). The agent implements the task, prepares the release (version bump + tracker updates + commit),
+and hands over the publish commands. Established rhythm since v0.1.0.
 
-## Status
+## Status (2026-07-28)
 
-- **0.1.0 (T0 scaffold) is built and committed but NOT yet published.** Next action (owner, needs
-  crates.io token): the pre-publish prep above, then first publish claiming all three names + `v0.1.0`
-  tag + GitHub release.
+- **Published through v0.4.0** — `wasmrt`, `wasmrt-core`, `wasmrt-capi` are all live on crates.io at each
+  released version (T0 v0.1.0 → T3 v0.4.0). The names are claimed.
+- **Still worth doing (nice-to-have, not blocking):** per-crate crates.io **listing metadata** —
+  `keywords` (webassembly/wasm/runtime/interpreter/wasi), `categories` (`wasm`, `development-tools`,
+  `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
+  rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
+  the published crates and add them on a future release if not.
+- **Next release: v0.5.0 (T4, validate).** Per-release checklist above.

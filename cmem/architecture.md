@@ -1,8 +1,14 @@
 # Architecture
 
-The planned Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate → instantiate →
-execute** pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
+The Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate → instantiate → execute**
+pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
 `00-synthesis.md`, `02-decode-core.md`, `03-validate-interp.md`, `06-build-docs-licensing.md`).
+
+**Realized so far (through T3 / v0.4.0):** the workspace + all three crates exist; `wasmrt-core` has
+`types`, `reader`, `opcode` (the shared IR + `decode_body`), and `module` (full binary decode)
+implemented and parity-tested. `validate` / `interp` / text / `wasi` / `pin` are still stubs, filled in
+bottom-up per `roadmap.md`. One idiomatic divergence worth noting: the decoder uses **owned `Vec`/`String`
+data** rather than wazmrt's arena (frees on drop; no `deinit`).
 
 ## Crates
 

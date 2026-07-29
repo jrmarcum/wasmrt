@@ -1,9 +1,25 @@
 # Known Issues
 
-Issue tracker. The **gate is open** (2026-07-27) but **no wasmrt code exists yet** (port starts at T0 in
-`roadmap.md`), so there are no wasmrt bugs — this records the **inherited concerns** from the frozen
-wazmrt oracle that shape the port, plus the **open decisions** (now task-list gates). As the port
-proceeds, log real wasmrt issues here (file:line + surfacing condition), mirroring wazmrt's ledger.
+Issue tracker. Gate open (2026-07-27); the decode pipeline is landing (T0–T3 done, v0.1.0–v0.4.0). This
+records the **inherited concerns** from the frozen wazmrt oracle, the **port notes / intentional
+divergences** logged so far, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
+(file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
+
+## Port notes / intentional divergences (T0–T3)
+
+- **Owned `Vec`/`String` data model instead of wazmrt's arena** (`module.rs`, T3). A `Module` frees on
+  drop — no `deinit`, no allocator-error threading. Observable behavior identical; it's an
+  idiomatic-Rust internal choice (design-decisions "boundary-faithful, idiomatic internals").
+- **Raw single-byte `0xC5`–`0xCC` accepted as saturating-truncation ops** (`opcode.rs`, T2), mirroring
+  the wazmrt oracle (their canonical encoding is `0xFC 0x00`–`0x07`). Kept for parity; re-examine against
+  the spec suite at T6 (raw single-byte forms are arguably not valid encodings — a latent oracle
+  over-acceptance we chose to replicate rather than diverge on).
+- **Deferred, tracked** (land with their consumer, not dropped): the `fc`/`gc` reverse maps + natural-
+  align tables (validator T4 / assembler T6); `decode_body_tracked` byte-offsets for trap backtraces
+  (T5/T8). Recorded in `roadmap.md` T2.
+- **`select_t` note:** a `0xd7`–`0xfa` raw byte and an undefined value-type byte are hard-rejected at
+  decode (`UnsupportedOpcode` / `BadValType`) — the "fail loud, not silent-wrong" rule holds.
+- No real wasmrt *bugs* logged yet. Each release is parity-gated (ported oracle vectors) + clippy-clean.
 
 ## Inherited from wazmrt — relevant to the port
 

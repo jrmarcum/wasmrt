@@ -18,6 +18,16 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
+## Current test state (2026-07-28, through T3 / v0.4.0)
+
+**~45 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+per-slice method has held: each task ports **wazmrt's own test vectors 1:1** (T1 LEB accept/reject +
+ValType bit ops; T2 `decode_body` vectors incl. prefix/rejection; T3 the 15 module decode/malformed
+vectors) plus a few extras. The oracle's `wasm_mod` corpus lives on removable media, so the ported
+oracle unit tests stand in for it; T3 was additionally smoke-checked by decoding a real `add.wasm`
+through the CLI. The `.wast`/spec-testsuite conformance gates below come online at **T6** (text
+toolchain); the C-ABI/Miri gates at **T8**.
+
 ## Test layers (mirror wazmrt, ported)
 
 - **Unit tests** — port wazmrt's test corpus module-by-module (decode/validate/interp/text/wasi/pin).
