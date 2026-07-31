@@ -18,14 +18,15 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Current test state (2026-07-28, through T5 slice 2 / v0.6.1)
+## Current test state (2026-07-28, through T5 slice 3 / v0.6.2)
 
-**65 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+**69 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
 per-slice method has held: each task ports **wazmrt's own test vectors 1:1** where they're hand-buildable
 (T1 LEB accept/reject + ValType bit ops; T2 `decode_body` vectors incl. prefix/rejection; T3 the 15
 module decode/malformed vectors; T4 9 validator vectors; T5 add/factorial/loop-sum + traps + the delicate
-float helpers directly — nearest ties-even, NaN min/max, trunc/floor/ceil, trap/sat conversions), plus a
-few extras and end-to-end CLI runs (`add.wasm`, `fac.wasm`, `fadd.wasm`). The oracle's `wasm_mod` corpus
+float helpers directly — nearest ties-even, NaN min/max, trunc/floor/ceil, trap/sat conversions — and
+the memory ops — store/load round-trip, `memory.size`/`grow`, active data segment, OOB trap), plus a few
+extras and end-to-end CLI runs (`add.wasm`, `fac.wasm`, `fadd.wasm`, `rt.wasm`). The oracle's `wasm_mod` corpus
 lives on removable media, so the ported oracle unit tests stand in for it.
 
 **Two constraints shape T4/T5 coverage** (recorded so future slices plan for them): (1) most of the

@@ -23,7 +23,7 @@ The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the 
 released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
 **memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
 
-**Done — T0–T5-first-slices (v0.1.0 → v0.6.1):**
+**Done — T0–T5-first-slices (v0.1.0 → v0.6.2):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
   surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
 - **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`
@@ -35,13 +35,15 @@ released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope a
 - **T4 core (v0.5.0)** — `validate` (spec §3 type-checker: value/control stacks, module-level checks,
   const-expr, C.refs). **Core language done; SIMD/atomics/GC-objects/EH typing deferred to 0.5.x**
   (deferred ops reject loudly). CLI prints a validation verdict.
-- **T5 slices 1–2 (v0.6.0 integer, v0.6.1 float)** — `interp` (switch interpreter over the IR). **`wasmrt
-  run <file> <fn> [args]` runs integer + floating-point compute** (control flow, recursion, locals,
-  globals, all i32/i64/f32/f64 ops incl. NaN-correct min/max, ties-to-even nearest, trap/sat conversions).
+- **T5 slices 1–3 (v0.6.0 integer, v0.6.1 float, v0.6.2 linear memory)** — `interp` (switch interpreter
+  over the IR). **`wasmrt run <file> <fn> [args]` runs integer + floating-point compute and linear
+  memory** (control flow, recursion, locals, globals, all i32/i64/f32/f64 ops incl. NaN-correct min/max +
+  ties-to-even nearest + trap/sat conversions; loads/stores + `memory.size`/`grow` + bulk memory + active
+  data-segment init; a value stored into memory loads back correctly).
 
-**Next: 0.6.x slice 3 — linear memory** (loads/stores, `memory.size`/`grow`, bulk memory, data-segment
-init), then tables/reftypes/GC/SIMD/threads/memory64/EH + host imports; plus the deferred 0.5.x validation
-arms. See the task list in [roadmap.md](roadmap.md). **65 core unit tests** green; clippy clean; native +
+**Next: 0.6.x slice 4 — tables + reference types** (`table.*`, `call_indirect`, element-segment init,
+`ref.*`), then GC/SIMD/threads/memory64/EH + host imports; plus the deferred 0.5.x validation arms. See
+the task list in [roadmap.md](roadmap.md). **69 core unit tests** green; clippy clean; native +
 `wasm32` no_std all build.
 
 ## Planned repo / crate layout

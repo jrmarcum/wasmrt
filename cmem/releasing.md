@@ -80,12 +80,13 @@ and hands over the publish commands. Established rhythm since v0.1.0.
 
 ## Status (2026-07-28)
 
-- **Published through v0.6.1** — `wasmrt`, `wasmrt-core`, `wasmrt-capi` are all live on crates.io at each
-  released version (T0 v0.1.0 → T3 v0.4.0 → T4-core v0.5.0 → T5 integer v0.6.0 → T5 float v0.6.1). The
-  owner runs each publish; the rhythm (implement → prep → owner publishes) has held for seven releases.
+- **Published through v0.6.2** — `wasmrt`, `wasmrt-core`, `wasmrt-capi` are all live on crates.io at each
+  released version (T0 v0.1.0 → T3 v0.4.0 → T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear
+  memory v0.6.2). The owner runs each publish; the rhythm (implement → prep → owner publishes) has held
+  for nine releases.
 - **Still worth doing (nice-to-have, not blocking):** per-crate crates.io **listing metadata** —
   `keywords` (webassembly/wasm/runtime/interpreter/wasi), `categories` (`wasm`, `development-tools`,
   `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
   rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
   the published crates and add them on a future release if not.
-- **Next release: v0.6.2 (T5 slice 3, linear memory).** Per-release checklist above.
+- **Next release: v0.6.3 (T5 slice 4, tables + reference types).** Per-release checklist above.

@@ -22,12 +22,12 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-**Progress (2026-07-28): T0–T3 + T4-core + T5 slices 1–2 DONE, released v0.1.0 → v0.6.1.** `wasmrt-core`
+**Progress (2026-07-28): T0–T3 + T4-core + T5 slices 1–3 DONE, released v0.1.0 → v0.6.2.** `wasmrt-core`
 has `types` + `reader` + `opcode` (shared IR + `decode_body`) + `module` (decode) + `validate` (spec §3
 type-checker, core language; SIMD/atomics/GC/EH typing deferred to 0.5.x) + `interp` (switch interpreter;
-integer + float compute). **`wasmrt <file>` summarizes + validates; `wasmrt run <file> <fn> [args]` runs
-compute functions** (incl. recursion). 65 core tests green, clippy clean, all four build surfaces. **Next:
-0.6.x slice 3 — linear memory.** Each
+integer + float compute + linear memory). **`wasmrt <file>` summarizes + validates; `wasmrt run <file>
+<fn> [args]` runs compute + memory functions** (incl. recursion). 69 core tests green, clippy clean, all
+four build surfaces. **Next: 0.6.x slice 4 — tables + reference types.** Each
 task ships a crates.io release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix.
 
 ## Policy (durable — mirrors the wazmrt owner policy, adopted 2026-07-17)
