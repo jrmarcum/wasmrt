@@ -111,6 +111,8 @@ pub struct Memory {
     pub bytes: Vec<u8>,
     pub max: Option<u64>,
     pub is64: bool,
+    /// A `shared` memory (threads proposal) — required by `memory.atomic.wait*`.
+    pub shared: bool,
 }
 
 /// A reference table: `Value` slots (`NULL_REF` = uninitialized; a funcref is its function
@@ -160,6 +162,10 @@ pub enum Trap {
     MemoryOutOfBounds,
     /// The declared/grown linear memory exceeds this instance's budget.
     MemoryLimitExceeded,
+    /// An atomic access whose effective address is not naturally aligned to its width.
+    UnalignedAtomic,
+    /// `memory.atomic.wait*` on a non-shared memory.
+    ExpectedSharedMemory,
     /// A `memory.init` / `data.drop` data-segment index out of range.
     UndefinedData,
     /// `call_indirect` in a module with no table (or a bad table index).
@@ -218,6 +224,8 @@ impl fmt::Display for Trap {
             Trap::NoMemory => f.write_str("no linear memory"),
             Trap::MemoryOutOfBounds => f.write_str("out of bounds memory access"),
             Trap::MemoryLimitExceeded => f.write_str("memory exceeds the instance budget"),
+            Trap::UnalignedAtomic => f.write_str("unaligned atomic access"),
+            Trap::ExpectedSharedMemory => f.write_str("atomic wait on non-shared memory"),
             Trap::UndefinedData => f.write_str("data segment index out of range"),
             Trap::NoTable => f.write_str("no table"),
             Trap::TableOutOfBounds => f.write_str("out of bounds table access"),
@@ -306,6 +314,7 @@ impl Instance {
                 bytes: vec![0u8; nbytes],
                 max: mt.limits.max,
                 is64: mt.limits.is64,
+                shared: mt.limits.shared,
             });
         }
 
@@ -1265,6 +1274,15 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 exec_simd(frame, store, s)?;
+                pc += 1;
+            }
+
+            // --- Threads / atomics (0xFE family) ---
+            Op::Atomic => {
+                let Imm::Atomic(at) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                exec_atomic(frame, store, at)?;
                 pc += 1;
             }
 
@@ -3026,6 +3044,201 @@ fn simd_bitmask<T: Copy + Into<u128>>(lanes: &[T], bits: u32) -> i32 {
     m as i32
 }
 
+// ========================= Threads / atomics (0xFE) ========================
+//
+// Single-threaded: every atomic access is trivially atomic and `atomic.fence` is
+// a no-op. Atomic accesses trap on a misaligned effective address (unlike ordinary
+// loads/stores), and `wait*` requires a shared memory. `wait*` never blocks — a
+// value mismatch returns 1 ("not equal"), a match returns 2 ("timed out", since no
+// thread can notify); `notify` wakes 0. Ported from wazmrt `interp.zig execAtomic`.
+
+/// Read `width` (1/2/4/8) little-endian bytes at `mem[ea..]`, zero-extended to u64.
+fn atomic_read(mem: &[u8], ea: usize, width: u64) -> u64 {
+    match width {
+        1 => u64::from(mem[ea]),
+        2 => u64::from(u16::from_le_bytes(mem[ea..ea + 2].try_into().unwrap())),
+        4 => u64::from(u32::from_le_bytes(mem[ea..ea + 4].try_into().unwrap())),
+        _ => u64::from_le_bytes(mem[ea..ea + 8].try_into().unwrap()),
+    }
+}
+/// Write the low `width` bytes of `v` little-endian at `mem[ea..]`.
+fn atomic_write(mem: &mut [u8], ea: usize, width: u64, v: u64) {
+    match width {
+        1 => mem[ea] = v as u8,
+        2 => mem[ea..ea + 2].copy_from_slice(&(v as u16).to_le_bytes()),
+        4 => mem[ea..ea + 4].copy_from_slice(&(v as u32).to_le_bytes()),
+        _ => mem[ea..ea + 8].copy_from_slice(&v.to_le_bytes()),
+    }
+}
+/// Keep only the low `width` bytes of `v` (a sub-width atomic op's access width).
+fn mask_width(v: u64, width: u64) -> u64 {
+    if width >= 8 {
+        v
+    } else {
+        v & ((1u64 << (width * 8)) - 1)
+    }
+}
+/// True if the atomic op at sub-opcode `sub` operates on an `i64` (vs `i32`).
+fn atomic_is64(sub: u32) -> bool {
+    match sub {
+        0x11 | 0x14 | 0x15 | 0x16 | 0x18 | 0x1b | 0x1c | 0x1d => true,
+        0x10 | 0x12 | 0x13 | 0x17 | 0x19 | 0x1a => false,
+        // rmw/cmpxchg 7-op group [i32.full, i64.full, i32.8, i32.16, i64.8, i64.16, i64.32]
+        _ => matches!((sub - 0x1e) % 7, 1 | 4 | 5 | 6),
+    }
+}
+/// log2 of an atomic op's natural access width in bytes (its required alignment).
+fn atomic_align_log2(sub: u32) -> u32 {
+    match sub {
+        0x00 | 0x01 => 2, // notify, wait32
+        0x02 => 3,        // wait64
+        0x03 => 0,        // fence (no memarg)
+        0x10 | 0x17 => 2, // i32 load/store
+        0x11 | 0x18 => 3, // i64 load/store
+        0x12 | 0x19 => 0, // i32 …8
+        0x13 | 0x1a => 1, // i32 …16
+        0x14 | 0x1b => 0, // i64 …8
+        0x15 | 0x1c => 1, // i64 …16
+        0x16 | 0x1d => 2, // i64 …32
+        _ => match (sub.wrapping_sub(0x1e)) % 7 {
+            0 => 2, // i32 full
+            1 => 3, // i64 full
+            2 => 0, // i32.8
+            3 => 1, // i32.16
+            4 => 0, // i64.8
+            5 => 1, // i64.16
+            _ => 2, // i64.32
+        },
+    }
+}
+
+/// Pop an atomic op's address, bounds- + **alignment**-check it, require a shared
+/// memory when `need_shared`. Returns the effective byte offset into `at.mem.memory`.
+fn atomic_ea(
+    frame: &mut Frame,
+    store: &Store,
+    at: crate::opcode::Atomic,
+    width: u64,
+    need_shared: bool,
+) -> Result<usize> {
+    let mem = store.memories.get(at.mem.memory as usize).ok_or(Trap::NoMemory)?;
+    let base = frame.pop_mem(mem.is64);
+    if need_shared && !mem.shared {
+        return Err(Trap::ExpectedSharedMemory);
+    }
+    let ea = base.checked_add(at.mem.offset).ok_or(Trap::MemoryOutOfBounds)?;
+    let end = ea.checked_add(width).ok_or(Trap::MemoryOutOfBounds)?;
+    if end > mem.bytes.len() as u64 {
+        return Err(Trap::MemoryOutOfBounds);
+    }
+    if ea % width != 0 {
+        return Err(Trap::UnalignedAtomic);
+    }
+    Ok(ea as usize)
+}
+
+/// Execute a `0xFE` atomic instruction (single-threaded semantics).
+fn exec_atomic(frame: &mut Frame, store: &mut Store, at: crate::opcode::Atomic) -> Result<()> {
+    let sub = at.sub;
+    if sub == 0x03 {
+        return Ok(()); // atomic.fence — nothing to order single-threaded
+    }
+    let w = 1u64 << atomic_align_log2(sub);
+    let mi = at.mem.memory as usize;
+    match sub {
+        0x00 => {
+            // memory.atomic.notify [addr count] -> [woken] (always 0 single-threaded)
+            let _count = frame.pop_i32();
+            let _ea = atomic_ea(frame, store, at, w, false)?;
+            frame.push_i32(0);
+        }
+        0x01 | 0x02 => {
+            // memory.atomic.wait32 / wait64 [addr expected timeout] -> [i32]
+            let _timeout = frame.pop_i64();
+            let expected: u64 = if sub == 0x01 {
+                u64::from(frame.pop_i32() as u32)
+            } else {
+                frame.pop_i64() as u64
+            };
+            let ea = atomic_ea(frame, store, at, w, true)?;
+            let cur = atomic_read(&store.memories[mi].bytes, ea, w);
+            frame.push_i32(if cur != expected { 1 } else { 2 });
+        }
+        0x10..=0x16 => {
+            // atomic load [addr] -> [T]
+            let ea = atomic_ea(frame, store, at, w, false)?;
+            let v = atomic_read(&store.memories[mi].bytes, ea, w);
+            if atomic_is64(sub) {
+                frame.push_i64(v as i64);
+            } else {
+                frame.push_i32(v as u32 as i32);
+            }
+        }
+        0x17..=0x1d => {
+            // atomic store [addr T] -> []
+            let val: u64 = if atomic_is64(sub) {
+                frame.pop_i64() as u64
+            } else {
+                u64::from(frame.pop_i32() as u32)
+            };
+            let ea = atomic_ea(frame, store, at, w, false)?;
+            atomic_write(&mut store.memories[mi].bytes, ea, w, val);
+        }
+        0x1e..=0x4e => {
+            let is64 = atomic_is64(sub);
+            let group = (sub - 0x1e) / 7; // 0 add,1 sub,2 and,3 or,4 xor,5 xchg,6 cmpxchg
+            if group == 6 {
+                // cmpxchg [addr expected replacement] -> [old]
+                let repl: u64 = if is64 {
+                    frame.pop_i64() as u64
+                } else {
+                    u64::from(frame.pop_i32() as u32)
+                };
+                let expected: u64 = if is64 {
+                    frame.pop_i64() as u64
+                } else {
+                    u64::from(frame.pop_i32() as u32)
+                };
+                let ea = atomic_ea(frame, store, at, w, false)?;
+                let old = atomic_read(&store.memories[mi].bytes, ea, w);
+                if old == mask_width(expected, w) {
+                    atomic_write(&mut store.memories[mi].bytes, ea, w, repl);
+                }
+                if is64 {
+                    frame.push_i64(old as i64);
+                } else {
+                    frame.push_i32(old as u32 as i32);
+                }
+            } else {
+                // add/sub/and/or/xor/xchg [addr val] -> [old]
+                let val: u64 = if is64 {
+                    frame.pop_i64() as u64
+                } else {
+                    u64::from(frame.pop_i32() as u32)
+                };
+                let ea = atomic_ea(frame, store, at, w, false)?;
+                let old = atomic_read(&store.memories[mi].bytes, ea, w);
+                let new = match group {
+                    0 => old.wrapping_add(val),
+                    1 => old.wrapping_sub(val),
+                    2 => old & val,
+                    3 => old | val,
+                    4 => old ^ val,
+                    _ => val, // xchg
+                };
+                atomic_write(&mut store.memories[mi].bytes, ea, w, new);
+                if is64 {
+                    frame.push_i64(old as i64);
+                } else {
+                    frame.push_i32(old as u32 as i32);
+                }
+            }
+        }
+        _ => return Err(Trap::UnsupportedInstruction),
+    }
+    Ok(())
+}
+
 fn cmp_i32(op: u8, a: i32, b: i32) -> bool {
     let (ua, ub) = (a as u32, b as u32);
     match op {
@@ -3852,6 +4065,81 @@ mod tests {
             (10, code1(&entry)),
         ]);
         assert_eq!(as_i32(run1(&m, "m", &[]).unwrap()[0]), 55);
+    }
+
+    // --- threads / atomics (0xFE) ---
+
+    /// (memory 1) with a single-memory helper.
+    fn mem_func(entry: &[u8], mem_section: Vec<u8>, results: &[u8]) -> Vec<u8> {
+        let mut ty = vec![0x01u8, 0x60, 0x00];
+        ty.push(results.len() as u8);
+        ty.extend_from_slice(results);
+        asm(&[
+            (1, ty),
+            (3, vec![0x01, 0x00]),
+            (5, mem_section),
+            (7, vec![0x01, 0x01, b'a', 0x00, 0x00]),
+            (10, code1(entry)),
+        ])
+    }
+
+    #[test]
+    fn atomic_rmw_add() {
+        // store 10 @0; (rmw.add @0, 5) -> old 10; (atomic.load @0) -> 15; 10+15 = 25
+        let entry = [
+            0x00, //
+            0x41, 0x00, 0x41, 0x0a, 0x36, 0x02, 0x00, // i32.store [0] = 10
+            0x41, 0x00, 0x41, 0x05, 0xfe, 0x1e, 0x02, 0x00, // i32.atomic.rmw.add [0] 5 -> 10
+            0x41, 0x00, 0xfe, 0x10, 0x02, 0x00, // i32.atomic.load [0] -> 15
+            0x6a, // + -> 25
+            0x0b,
+        ];
+        let m = mem_func(&entry, vec![0x01, 0x00, 0x01], &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 25);
+    }
+
+    #[test]
+    fn atomic_cmpxchg() {
+        // store 7 @0; cmpxchg(@0, expect 7, repl 42) -> old 7; load @0 -> 42; 7+42 = 49
+        let entry = [
+            0x00, //
+            0x41, 0x00, 0x41, 0x07, 0x36, 0x02, 0x00, // i32.store [0] = 7
+            0x41, 0x00, 0x41, 0x07, 0x41, 0x2a, 0xfe, 0x48, 0x02, 0x00, // cmpxchg(7 -> 42) -> 7
+            0x41, 0x00, 0xfe, 0x10, 0x02, 0x00, // i32.atomic.load [0] -> 42
+            0x6a, // + -> 49
+            0x0b,
+        ];
+        let m = mem_func(&entry, vec![0x01, 0x00, 0x01], &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 49);
+    }
+
+    #[test]
+    fn atomic_unaligned_traps() {
+        // i32.atomic.load at addr 1 (not 4-aligned) -> UnalignedAtomic
+        let entry = [0x00, 0x41, 0x01, 0xfe, 0x10, 0x02, 0x00, 0x0b];
+        let m = mem_func(&entry, vec![0x01, 0x00, 0x01], &[0x7f]);
+        assert_eq!(run1(&m, "a", &[]), Err(Trap::UnalignedAtomic));
+    }
+
+    #[test]
+    fn atomic_wait_nonshared_traps() {
+        // memory.atomic.wait32 on a non-shared memory -> ExpectedSharedMemory
+        let entry = [
+            0x00, 0x41, 0x00, 0x41, 0x00, 0x42, 0x00, 0xfe, 0x01, 0x02, 0x00, 0x0b,
+        ];
+        let m = mem_func(&entry, vec![0x01, 0x00, 0x01], &[0x7f]);
+        assert_eq!(run1(&m, "a", &[]), Err(Trap::ExpectedSharedMemory));
+    }
+
+    #[test]
+    fn atomic_wait_shared_mismatch() {
+        // shared memory (flags 0x03: shared+max); wait32(@0, expect 5, timeout 0);
+        // mem[0]=0 != 5 -> returns 1 ("not equal")
+        let entry = [
+            0x00, 0x41, 0x00, 0x41, 0x05, 0x42, 0x00, 0xfe, 0x01, 0x02, 0x00, 0x0b,
+        ];
+        let m = mem_func(&entry, vec![0x01, 0x03, 0x01, 0x01], &[0x7f]); // shared, min 1, max 1
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 1);
     }
 
     #[test]

@@ -8,7 +8,7 @@ resolver = "3"
 members = ["crates/wasmrt-core", "crates/wasmrt-capi", "crates/wasmrt"]
 
 [workspace.package]
-version = "0.6.6"
+version = "0.6.7"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ repository = "https://github.com/jrmarcum/wasmrt"
 description = "An idiomatic-Rust WebAssembly runtime — a port of the Zig runtime wazmrt."
 
 [workspace.dependencies]
-wasmrt-core = { path = "crates/wasmrt-core", version = "0.6.6" }
+wasmrt-core = { path = "crates/wasmrt-core", version = "0.6.7" }
 
 # Shared lint posture — keep the port clean from the first line (cmem/testing.md discipline).
 [workspace.lints.clippy]

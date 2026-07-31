@@ -7,10 +7,10 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–7 (v0.6.0 integer,
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–8 (v0.6.0 integer,
 v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC, v0.6.5 SIMD,
-v0.6.6 multi-memory) DONE. Next: 0.6.x — threads → memory64 → EH + host imports; + the deferred 0.5.x
-validation arms.**
+v0.6.6 multi-memory, v0.6.7 threads/atomics) DONE. Next: 0.6.x — memory64 → EH + host imports; + the
+deferred 0.5.x validation arms.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -128,8 +128,17 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     routing (store/load to mem0 vs mem1), an active data segment (flag 2) initializing mem1, a
     cross-memory `memory.copy` — all pass. No new engine code; the deliverable is the proof + the flipped
     use-case cell. 89 core tests, clippy clean, native + wasm32 no_std. `[✅]`
-  - **0.6.x remaining slices (per the roadmap order below):** threads →
-    memory64 → EH. Also fold in host imports (WASI needs them) + the deferred 0.5.x validation arms.
+  - **Slice 8 — threads / atomics. ✅ DONE 2026-07-31 (v0.6.7).** The `0xFE` atomic family in a new
+    `exec_atomic`: atomic loads/stores (i32/i64 + 8/16/32-bit widths), RMW (add/sub/and/or/xor/xchg) +
+    cmpxchg, `memory.atomic.wait32`/`wait64`/`notify`, `atomic.fence`. **Single-threaded semantics**
+    (frozen-oracle parity): every access trivially atomic, `fence` a no-op, `wait*` never blocks (mismatch
+    → 1, match → 2 "timed out"), `notify` wakes 0. New: `shared` flag threaded onto `Memory` (from
+    `limits.shared`); two traps — **`UnalignedAtomic`** (atomic EA must be naturally aligned, stricter than
+    plain loads/stores) and **`ExpectedSharedMemory`** (`wait*` needs a shared memory). Ported from wazmrt
+    `interp.zig execAtomic`. 94 core tests (5 new: rmw.add, cmpxchg, unaligned trap, wait-nonshared trap,
+    wait-shared mismatch), clippy clean, native + wasm32 no_std. `[✅]`
+  - **0.6.x remaining slices (per the roadmap order below):** memory64 → EH. Also fold in host imports
+    (WASI needs them) + the deferred 0.5.x validation arms.
     Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant
   (`null_ref` before `i31_tag`); `#[cold]`/`#[inline(never)]` trap path with lazy byte-offset resolve;

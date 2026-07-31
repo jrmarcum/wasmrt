@@ -1,7 +1,7 @@
 # Known Issues
 
 Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–7 done, v0.1.0–v0.6.6). This records the **inherited concerns** from the frozen wazmrt oracle, the
+1–8 done, v0.1.0–v0.6.7). This records the **inherited concerns** from the frozen wazmrt oracle, the
 **port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
 Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
@@ -26,6 +26,14 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
   "small" ethos is about binary size). Scalars/refs live in the low 64 bits, so the `NULL_REF` (`u64::MAX`)
   / `I31_TAG` (`1<<63`) sentinel invariants are unchanged. Observable behavior identical → parity holds.
   A `const _: () = assert!(I31_TAG == 1u128 << 63)` guards the sentinel placement.
+- **Atomics execute with single-threaded semantics** (`interp.rs exec_atomic`, v0.6.7). The `0xFE` family
+  runs, but the engine has one thread: every atomic access is trivially atomic, `atomic.fence` is a no-op,
+  `memory.atomic.wait*` never blocks (value mismatch → 1 "not equal", match → 2 "timed out" since nothing
+  can `notify`), and `notify` wakes 0. This is a **conforming** implementation for a single-threaded host,
+  and matches the frozen oracle — genuine parallel execution is out of scope for the interpreter. Atomics
+  add two stricter-than-normal traps: `UnalignedAtomic` (the effective address must be naturally aligned
+  to the access width) and `ExpectedSharedMemory` (`wait*` requires a `shared` memory). The `shared` flag
+  is decoded (limits bit 1) and now threaded onto the runtime `Memory`.
 - **Multi-memory needed no new engine code** (v0.6.6). The memory-index plumbing was built generically in
   the linear-memory slice (0.6.2) — `Vec<Memory>`, `memarg` memory index, `require_memory` in validate,
   cross-memory `memory.copy`, flag-`0x02` data segments, per-memory instantiation. v0.6.6's deliverable is

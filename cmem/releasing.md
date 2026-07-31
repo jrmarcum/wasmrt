@@ -110,17 +110,17 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-07-31)
 
-- **Published through v0.6.6.** `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io at each
-  released version (T0 v0.1.0 → T3 v0.4.0 → T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear
-  memory v0.6.2 → tables/reftypes v0.6.3 → WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6). The owner
-  runs each publish; the rhythm (implement → **full-doc prep** → owner publishes) holds. **v0.6.4 onward
-  run under the pre-publish doc-sync gate, and each v0.6.4+ GitHub release was created automatically by the
-  tag-triggered `.github/workflows/release.yml`** (push the `v*` tag → the release + notes publish
-  themselves).
+- **Published through v0.6.6; v0.6.7 (threads/atomics) is prepped and awaiting the owner's publish.**
+  `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io through v0.6.6 (T0 v0.1.0 → T3 v0.4.0 →
+  T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
+  WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6). The owner runs each publish; the rhythm (implement →
+  **full-doc prep** → owner publishes) holds. **v0.6.4 onward run under the pre-publish doc-sync gate, and
+  each v0.6.4+ GitHub release was created automatically by the tag-triggered `.github/workflows/release.yml`**
+  (push the `v*` tag → the release + notes publish themselves).
 - **Still worth doing (nice-to-have, not blocking):** per-crate crates.io **listing metadata** —
   `keywords` (webassembly/wasm/runtime/interpreter/wasi), `categories` (`wasm`, `development-tools`,
   `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
   rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
   the published crates and add them on a future release if not.
-- **Next release after v0.6.6: v0.6.7 (T5 slice 8, threads/atomics).** Per-release checklist above — full
-  doc sync before the publish handoff.
+- **Next release after v0.6.7: v0.6.8 (T5 slice 9, memory64).** Per-release checklist above — full doc
+  sync before the publish handoff.

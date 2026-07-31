@@ -7,12 +7,13 @@ which already runs the full WebAssembly spec testsuite and a large WASI corpus. 
 **reference oracle**; wasmrt is finished when it reproduces the oracle feature-for-feature, verified by
 parity testing at every step.
 
-> **Status: early — `0.6.6`.** wasmrt can now **decode**, **type-check**, and **run** a WebAssembly
+> **Status: early — `0.6.7`.** wasmrt can now **decode**, **type-check**, and **run** a WebAssembly
 > module — `wasmrt run fac.wasm fac 10` → `3628800`. Execution currently covers integer + floating-point
 > compute, linear memory (incl. **multi-memory**), tables / `call_indirect` / reference types, **WasmGC**
-> (structs, arrays, `i31`, casts), and **SIMD** (the full `v128` set, incl. relaxed); threads, memory64,
-> and the rest land slice by slice. See **[ROADMAP.md](ROADMAP.md)** for the live use-case matrix (what
-> actually works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
+> (structs, arrays, `i31`, casts), **SIMD** (the full `v128` set, incl. relaxed), and **atomics** (the
+> threads proposal, single-threaded semantics); memory64 and exception handling land next. See
+> **[ROADMAP.md](ROADMAP.md)** for the live use-case matrix (what actually works today) and
+> **[CHANGELOG.md](CHANGELOG.md)** for release notes.
 
 ## Goals
 

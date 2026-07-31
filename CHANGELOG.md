@@ -11,8 +11,25 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next (0.6.x interpreter slices): threads/atomics, memory64, and exception handling — plus host imports
-(for WASI). Plus the deferred 0.5.x validation arms._
+_Next (0.6.x interpreter slices): memory64 and exception handling — plus host imports (for WASI). Plus
+the deferred 0.5.x validation arms._
+
+## [0.6.7] — Interpreter: threads / atomics (stage T5, slice 8)
+
+### Added
+- Execution for the **threads proposal's atomic operations** (the `0xFE` family): atomic loads/stores
+  (`i32`/`i64` and the 8/16/32-bit widths), the read-modify-write ops (`add`/`sub`/`and`/`or`/`xor`/
+  `xchg`) and `cmpxchg`, `memory.atomic.wait32`/`wait64`/`notify`, and `atomic.fence`. A `shared` memory
+  (limits flag) is now tracked through instantiation.
+- Two new traps: **unaligned atomic access** (an atomic's effective address must be naturally aligned to
+  its width — stricter than ordinary loads/stores) and **`wait*` on a non-shared memory**.
+
+### Notes
+- **Single-threaded semantics** (matching the frozen wazmrt oracle): every atomic access is trivially
+  atomic and `atomic.fence` is a no-op. `wait*` never blocks — a value mismatch returns `1` ("not
+  equal"), a match returns `2` ("timed out", since no other thread can `notify`); `notify` always wakes
+  `0`. This is a conforming implementation for a single-threaded engine; genuine multi-threaded execution
+  is out of scope for the interpreter.
 
 ## [0.6.6] — Interpreter: multi-memory (stage T5, slice 7)
 

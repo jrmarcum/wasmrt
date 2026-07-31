@@ -18,9 +18,11 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Current test state (2026-07-31, through T5 slice 7 / v0.6.6)
+## Current test state (2026-07-31, through T5 slice 8 / v0.6.7)
 
-**89 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+**94 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+atomics slice added 5 — `i32.atomic.rmw.add`, `cmpxchg`, an unaligned-atomic trap, a `wait*`-on-non-shared
+trap, and a `wait32`-on-shared mismatch (returns 1). The
 SIMD slice added 10 hand-built vectors — splat+extract, `v128.const`+extract_lane_u, `i32x4.add`,
 `i32x4.eq`+bitmask, `i32x4.shl`, `f32x4.add`, `i8x16.add_sat_s` (saturation), `v128.load`/`store`
 round-trip, a `v128` struct field, and a `v128` global — representative of each op category (full
