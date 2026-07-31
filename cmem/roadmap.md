@@ -7,8 +7,9 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core DONE (v0.1.0–v0.5.0); next: 0.5.x (deferred
-validation arms) → T5 (interp).**
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 first slice (v0.6.0, integer
+compute) DONE. Next: 0.6.x execution slices (float+memory next) + fold in the deferred 0.5.x validation
+arms.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -70,7 +71,20 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   runner); at T4 the gate is the ported oracle hand-vectors + no over-acceptance on the core set. `[◐]`
   - **0.5.x follow-up:** port the deferred validation arms — `simd_sig`, atomic typing, GC struct/array/
     cast typing, EH (`try_table`/`throw`/legacy) — + the SIMD/atomic natural-align tables. Then T5. `[ ]`
-- **T5 — `interp` (the switch interpreter).** Untyped `u64` slots; the slot-encoding order invariant
+- **T5 — `interp` (the switch interpreter). ◐ FIRST SLICE DONE 2026-07-28 (v0.6.0): integer compute.**
+  Ported the value model (`u64` slots), `Instance`/instantiation (decode bodies + `precompute_control_flow`
+  end_of/else_of + eval global inits), `Frame` + `branch` (label stack) + the `run` dispatch loop, and
+  `exec_numeric` for **i32/i64** arith/compare/bitwise/shift/rotate/extend/wrap. Control flow
+  (block/loop/if/else/br/br_if/br_table/return), direct `call` incl. **recursion** (depth-capped),
+  `local.*`/`global.*`/drop/select/const. **Rust ownership:** split immutable `module`/`func_bodies`
+  from `&mut globals` so recursive `call` reborrows cleanly; `Instance` owns its `Module`. CLI **`wasmrt
+  run <file> <fn> [args]`** (verified: `fac 10`→3628800, `add 40 2`→42). Deferred ops trap loudly
+  (`UnsupportedInstruction`); import-free modules only. 60 core tests (add/fac/loop-sum/traps/i64),
+  clippy clean, native + wasm32 no_std. `[◐]`
+  - **0.6.x slices (per the roadmap order below):** float arith + linear memory → tables/reftypes → GC →
+    SIMD → multi-memory → threads → memory64 → EH. Also fold in host imports (WASI needs them) + the
+    deferred 0.5.x validation arms. Original T5 detail:
+- **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant
   (`null_ref` before `i31_tag`); `#[cold]`/`#[inline(never)]` trap path with lazy byte-offset resolve;
   shared `Memory`/`Table` (`Rc<RefCell>`, `Cell<u32>` refcount — single-thread ABI); `Instance` retains
   its `Module` (UAF fix). Build in tested slices mirroring wazmrt: int/float/control → memory/globals →

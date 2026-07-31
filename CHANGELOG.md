@@ -11,8 +11,30 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: 0.5.x — validation typing for SIMD, threads/atomics, GC objects, and exception handling
-(the deferred arms), then 0.6.0 — the interpreter (T5)._
+_Next (0.6.x interpreter slices): float arithmetic + linear memory, then tables/reference types,
+GC, SIMD, threads, and exception handling. Plus the deferred 0.5.x validation arms._
+
+## [0.6.0] — Interpreter: integer compute (stage T5, first slice)
+
+wasmrt can now **run** a WebAssembly function — `wasmrt run <file.wasm> <fn> [args...]`.
+
+### Added
+- `wasmrt-core::interp` — a switch-dispatched interpreter over the IR (untyped `u64` value slots;
+  validation has proven the types). `Instance::new` instantiates an import-free module (decodes each
+  body, precomputes control-flow targets, evaluates global initializers); `invoke` runs an exported
+  function.
+- Execution for the **integer-compute** language: i32/i64 arithmetic, comparison, bitwise, shifts/rotates,
+  sign-extension and wrap/extend conversions; structured control flow (`block`/`loop`/`if`/`else`/`br`/
+  `br_if`/`br_table`/`return`); direct `call` including **recursion** (depth-capped); `local.*`,
+  `global.*`, `drop`, `select`, and constants. Integer div/rem trap on zero and `INT_MIN / -1`.
+- **`wasmrt run`** — parses arguments to the export's parameter types and prints the typed results
+  (e.g. `wasmrt run fac.wasm fac 10` → `3628800`).
+
+### Scope
+- This first slice is **integer compute**. Float arithmetic, linear memory, tables, reference types,
+  GC, SIMD, threads, and exception handling execute in later 0.6.x slices; until then those ops **trap
+  loudly** (`UnsupportedInstruction`), never silent-wrong. Modules with imports aren't runnable yet
+  (`ImportsUnsupported`).
 
 ## [0.5.0] — Validator, core language (stage T4)
 
@@ -109,7 +131,8 @@ First release: the crate exists and the build is real on every target surface. N
 - Size-first release profile; builds verified on native (CLI + static lib + cdylib) and freestanding
   `wasm32-unknown-unknown` (no_std, libc-free).
 
-[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jrmarcum/wasmrt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jrmarcum/wasmrt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jrmarcum/wasmrt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jrmarcum/wasmrt/compare/v0.2.0...v0.3.0
