@@ -1,0 +1,60 @@
+name: release
+
+# Create a GitHub Release from the CHANGELOG whenever a version tag is pushed.
+# Publishing to crates.io stays manual for now (the owner runs `cargo publish`);
+# see cmem/releasing.md. This job only automates the "GitHub release + notes" step,
+# so it needs no secrets — the built-in GITHUB_TOKEN is enough.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Extract this version's CHANGELOG section
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          PRE="## [${VERSION}]"
+
+          # Body: everything under the "## [x.y.z]" heading up to the next section.
+          # Literal-string matching (index==1), so brackets/dots need no escaping.
+          awk -v pre="$PRE" '
+            index($0, pre) == 1 { f = 1; next }
+            f && index($0, "## [") == 1 { exit }
+            f { print }
+          ' CHANGELOG.md > notes.md
+
+          if [ ! -s notes.md ]; then
+            echo "::error::No CHANGELOG section found for ${PRE} — refusing to publish an empty release."
+            exit 1
+          fi
+
+          # Title = the heading line without the leading "## " (quote the pattern so
+          # the "##" is not parsed as bash's longest-prefix operator).
+          HEADING="$(awk -v pre="$PRE" 'index($0, pre) == 1 { print; exit }' CHANGELOG.md)"
+          echo "title=${HEADING#'## '}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          TITLE: ${{ steps.notes.outputs.title }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes-file notes.md \
+            --verify-tag

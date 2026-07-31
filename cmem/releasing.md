@@ -72,12 +72,20 @@ owner does 7–9.
    handoff — everything above is already committed, so the published artifact captures it.)*
 7. **(Owner) Publish in dependency order** (crates.io requires deps published first):
    `cargo publish -p wasmrt-core` → `-p wasmrt-capi` → `-p wasmrt`. (`cargo release` orders this.)
-8. **(Owner) Tag + GitHub release**: `git tag vX.Y.Z`; `gh release create vX.Y.Z` with the CHANGELOG
-   section as notes.
-9. **(Owner) Push** `origin main` + the tag.
+8. **(Owner) Tag + push** — `git tag vX.Y.Z` then `git push origin main --tags`. **Pushing the `v*` tag
+   fires `.github/workflows/release.yml`, which extracts this version's `CHANGELOG.md` section and creates
+   the GitHub Release automatically** — no manual `gh release create`. (The workflow uses the built-in
+   `GITHUB_TOKEN`; no secret needed. It **fails loudly** if the CHANGELOG has no `## [X.Y.Z]` section, so
+   step 2 must already be committed — which the pre-publish gate guarantees.)
 
 ## Tooling
 
+- **`.github/workflows/release.yml`** (in place since v0.6.4): a tag-triggered GitHub Action. Push a
+  `v*` tag → it extracts the matching `CHANGELOG.md` `## [X.Y.Z]` section (literal-string match, no regex
+  escaping) and runs `gh release create` with those notes. Secret-free (built-in `GITHUB_TOKEN`). This is
+  the **only** CI automation so far — deliberately scoped to the GitHub-release step; **`cargo publish`
+  remains manual** (needs the owner's crates.io token, and the owner chose not to build CI publishing up
+  front). To add crate publishing later, extend this workflow with a `CRATES_IO_TOKEN` repo secret.
 - **`cargo-release`** (recommended): workspace-aware — bumps the shared version, syncs the internal dep
   pin, publishes in order, tags. `cargo install cargo-release`; then `cargo release minor` (or `patch`
   for an interp slice). Not yet installed as of 2026-07-27.
