@@ -8,8 +8,8 @@ which already runs the full WebAssembly spec testsuite and a large WASI corpus. 
 parity testing at every step.
 
 > **Status: early — `0.6.0`.** wasmrt can now **decode**, **type-check**, and **run** a WebAssembly
-> module — `wasmrt run fac.wasm fac 10` → `3628800`. Execution currently covers integer compute; float,
-> linear memory, and the rest land slice by slice. See **[ROADMAP.md](ROADMAP.md)** for the live use-case
+> module — `wasmrt run fac.wasm fac 10` → `3628800`. Execution currently covers integer and floating-point
+> compute; linear memory and the rest land slice by slice. See **[ROADMAP.md](ROADMAP.md)** for the live use-case
 > matrix (what actually works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
 
 ## Goals

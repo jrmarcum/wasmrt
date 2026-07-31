@@ -11,8 +11,23 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next (0.6.x interpreter slices): float arithmetic + linear memory, then tables/reference types,
-GC, SIMD, threads, and exception handling. Plus the deferred 0.5.x validation arms._
+_Next (0.6.x interpreter slices): linear memory, then tables/reference types, GC, SIMD, threads, and
+exception handling. Plus the deferred 0.5.x validation arms._
+
+## [0.6.1] — Interpreter: float arithmetic (stage T5, slice 2)
+
+### Added
+- Execution for f32/f64: arithmetic (`add`/`sub`/`mul`/`div`), NaN-propagating `min`/`max` (with correct
+  signed-zero results), `abs`/`neg`/`copysign`, comparison, and rounding (`ceil`/`floor`/`trunc`/`nearest`
+  with ties-to-even); float↔int conversions — trapping (`trunc_f*`) and saturating (`trunc_sat_f*`),
+  `convert_*`, `demote`/`promote`, and `reinterpret`. So `wasmrt run` now handles floating-point compute
+  (`wasmrt run fadd.wasm add 1.5 2.25` → `3.75`).
+- Rounding is implemented with bit manipulation, so it works in the freestanding `no_std` build too.
+
+### Notes
+- `sqrt` uses the platform math library and so is available with the default `std` feature; a
+  freestanding `no_std` build traps on `sqrt` until a software implementation lands. Everything else float
+  is `no_std`-clean.
 
 ## [0.6.0] — Interpreter: integer compute (stage T5, first slice)
 
@@ -131,7 +146,8 @@ First release: the crate exists and the build is real on every target surface. N
 - Size-first release profile; builds verified on native (CLI + static lib + cdylib) and freestanding
   `wasm32-unknown-unknown` (no_std, libc-free).
 
-[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/jrmarcum/wasmrt/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jrmarcum/wasmrt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jrmarcum/wasmrt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jrmarcum/wasmrt/compare/v0.3.0...v0.4.0

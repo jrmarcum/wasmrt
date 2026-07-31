@@ -7,9 +7,9 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 first slice (v0.6.0, integer
-compute) DONE. Next: 0.6.x execution slices (float+memory next) + fold in the deferred 0.5.x validation
-arms.**
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–2 (v0.6.0 integer
+compute, v0.6.1 float) DONE. Next: 0.6.x — linear memory, then the rest + fold in the deferred 0.5.x
+validation arms.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -81,7 +81,12 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   run <file> <fn> [args]`** (verified: `fac 10`→3628800, `add 40 2`→42). Deferred ops trap loudly
   (`UnsupportedInstruction`); import-free modules only. 60 core tests (add/fac/loop-sum/traps/i64),
   clippy clean, native + wasm32 no_std. `[◐]`
-  - **0.6.x slices (per the roadmap order below):** float arith + linear memory → tables/reftypes → GC →
+  - **Slice 2 — float arith. ✅ DONE 2026-07-28 (v0.6.1).** f32/f64 arith/compare/`min`/`max` (NaN-prop +
+    signed-zero)/`abs`/`neg`/`copysign`/rounding (bit-based `ceil`/`floor`/`trunc`/`nearest` ties-to-even)
+    + float↔int trapping & saturating (Rust's `as` cast matches wasm sat exactly) + demote/promote/
+    reinterpret. **`sqrt` is `std`-gated** (platform libm; no_std build traps on sqrt only — everything
+    else float is no_std-clean). 65 core tests, clippy clean.
+  - **0.6.x remaining slices (per the roadmap order below):** linear memory NEXT → tables/reftypes → GC →
     SIMD → multi-memory → threads → memory64 → EH. Also fold in host imports (WASI needs them) + the
     deferred 0.5.x validation arms. Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant

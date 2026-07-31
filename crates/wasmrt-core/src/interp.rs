@@ -67,6 +67,8 @@ pub enum Trap {
     Unreachable,
     DivByZero,
     IntOverflow,
+    /// A trapping float→int conversion of NaN, infinity, or an out-of-range value.
+    InvalidConversionToInt,
     CallStackExhausted,
     UndefinedExport,
     BadArgCount,
@@ -97,6 +99,7 @@ impl fmt::Display for Trap {
             Trap::Unreachable => f.write_str("unreachable executed"),
             Trap::DivByZero => f.write_str("integer divide by zero"),
             Trap::IntOverflow => f.write_str("integer overflow"),
+            Trap::InvalidConversionToInt => f.write_str("invalid conversion to integer"),
             Trap::CallStackExhausted => f.write_str("call stack exhausted"),
             Trap::UndefinedExport => f.write_str("no such exported function"),
             Trap::BadArgCount => f.write_str("wrong number of arguments"),
@@ -291,6 +294,18 @@ impl Frame<'_> {
     }
     fn pop_i64(&mut self) -> i64 {
         as_i64(self.pop())
+    }
+    fn push_f32(&mut self, v: f32) {
+        self.push(f32_value(v));
+    }
+    fn pop_f32(&mut self) -> f32 {
+        as_f32(self.pop())
+    }
+    fn push_f64(&mut self, v: f64) {
+        self.push(f64_value(v));
+    }
+    fn pop_f64(&mut self) -> f64 {
+        as_f64(self.pop())
     }
 
     fn stack_base(&self, n: usize) -> Result<usize> {
@@ -676,9 +691,459 @@ fn exec_numeric(frame: &mut Frame, op: Op) -> Result<()> {
             frame.push_i64(i64::from(v as u32)); // i64.extend_i32_u
         }
 
+        _ => return exec_float(frame, op),
+    }
+    Ok(())
+}
+
+/// Float arithmetic / comparison / conversion opcodes (IEEE 754). Rounding ops use bit
+/// manipulation (no_std-clean); `sqrt` is gated behind `std`. Saturating float→int uses
+/// Rust's `as` cast, which matches wasm exactly (NaN→0, saturates to min/max).
+fn exec_float(frame: &mut Frame, op: Op) -> Result<()> {
+    match op as u8 {
+        // f32 / f64 comparison (result i32) — IEEE ordering; NaN compares false (ne true).
+        0x5b..=0x60 => {
+            let b = frame.pop_f32();
+            let a = frame.pop_f32();
+            frame.push_i32(i32::from(fcmp(op as u8 - 0x5b, f64::from(a), f64::from(b))));
+        }
+        0x61..=0x66 => {
+            let b = frame.pop_f64();
+            let a = frame.pop_f64();
+            frame.push_i32(i32::from(fcmp(op as u8 - 0x61, a, b)));
+        }
+
+        // f32 unary
+        0x8b => {
+            let v = frame.pop_f32();
+            frame.push_f32(fabs_f32(v));
+        }
+        0x8c => {
+            let v = frame.pop_f32();
+            frame.push_f32(-v);
+        }
+        0x8d => {
+            let v = frame.pop_f32();
+            frame.push_f32(ceil_f32(v));
+        }
+        0x8e => {
+            let v = frame.pop_f32();
+            frame.push_f32(floor_f32(v));
+        }
+        0x8f => {
+            let v = frame.pop_f32();
+            frame.push_f32(trunc_f32(v));
+        }
+        0x90 => {
+            let v = frame.pop_f32();
+            frame.push_f32(nearest_f32(v));
+        }
+        0x91 => {
+            let v = frame.pop_f32();
+            frame.push_f32(sqrt_f32(v)?);
+        }
+        // f32 binary
+        0x92..=0x98 => {
+            let b = frame.pop_f32();
+            let a = frame.pop_f32();
+            frame.push_f32(fbin_f32(op as u8, a, b));
+        }
+
+        // f64 unary
+        0x99 => {
+            let v = frame.pop_f64();
+            frame.push_f64(fabs_f64(v));
+        }
+        0x9a => {
+            let v = frame.pop_f64();
+            frame.push_f64(-v);
+        }
+        0x9b => {
+            let v = frame.pop_f64();
+            frame.push_f64(ceil_f64(v));
+        }
+        0x9c => {
+            let v = frame.pop_f64();
+            frame.push_f64(floor_f64(v));
+        }
+        0x9d => {
+            let v = frame.pop_f64();
+            frame.push_f64(trunc_f64(v));
+        }
+        0x9e => {
+            let v = frame.pop_f64();
+            frame.push_f64(nearest_f64(v));
+        }
+        0x9f => {
+            let v = frame.pop_f64();
+            frame.push_f64(sqrt_f64(v)?);
+        }
+        // f64 binary
+        0xa0..=0xa6 => {
+            let b = frame.pop_f64();
+            let a = frame.pop_f64();
+            frame.push_f64(fbin_f64(op as u8, a, b));
+        }
+
+        // Float → int, trapping.
+        0xa8 => {
+            let t = trap_trunc_f32(frame.pop_f32(), -2_147_483_648.0, 2_147_483_648.0)?;
+            frame.push_i32(t as i32);
+        }
+        0xa9 => {
+            let t = trap_trunc_f32(frame.pop_f32(), 0.0, 4_294_967_296.0)?;
+            frame.push_i32(t as u32 as i32);
+        }
+        0xaa => {
+            let t = trap_trunc_f64(frame.pop_f64(), -2_147_483_648.0, 2_147_483_648.0)?;
+            frame.push_i32(t as i32);
+        }
+        0xab => {
+            let t = trap_trunc_f64(frame.pop_f64(), 0.0, 4_294_967_296.0)?;
+            frame.push_i32(t as u32 as i32);
+        }
+        0xae => {
+            let t = trap_trunc_f32(frame.pop_f32(), -9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0)?;
+            frame.push_i64(t as i64);
+        }
+        0xaf => {
+            let t = trap_trunc_f32(frame.pop_f32(), 0.0, 18_446_744_073_709_551_616.0)?;
+            frame.push_i64(t as u64 as i64);
+        }
+        0xb0 => {
+            let t = trap_trunc_f64(frame.pop_f64(), -9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0)?;
+            frame.push_i64(t as i64);
+        }
+        0xb1 => {
+            let t = trap_trunc_f64(frame.pop_f64(), 0.0, 18_446_744_073_709_551_616.0)?;
+            frame.push_i64(t as u64 as i64);
+        }
+
+        // Int → float
+        0xb2 => {
+            let v = frame.pop_i32();
+            frame.push_f32(v as f32);
+        }
+        0xb3 => {
+            let v = frame.pop_i32();
+            frame.push_f32(v as u32 as f32);
+        }
+        0xb4 => {
+            let v = frame.pop_i64();
+            frame.push_f32(v as f32);
+        }
+        0xb5 => {
+            let v = frame.pop_i64();
+            frame.push_f32(v as u64 as f32);
+        }
+        0xb6 => {
+            let v = frame.pop_f64();
+            frame.push_f32(v as f32); // f32.demote_f64
+        }
+        0xb7 => {
+            let v = frame.pop_i32();
+            frame.push_f64(f64::from(v));
+        }
+        0xb8 => {
+            let v = frame.pop_i32();
+            frame.push_f64(f64::from(v as u32));
+        }
+        0xb9 => {
+            let v = frame.pop_i64();
+            frame.push_f64(v as f64);
+        }
+        0xba => {
+            let v = frame.pop_i64();
+            frame.push_f64(v as u64 as f64);
+        }
+        0xbb => {
+            let v = frame.pop_f32();
+            frame.push_f64(f64::from(v)); // f64.promote_f32
+        }
+
+        // Reinterpret: the u64 slot already holds the bit pattern, so these are identity.
+        0xbc..=0xbf => {}
+
+        // Float → int, saturating (Rust's `as` matches wasm: NaN→0, saturates).
+        0xc5 => {
+            let v = frame.pop_f32();
+            frame.push_i32(v as i32);
+        }
+        0xc6 => {
+            let v = frame.pop_f32();
+            frame.push_i32(v as u32 as i32);
+        }
+        0xc7 => {
+            let v = frame.pop_f64();
+            frame.push_i32(v as i32);
+        }
+        0xc8 => {
+            let v = frame.pop_f64();
+            frame.push_i32(v as u32 as i32);
+        }
+        0xc9 => {
+            let v = frame.pop_f32();
+            frame.push_i64(v as i64);
+        }
+        0xca => {
+            let v = frame.pop_f32();
+            frame.push_i64(v as u64 as i64);
+        }
+        0xcb => {
+            let v = frame.pop_f64();
+            frame.push_i64(v as i64);
+        }
+        0xcc => {
+            let v = frame.pop_f64();
+            frame.push_i64(v as u64 as i64);
+        }
+
         _ => return Err(Trap::UnsupportedInstruction),
     }
     Ok(())
+}
+
+/// Float comparison, keyed by the offset within its 6-op group (eq/ne/lt/gt/le/ge). Done in
+/// f64 (an f32 comparison widens losslessly and orders identically).
+fn fcmp(rel: u8, a: f64, b: f64) -> bool {
+    match rel {
+        0 => a == b,
+        1 => a != b,
+        2 => a < b,
+        3 => a > b,
+        4 => a <= b,
+        _ => a >= b, // ge
+    }
+}
+
+fn fbin_f32(op: u8, a: f32, b: f32) -> f32 {
+    match op {
+        0x92 => a + b,
+        0x93 => a - b,
+        0x94 => a * b,
+        0x95 => a / b,
+        0x96 => fmin_f32(a, b),
+        0x97 => fmax_f32(a, b),
+        _ => fcopysign_f32(a, b), // 0x98 copysign
+    }
+}
+fn fbin_f64(op: u8, a: f64, b: f64) -> f64 {
+    match op {
+        0xa0 => a + b,
+        0xa1 => a - b,
+        0xa2 => a * b,
+        0xa3 => a / b,
+        0xa4 => fmin_f64(a, b),
+        0xa5 => fmax_f64(a, b),
+        _ => fcopysign_f64(a, b), // 0xa6 copysign
+    }
+}
+
+// --- Float helpers (bit-manipulation; no_std-clean) --------------------------
+
+fn fabs_f32(x: f32) -> f32 {
+    f32::from_bits(x.to_bits() & 0x7fff_ffff)
+}
+fn fabs_f64(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & 0x7fff_ffff_ffff_ffff)
+}
+fn fcopysign_f32(x: f32, y: f32) -> f32 {
+    f32::from_bits((x.to_bits() & 0x7fff_ffff) | (y.to_bits() & 0x8000_0000))
+}
+fn fcopysign_f64(x: f64, y: f64) -> f64 {
+    f64::from_bits((x.to_bits() & 0x7fff_ffff_ffff_ffff) | (y.to_bits() & 0x8000_0000_0000_0000))
+}
+
+/// wasm `fmin`: NaN-propagating, and `min(+0,-0) == -0` (sign-bit OR).
+fn fmin_f32(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    if a < b {
+        a
+    } else if b < a {
+        b
+    } else {
+        f32::from_bits(a.to_bits() | b.to_bits())
+    }
+}
+fn fmin_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a < b {
+        a
+    } else if b < a {
+        b
+    } else {
+        f64::from_bits(a.to_bits() | b.to_bits())
+    }
+}
+/// wasm `fmax`: NaN-propagating, and `max(+0,-0) == +0` (sign-bit AND).
+fn fmax_f32(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    if a > b {
+        a
+    } else if b > a {
+        b
+    } else {
+        f32::from_bits(a.to_bits() & b.to_bits())
+    }
+}
+fn fmax_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a > b {
+        a
+    } else if b > a {
+        b
+    } else {
+        f64::from_bits(a.to_bits() & b.to_bits())
+    }
+}
+
+fn trunc_f32(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let exp = ((bits >> 23) & 0xff) as i32 - 127;
+    if exp < 0 {
+        return f32::from_bits(bits & 0x8000_0000); // |x| < 1 → ±0
+    }
+    if exp >= 23 {
+        return x; // already integer, or inf/nan
+    }
+    let mask = (1u32 << (23 - exp)) - 1;
+    f32::from_bits(bits & !mask)
+}
+fn trunc_f64(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i64 - 1023;
+    if exp < 0 {
+        return f64::from_bits(bits & 0x8000_0000_0000_0000);
+    }
+    if exp >= 52 {
+        return x;
+    }
+    let mask = (1u64 << (52 - exp)) - 1;
+    f64::from_bits(bits & !mask)
+}
+fn floor_f32(x: f32) -> f32 {
+    let t = trunc_f32(x);
+    if x < 0.0 && x != t {
+        t - 1.0
+    } else {
+        t
+    }
+}
+fn floor_f64(x: f64) -> f64 {
+    let t = trunc_f64(x);
+    if x < 0.0 && x != t {
+        t - 1.0
+    } else {
+        t
+    }
+}
+fn ceil_f32(x: f32) -> f32 {
+    let t = trunc_f32(x);
+    if x > 0.0 && x != t {
+        t + 1.0
+    } else {
+        t
+    }
+}
+fn ceil_f64(x: f64) -> f64 {
+    let t = trunc_f64(x);
+    if x > 0.0 && x != t {
+        t + 1.0
+    } else {
+        t
+    }
+}
+/// wasm `nearest`: round to nearest, ties to even, preserving the sign of zero and quieting
+/// a NaN operand.
+fn nearest_f32(x: f32) -> f32 {
+    if x.is_nan() {
+        return f32::from_bits(x.to_bits() | 0x0040_0000); // set the quiet bit
+    }
+    if !x.is_finite() {
+        return x;
+    }
+    let f = floor_f32(x);
+    let diff = x - f;
+    // Round up when past the halfway point, or exactly halfway with an odd floor (ties→even).
+    let r = if diff > 0.5 || (diff == 0.5 && f % 2.0 != 0.0) {
+        f + 1.0
+    } else {
+        f
+    };
+    if r == 0.0 {
+        return fcopysign_f32(0.0, x); // a rounded-to-zero result keeps x's sign
+    }
+    r
+}
+fn nearest_f64(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::from_bits(x.to_bits() | 0x0008_0000_0000_0000);
+    }
+    if !x.is_finite() {
+        return x;
+    }
+    let f = floor_f64(x);
+    let diff = x - f;
+    let r = if diff > 0.5 || (diff == 0.5 && f % 2.0 != 0.0) {
+        f + 1.0
+    } else {
+        f
+    };
+    if r == 0.0 {
+        return fcopysign_f64(0.0, x); // a rounded-to-zero result keeps x's sign
+    }
+    r
+}
+
+/// Trapping float→int range check: NaN or `trunc(x) ∉ [lo, hi)` traps; else returns
+/// `trunc(x)` for the caller to cast (in range, the cast is exact).
+fn trap_trunc_f32(x: f32, lo: f32, hi: f32) -> Result<f32> {
+    if x.is_nan() {
+        return Err(Trap::InvalidConversionToInt);
+    }
+    let t = trunc_f32(x);
+    if t < lo || t >= hi {
+        return Err(Trap::InvalidConversionToInt);
+    }
+    Ok(t)
+}
+fn trap_trunc_f64(x: f64, lo: f64, hi: f64) -> Result<f64> {
+    if x.is_nan() {
+        return Err(Trap::InvalidConversionToInt);
+    }
+    let t = trunc_f64(x);
+    if t < lo || t >= hi {
+        return Err(Trap::InvalidConversionToInt);
+    }
+    Ok(t)
+}
+
+/// `f32.sqrt` / `f64.sqrt`. Correctly-rounded sqrt needs the platform math library, so it is
+/// available with the `std` feature (the default); a freestanding `no_std` build traps until
+/// a software sqrt lands.
+#[cfg(feature = "std")]
+fn sqrt_f32(x: f32) -> Result<f32> {
+    Ok(x.sqrt())
+}
+#[cfg(feature = "std")]
+fn sqrt_f64(x: f64) -> Result<f64> {
+    Ok(x.sqrt())
+}
+#[cfg(not(feature = "std"))]
+fn sqrt_f32(_x: f32) -> Result<f32> {
+    Err(Trap::UnsupportedInstruction)
+}
+#[cfg(not(feature = "std"))]
+fn sqrt_f64(_x: f64) -> Result<f64> {
+    Err(Trap::UnsupportedInstruction)
 }
 
 fn cmp_i32(op: u8, a: i32, b: i32) -> bool {
@@ -976,6 +1441,62 @@ mod tests {
         let m = single_func(&[0x7e, 0x7e], &[0x7e], &entry, "mul");
         let r = run1(&m, "mul", &[i64_value(1_000_000), i64_value(1_000_000)]).unwrap();
         assert_eq!(as_i64(r[0]), 1_000_000_000_000);
+    }
+
+    #[test]
+    fn runs_f64_add() {
+        // (func (param f64 f64) (result f64) local.get 0  local.get 1  f64.add)
+        let entry = [0x00, 0x20, 0x00, 0x20, 0x01, 0xa0, 0x0b];
+        let m = single_func(&[0x7c, 0x7c], &[0x7c], &entry, "add");
+        let r = run1(&m, "add", &[f64_value(1.5), f64_value(2.25)]).unwrap();
+        assert_eq!(as_f64(r[0]), 3.75);
+    }
+
+    #[test]
+    fn nearest_rounds_ties_to_even() {
+        assert_eq!(nearest_f64(2.5), 2.0);
+        assert_eq!(nearest_f64(3.5), 4.0);
+        assert_eq!(nearest_f64(-2.5), -2.0);
+        assert_eq!(nearest_f64(0.4), 0.0);
+        // -0.5 rounds to -0.0 (sign of zero preserved).
+        assert_eq!(nearest_f64(-0.5).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(nearest_f32(2.5), 2.0);
+        assert_eq!(nearest_f32(3.5), 4.0);
+    }
+
+    #[test]
+    fn min_max_nan_and_signed_zero() {
+        assert!(fmin_f32(f32::NAN, 1.0).is_nan());
+        assert!(fmax_f32(1.0, f32::NAN).is_nan());
+        // min(+0,-0) = -0 ; max(+0,-0) = +0.
+        assert_eq!(fmin_f32(0.0, -0.0).to_bits(), (-0.0f32).to_bits());
+        assert_eq!(fmax_f32(0.0, -0.0).to_bits(), (0.0f32).to_bits());
+        assert_eq!(fmin_f64(2.0, 3.0), 2.0);
+        assert_eq!(fmax_f64(2.0, 3.0), 3.0);
+    }
+
+    #[test]
+    fn trunc_floor_ceil() {
+        assert_eq!(trunc_f64(2.7), 2.0);
+        assert_eq!(trunc_f64(-2.7), -2.0);
+        assert_eq!(floor_f64(-2.1), -3.0);
+        assert_eq!(ceil_f64(2.1), 3.0);
+        assert_eq!(trunc_f32(-0.9).to_bits(), (-0.0f32).to_bits());
+    }
+
+    #[test]
+    fn float_to_int_traps_and_saturates() {
+        // i32.trunc_f64_s traps on an out-of-range value; i32.trunc_sat clamps.
+        let trap_entry = [0x00, 0x20, 0x00, 0xaa, 0x0b]; // local.get 0 ; i32.trunc_f64_s
+        let mt = single_func(&[0x7c], &[0x7f], &trap_entry, "t");
+        assert_eq!(run1(&mt, "t", &[f64_value(1e300)]), Err(Trap::InvalidConversionToInt));
+        assert_eq!(as_i32(run1(&mt, "t", &[f64_value(42.9)]).unwrap()[0]), 42);
+
+        // i32.trunc_sat_f64_s (0xfc 0x02) saturates instead of trapping.
+        let sat_entry = [0x00, 0x20, 0x00, 0xfc, 0x02, 0x0b];
+        let ms = single_func(&[0x7c], &[0x7f], &sat_entry, "s");
+        assert_eq!(as_i32(run1(&ms, "s", &[f64_value(1e300)]).unwrap()[0]), i32::MAX);
+        assert_eq!(as_i32(run1(&ms, "s", &[f64_value(f64::NAN)]).unwrap()[0]), 0);
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {
