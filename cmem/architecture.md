@@ -4,7 +4,14 @@ The Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate
 pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
 `00-synthesis.md`, `02-decode-core.md`, `03-validate-interp.md`, `06-build-docs-licensing.md`).
 
-**Realized so far (through T3 / v0.4.0):** the workspace + all three crates exist; `wasmrt-core` has
+**Realized so far (through T5 slice 2 / v0.6.1):** the workspace + all three crates exist; `wasmrt-core`
+has `types`, `reader`, `opcode`, `module` (decode), `validate` (core-language type-checker), and `interp`
+(switch interpreter — integer + float compute) implemented and parity-tested; `text` / `wasi` / `pin`
+are still stubs, filled in bottom-up per `roadmap.md`. The CLI does summarize + validate + `run`. Two
+idiomatic divergences worth noting: owned `Vec`/`String` data (frees on drop, no arena/`deinit`), and the
+interpreter's module/globals borrow split (recursive `call` reborrows cleanly, no `RefCell`).
+
+_(Earlier snapshot, superseded:)_ Through T3 / v0.4.0: the workspace + all three crates exist; `wasmrt-core` has
 `types`, `reader`, `opcode` (the shared IR + `decode_body`), and `module` (full binary decode)
 implemented and parity-tested. `validate` / `interp` / text / `wasi` / `pin` are still stubs, filled in
 bottom-up per `roadmap.md`. One idiomatic divergence worth noting: the decoder uses **owned `Vec`/`String`

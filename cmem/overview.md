@@ -17,13 +17,13 @@ Only tail calls have no wazmrt oracle → conform those against **wasmtime + the
 (see [testing.md](testing.md), [design-decisions.md](design-decisions.md)). Full deep-read of wazmrt is
 in `docs/port/00-synthesis.md` (+ 6 subsystem maps).
 
-## Status (2026-07-28) — PORT phase; decode pipeline landing
+## Status (2026-07-28) — PORT phase; **decode → validate → run all working**
 
 The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the port is underway,
 released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
 **memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
 
-**Done — T0–T3 (v0.1.0 → v0.4.0):**
+**Done — T0–T5-first-slices (v0.1.0 → v0.6.1):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
   surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
 - **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`
@@ -31,10 +31,18 @@ released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope a
 - **T2 (v0.3.0)** — `opcode` (the complete shared `Op`/`Imm`/`Instr` table + `decode_body`, all four
   prefix families).
 - **T3 (v0.4.0)** — `module` (full binary decode of every core section; owned data model). **`wasmrt
-  <file.wasm>` decodes a module and prints a summary** — the first user-facing command.
+  <file.wasm>` decodes + summarizes.**
+- **T4 core (v0.5.0)** — `validate` (spec §3 type-checker: value/control stacks, module-level checks,
+  const-expr, C.refs). **Core language done; SIMD/atomics/GC-objects/EH typing deferred to 0.5.x**
+  (deferred ops reject loudly). CLI prints a validation verdict.
+- **T5 slices 1–2 (v0.6.0 integer, v0.6.1 float)** — `interp` (switch interpreter over the IR). **`wasmrt
+  run <file> <fn> [args]` runs integer + floating-point compute** (control flow, recursion, locals,
+  globals, all i32/i64/f32/f64 ops incl. NaN-correct min/max, ties-to-even nearest, trap/sat conversions).
 
-**Next: T4 (validate)** — the spec §3 type-checker, bottom-up and parity-gated. See the task list in
-[roadmap.md](roadmap.md). ~45 core unit tests green; clippy clean; native + `wasm32` no_std all build.
+**Next: 0.6.x slice 3 — linear memory** (loads/stores, `memory.size`/`grow`, bulk memory, data-segment
+init), then tables/reftypes/GC/SIMD/threads/memory64/EH + host imports; plus the deferred 0.5.x validation
+arms. See the task list in [roadmap.md](roadmap.md). **65 core unit tests** green; clippy clean; native +
+`wasm32` no_std all build.
 
 ## Planned repo / crate layout
 

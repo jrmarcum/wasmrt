@@ -67,7 +67,7 @@ later). Decide A→B with benchmarks, not upfront.
 - **Pin verify hashes the in-memory bytes it runs** (bytes-hashed == bytes-run); `enforce` denies
   before consulting the opt-out; DB parse fails closed.
 
-## Port-implementation decisions (as built, T0–T3)
+## Port-implementation decisions (as built, T0–T5)
 
 Choices made while porting; consistent with "boundary-faithful behavior, idiomatic-Rust internals."
 
@@ -81,8 +81,16 @@ Choices made while porting; consistent with "boundary-faithful behavior, idiomat
   wire/internal list; **immediates that own data hold a `Vec`**, so dropping the IR frees them (replaces
   wazmrt's manual `freeBody`). The internal-tag-vs-wire-byte invariant is preserved (raw `0xD7`–`0xFA`
   rejected). Raw `0xC5`–`0xCC` accepted as sat-trunc to mirror the oracle (see [known-issues.md](known-issues.md)).
-- **CLI `summarize`** (`wasmrt <file.wasm>`) landed early with T3 — faithful to wazmrt's "summarize a
-  module" CLI role; run/validate/wasi come at their tasks.
+- **CLI grows with the pipeline** — `wasmrt <file>` summarizes + validates (T3/T4); `wasmrt run <file>
+  <fn> [args]` executes (T5), parsing args to the export's param types. Faithful to wazmrt's CLI role.
+- **Sliced the two correctness-critical, hard-to-test-early modules** (owner-approved): **T4 validate**
+  and **T5 interp** land core-first with the exotic proposal arms deferred to `.x` patch releases, because
+  each is a trustworthiness promise and most of their tests need the WAT assembler (T6). Deferred ops
+  **reject loudly**, never silent-accept. See [known-issues.md](known-issues.md).
+- **Interpreter internals** (T5): untyped `u64` value slots; `Instance` **owns** its `Module`; the
+  immutable `module`/`func_bodies` are threaded separately from `&mut globals` so a recursive `call`
+  reborrows cleanly (no `RefCell`); control flow via a precomputed `end_of`/`else_of` table + a label
+  stack. Float rounding is bit-manipulation (no_std); **`sqrt` is `std`-gated** (the one no_std float gap).
 - **Versioning = port-progress ladder**, per-task release to crates.io (see [releasing.md](releasing.md)).
 
 ## Open decisions — now carried as task-list GATES (owner, 2026-07-27: defer, don't resolve up front)

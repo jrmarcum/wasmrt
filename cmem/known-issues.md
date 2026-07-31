@@ -1,24 +1,36 @@
 # Known Issues
 
-Issue tracker. Gate open (2026-07-27); the decode pipeline is landing (T0–T3 done, v0.1.0–v0.4.0). This
-records the **inherited concerns** from the frozen wazmrt oracle, the **port notes / intentional
-divergences** logged so far, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
-(file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
+Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
+1–2 done, v0.1.0–v0.6.1). This records the **inherited concerns** from the frozen wazmrt oracle, the
+**port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
+Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
-## Port notes / intentional divergences (T0–T3)
+## Port notes / intentional divergences (T0–T5)
 
-- **Owned `Vec`/`String` data model instead of wazmrt's arena** (`module.rs`, T3). A `Module` frees on
-  drop — no `deinit`, no allocator-error threading. Observable behavior identical; it's an
-  idiomatic-Rust internal choice (design-decisions "boundary-faithful, idiomatic internals").
-- **Raw single-byte `0xC5`–`0xCC` accepted as saturating-truncation ops** (`opcode.rs`, T2), mirroring
-  the wazmrt oracle (their canonical encoding is `0xFC 0x00`–`0x07`). Kept for parity; re-examine against
-  the spec suite at T6 (raw single-byte forms are arguably not valid encodings — a latent oracle
-  over-acceptance we chose to replicate rather than diverge on).
-- **Deferred, tracked** (land with their consumer, not dropped): the `fc`/`gc` reverse maps + natural-
-  align tables (validator T4 / assembler T6); `decode_body_tracked` byte-offsets for trap backtraces
-  (T5/T8). Recorded in `roadmap.md` T2.
-- **`select_t` note:** a `0xd7`–`0xfa` raw byte and an undefined value-type byte are hard-rejected at
-  decode (`UnsupportedOpcode` / `BadValType`) — the "fail loud, not silent-wrong" rule holds.
+- **Owned `Vec`/`String` data model instead of wazmrt's arena** (`module.rs` T3, `interp.rs` T5). Frees
+  on drop — no `deinit`, no allocator-error threading. `Instance` **owns** its `Module` (the retain-invariant,
+  free). Observable behavior identical; an idiomatic-Rust internal choice.
+- **Interpreter borrow split** (`interp.rs`, T5): immutable `module`/`func_bodies` are threaded separately
+  from `&mut globals`, so a recursive `call` reborrows cleanly — no `RefCell`, no self-referential borrow.
+- **Two slices were split core-first, exotic-later** because they're a correctness promise AND their
+  exotic tests need the WAT assembler (T6): **T4 validate** (core language now; SIMD/atomics/GC-objects/EH
+  typing → 0.5.x) and **T5 interp** (integer v0.6.0 → float v0.6.1 → memory/tables/GC/SIMD/threads/EH in
+  later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
+  never silent-accept — so a verdict/result is always trustworthy.
+- **`sqrt` is `std`-gated** (`interp.rs`, T5 float): uses the platform math lib with the default `std`
+  feature; a freestanding `no_std` build traps on `sqrt` alone. The one no_std float gap — revisit with a
+  software sqrt (or `libm`, if the zero-dep stance relaxes) when the freestanding-wasm target is finished.
+- **Rust `f as int` == wasm saturating truncation** (`interp.rs`, T5 float): NaN→0 + saturate-to-min/max
+  matches `trunc_sat_*` exactly, so those 8 ops are one-liners. Noted so nobody "fixes" it into a manual
+  clamp.
+- **`interp` runs import-free modules only for now** (`ImportsUnsupported`). Host imports (which WASI
+  needs) fold in during the 0.6.x execution slices.
+- **Raw single-byte `0xC5`–`0xCC` accepted as saturating-truncation ops** (`opcode.rs`, T2), mirroring the
+  wazmrt oracle (canonical encoding is `0xFC 0x00`–`0x07`). Kept for parity; re-examine against the spec
+  suite at T6.
+- **Deferred, tracked** (land with their consumer): the `fc`/`gc` reverse maps + SIMD/atomic natural-align
+  tables (assembler T6 / the 0.5.x validation arms); `decode_body_tracked` byte-offsets for trap
+  backtraces (T8). `natural_align_log2` already landed (T4).
 - No real wasmrt *bugs* logged yet. Each release is parity-gated (ported oracle vectors) + clippy-clean.
 
 ## Inherited from wazmrt — relevant to the port

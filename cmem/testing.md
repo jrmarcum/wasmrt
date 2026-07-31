@@ -18,15 +18,22 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Current test state (2026-07-28, through T3 / v0.4.0)
+## Current test state (2026-07-28, through T5 slice 2 / v0.6.1)
 
-**~45 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
-per-slice method has held: each task ports **wazmrt's own test vectors 1:1** (T1 LEB accept/reject +
-ValType bit ops; T2 `decode_body` vectors incl. prefix/rejection; T3 the 15 module decode/malformed
-vectors) plus a few extras. The oracle's `wasm_mod` corpus lives on removable media, so the ported
-oracle unit tests stand in for it; T3 was additionally smoke-checked by decoding a real `add.wasm`
-through the CLI. The `.wast`/spec-testsuite conformance gates below come online at **T6** (text
-toolchain); the C-ABI/Miri gates at **T8**.
+**65 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+per-slice method has held: each task ports **wazmrt's own test vectors 1:1** where they're hand-buildable
+(T1 LEB accept/reject + ValType bit ops; T2 `decode_body` vectors incl. prefix/rejection; T3 the 15
+module decode/malformed vectors; T4 9 validator vectors; T5 add/factorial/loop-sum + traps + the delicate
+float helpers directly — nearest ties-even, NaN min/max, trunc/floor/ceil, trap/sat conversions), plus a
+few extras and end-to-end CLI runs (`add.wasm`, `fac.wasm`, `fadd.wasm`). The oracle's `wasm_mod` corpus
+lives on removable media, so the ported oracle unit tests stand in for it.
+
+**Two constraints shape T4/T5 coverage** (recorded so future slices plan for them): (1) most of the
+validator's tests and the interpreter's spec vectors need the **WAT assembler**, which doesn't exist
+until **T6** — so exotic validate/exec arms can't be verified until then. (2) That's exactly why T4/T5
+were **sliced** (core-first, exotic-later) with deferred ops rejecting loudly. The `.wast`/spec-testsuite
+conformance gates come online at **T6** (text toolchain) and are where SIMD/GC/atomics/EH validation +
+execution finally get real coverage; the C-ABI/Miri gates at **T8**.
 
 ## Test layers (mirror wazmrt, ported)
 
