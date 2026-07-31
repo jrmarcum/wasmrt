@@ -1,7 +1,7 @@
 # Known Issues
 
 Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–3 done, v0.1.0–v0.6.2). This records the **inherited concerns** from the frozen wazmrt oracle, the
+1–4 done, v0.1.0–v0.6.3). This records the **inherited concerns** from the frozen wazmrt oracle, the
 **port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
 Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
@@ -14,8 +14,8 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
   from `&mut globals`, so a recursive `call` reborrows cleanly — no `RefCell`, no self-referential borrow.
 - **Two slices were split core-first, exotic-later** because they're a correctness promise AND their
   exotic tests need the WAT assembler (T6): **T4 validate** (core language now; SIMD/atomics/GC-objects/EH
-  typing → 0.5.x) and **T5 interp** (integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/GC/SIMD/
-  threads/EH in later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
+  typing → 0.5.x) and **T5 interp** (integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes
+  v0.6.3 → GC/SIMD/threads/EH in later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
   never silent-accept — so a verdict/result is always trustworthy.
 - **`sqrt` is `std`-gated** (`interp.rs`, T5 float): uses the platform math lib with the default `std`
   feature; a freestanding `no_std` build traps on `sqrt` alone. The one no_std float gap — revisit with a
