@@ -6,6 +6,7 @@
 use std::process::ExitCode;
 
 use wasmrt_core::module::{self, Extern, Module};
+use wasmrt_core::validate::{validate, ValidateError};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -90,5 +91,14 @@ fn print_summary(path: &str, m: &Module) {
             };
             println!("    {kind:<7} {}", e.name);
         }
+    }
+    match validate(m) {
+        Ok(()) => println!("  validation OK"),
+        // Deferred typing arm (SIMD / atomics / GC objects / EH) — not a verdict on the
+        // module, just a gap in this release's validator.
+        Err(ValidateError::UnsupportedValidation) => {
+            println!("  validation SKIPPED (uses a construct the validator can't check yet)");
+        }
+        Err(e) => println!("  validation FAILED: {e}"),
     }
 }

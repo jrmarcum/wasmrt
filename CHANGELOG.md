@@ -11,7 +11,32 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: 0.5.0 — the spec type-checking validator (T4)._
+_Next: 0.5.x — validation typing for SIMD, threads/atomics, GC objects, and exception handling
+(the deferred arms), then 0.6.0 — the interpreter (T5)._
+
+## [0.5.0] — Validator, core language (stage T4)
+
+wasmrt now **type-checks** a module against the WebAssembly spec (§3) — `wasmrt <file.wasm>` reports
+`validation OK` / `FAILED`.
+
+### Added
+- `wasmrt-core::validate` — the spec validation algorithm (an abstract operand-value stack + a
+  control-frame stack with a bottom `unknown` for unreachable code), plus module-level checks:
+  function/code count match, const-expr typing (globals, element/data offsets), element & data segment
+  rules, memory/table limits (§3.2.5), tag types, pairwise-distinct export names, the start signature,
+  and the `C.refs` undeclared-function-reference rule (§3.4.10).
+- Per-op typing for the **core language**: control flow, `call`/`call_indirect`/`call_ref`, parametric
+  (`drop`/`select`), variable + local-initialization tracking, references (`ref.null`/`func`/`is_null`/
+  `as_non_null`/`br_on_null`/`br_on_non_null`/`eq`/`i31`), tables, bulk memory, and all loads/stores/
+  numeric ops — with load/store alignment and per-memory (memory64) address typing.
+- Resource caps (max control depth, max locals) that refuse amplification a tiny module could drive.
+- `wasmrt <file.wasm>` now prints a validation verdict alongside the summary.
+
+### Scope
+- Validation typing for **SIMD, threads/atomics, GC struct/array objects + casts, and exception
+  handling is deferred to v0.5.x** (it gets real coverage against the spec testsuite at T6). Those ops
+  **reject loudly** (`UnsupportedValidation` → the CLI prints "validation SKIPPED") rather than
+  silently accept — so an "OK" verdict is always trustworthy.
 
 ## [0.4.0] — Module decode (stage T3)
 
@@ -84,7 +109,8 @@ First release: the crate exists and the build is real on every target surface. N
 - Size-first release profile; builds verified on native (CLI + static lib + cdylib) and freestanding
   `wasm32-unknown-unknown` (no_std, libc-free).
 
-[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jrmarcum/wasmrt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jrmarcum/wasmrt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jrmarcum/wasmrt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jrmarcum/wasmrt/compare/v0.1.0...v0.2.0

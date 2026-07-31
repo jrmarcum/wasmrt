@@ -419,6 +419,37 @@ fn simd_lane_count(sub: u32) -> u8 {
     }
 }
 
+/// The natural alignment of a scalar memory access, **as a log2 exponent** (the form the
+/// memarg carries): 0 for 8-bit, 1 for 16-bit, 2 for 32-bit, 3 for 64-bit. The validator
+/// rejects a memarg whose alignment exceeds this (§6.5.8); the assembler defaults a missing
+/// `align=` to it. (SIMD/atomic natural-alignment tables land with their validation arms.)
+#[must_use]
+pub fn natural_align_log2(op: Op) -> u32 {
+    match op {
+        Op::I32Load8S
+        | Op::I32Load8U
+        | Op::I64Load8S
+        | Op::I64Load8U
+        | Op::I32Store8
+        | Op::I64Store8 => 0,
+        Op::I32Load16S
+        | Op::I32Load16U
+        | Op::I64Load16S
+        | Op::I64Load16U
+        | Op::I32Store16
+        | Op::I64Store16 => 1,
+        Op::I32Load
+        | Op::F32Load
+        | Op::I32Store
+        | Op::F32Store
+        | Op::I64Load32S
+        | Op::I64Load32U
+        | Op::I64Store32 => 2,
+        Op::I64Load | Op::F64Load | Op::I64Store | Op::F64Store => 3,
+        _ => 0,
+    }
+}
+
 /// Highest `0xFD` sub-opcode wasmrt decodes — the tail of the relaxed-SIMD range.
 const MAX_SIMD_SUB: u32 = 0x113;
 
@@ -465,8 +496,9 @@ fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
 }
 
 /// Read a heap type (§ GC binary format): a non-negative `s33` is a concrete type index;
-/// negative values are the abstract heap-type codes.
-fn read_heap_type(r: &mut Reader) -> DecodeResult<HeapType> {
+/// negative values are the abstract heap-type codes. Public because the validator reads it
+/// from a `ref.null` constant expression.
+pub fn read_heap_type(r: &mut Reader) -> DecodeResult<HeapType> {
     let v = r.read_var_s33()?;
     if v >= 0 {
         if v > u32::MAX as i64 {

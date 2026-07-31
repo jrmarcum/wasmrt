@@ -7,7 +7,8 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE (v0.1.0–v0.4.0); next is T4 (validate).**
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core DONE (v0.1.0–v0.5.0); next: 0.5.x (deferred
+validation arms) → T5 (interp).**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -57,9 +58,18 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   summary (+ `-h`/`-v`). **Gate met:** wazmrt's 15 decode/rejection vectors ported 1:1; verified on a
   real `add.wasm` via the CLI; 45 core tests, clippy clean, native + `wasm32` no_std green. (`wasm_mod`
   corpus lives on removable media — the ported oracle tests stand in for it.) `[x]`
-- **T4 — `validate`.** Spec type-checker over the IR (value + control-frame stacks) + module-level checks
-  (const-exprs, select/if/call_indirect/alignment/memory-presence, `memAddrTy` per-memory index type).
-  Gate: `assert_invalid`/`assert_malformed` parity vs the spec testsuite; no over-acceptance. `[ ]`
+- **T4 — `validate`. ◐ CORE DONE 2026-07-28 (v0.5.0); exotic arms → 0.5.x.** The spec §3 validation
+  algorithm (value + control-frame stacks, `unknown` bottom), `subtype_of`, `simple_sig`, module-level
+  checks (count-match, const-expr typing, elements/data, limits §3.2.5, tags, dup-exports, start,
+  `C.refs`), local-init tracking, `natural_align_log2` (the deferred T2 table), per-memory (memory64)
+  address typing. **Owner decision (2026-07-28):** land the **core language** now (MVP/refs/bulk-memory/
+  tables/i31 — hand-testable), **defer SIMD/atomics/GC-objects+casts/EH typing to 0.5.x** (real coverage
+  at T6 via the spec suite). Deferred ops reject loudly (`UnsupportedValidation`), never silent-accept.
+  CLI prints a validation verdict. 54 core tests, clippy clean, native + `wasm32` no_std green.
+  **Gate note:** `assert_invalid`/`assert_malformed` spec-suite parity is the T6 gate (needs the `.wast`
+  runner); at T4 the gate is the ported oracle hand-vectors + no over-acceptance on the core set. `[◐]`
+  - **0.5.x follow-up:** port the deferred validation arms — `simd_sig`, atomic typing, GC struct/array/
+    cast typing, EH (`try_table`/`throw`/legacy) — + the SIMD/atomic natural-align tables. Then T5. `[ ]`
 - **T5 — `interp` (the switch interpreter).** Untyped `u64` slots; the slot-encoding order invariant
   (`null_ref` before `i31_tag`); `#[cold]`/`#[inline(never)]` trap path with lazy byte-offset resolve;
   shared `Memory`/`Table` (`Rc<RefCell>`, `Cell<u32>` refcount — single-thread ABI); `Instance` retains
