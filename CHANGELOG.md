@@ -11,8 +11,26 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next (0.6.x interpreter slices): linear memory, then tables/reference types, GC, SIMD, threads, and
-exception handling. Plus the deferred 0.5.x validation arms._
+_Next (0.6.x interpreter slices): tables/reference types, GC, SIMD, threads, and exception handling —
+plus host imports (for WASI). Plus the deferred 0.5.x validation arms._
+
+## [0.6.2] — Interpreter: linear memory (stage T5, slice 3)
+
+### Added
+- Execution for linear memory: all loads/stores (i32/i64/f32/f64, the 8/16/32-bit widths with sign/zero
+  extension), `memory.size`/`memory.grow`, the bulk ops (`memory.copy`/`fill`/`init`, `data.drop`), and
+  **active data-segment initialization at instantiation**. Effective addresses are computed and
+  bounds-checked overflow-safely, with per-memory (memory64) address typing.
+- A per-instance memory budget (1 GiB default) bounds a hostile declaration/grow. Memory is
+  `alloc_zeroed`-backed, so a large declared minimum costs address space, not resident memory (matching
+  the oracle's demand-zero behavior without a raw page allocator).
+
+So `wasmrt run` now executes functions that use linear memory — a value stored into memory and loaded
+back round-trips correctly.
+
+### Changed
+- The interpreter's mutable runtime state (globals, memories, dropped-data flags) is now bundled in a
+  `Store` threaded as `&mut`, so a recursive `call` reborrows it cleanly.
 
 ## [0.6.1] — Interpreter: float arithmetic (stage T5, slice 2)
 
@@ -146,7 +164,8 @@ First release: the crate exists and the build is real on every target surface. N
 - Size-first release profile; builds verified on native (CLI + static lib + cdylib) and freestanding
   `wasm32-unknown-unknown` (no_std, libc-free).
 
-[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/jrmarcum/wasmrt/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/jrmarcum/wasmrt/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jrmarcum/wasmrt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jrmarcum/wasmrt/compare/v0.4.0...v0.5.0

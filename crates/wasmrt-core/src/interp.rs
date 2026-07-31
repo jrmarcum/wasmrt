@@ -61,6 +61,32 @@ pub fn as_f64(v: Value) -> f64 {
 /// Cap on guest call depth (a `call` recurses natively, so this bounds host stack use).
 const MAX_CALL_DEPTH: usize = 512;
 
+/// WebAssembly linear-memory page size (64 KiB).
+pub const PAGE_SIZE: usize = 64 * 1024;
+
+/// Default ceiling on total linear memory per instance (summed across memories), applied at
+/// instantiation and at `memory.grow`. A tiny module can declare gigabytes, so this bounds a
+/// hostile input. 1 GiB is far above any realistic guest.
+const DEFAULT_MAX_MEMORY_BYTES: usize = 1 << 30;
+
+/// Shared linear memory. `bytes` is `alloc_zeroed`-backed (demand-zero pages on mainstream
+/// OSes), so a large declared minimum costs address space, not resident memory.
+pub struct Memory {
+    pub bytes: Vec<u8>,
+    pub max: Option<u64>,
+    pub is64: bool,
+}
+
+/// The mutable runtime state of an instance, threaded as `&mut` through execution so a
+/// recursive `call` reborrows it cleanly.
+struct Store {
+    globals: Vec<Value>,
+    memories: Vec<Memory>,
+    /// `data_dropped[i]` marks a data segment consumed — active segments are dropped once
+    /// instantiation copies them in (§4.5.4); `data.drop` marks a passive one.
+    data_dropped: Vec<bool>,
+}
+
 /// A runtime trap or an execution-setup error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trap {
@@ -77,6 +103,14 @@ pub enum Trap {
     UndefinedLabel,
     StackUnderflow,
     UnbalancedControl,
+    /// A memory instruction in a module with no linear memory (or a bad memory index).
+    NoMemory,
+    /// A memory access (or data-segment init) outside the memory bounds.
+    MemoryOutOfBounds,
+    /// The declared/grown linear memory exceeds this instance's budget.
+    MemoryLimitExceeded,
+    /// A `memory.init` / `data.drop` data-segment index out of range.
+    UndefinedData,
     /// A constant expression used an opcode this slice doesn't evaluate.
     ConstantExpr,
     /// An opcode this interpreter slice does not execute yet (float/memory/tables/GC/SIMD/EH).
@@ -108,6 +142,10 @@ impl fmt::Display for Trap {
             Trap::UndefinedLabel => f.write_str("branch label out of range"),
             Trap::StackUnderflow => f.write_str("operand stack underflow"),
             Trap::UnbalancedControl => f.write_str("unbalanced control instruction"),
+            Trap::NoMemory => f.write_str("no linear memory"),
+            Trap::MemoryOutOfBounds => f.write_str("out of bounds memory access"),
+            Trap::MemoryLimitExceeded => f.write_str("memory exceeds the instance budget"),
+            Trap::UndefinedData => f.write_str("data segment index out of range"),
             Trap::ConstantExpr => f.write_str("unsupported constant expression"),
             Trap::UnsupportedInstruction => {
                 f.write_str("instruction not executed in this release (float/memory/tables/GC/SIMD/EH)")
@@ -140,11 +178,11 @@ struct FuncBody {
 pub struct Instance {
     module: Module,
     func_bodies: Vec<FuncBody>,
-    globals: Vec<Value>,
+    store: Store,
 }
 
-/// Immutable execution context (read-only during a call); `globals` is threaded separately as
-/// `&mut` so a recursive `call` reborrows it cleanly.
+/// Immutable execution context (read-only during a call); the mutable [`Store`] is threaded
+/// separately as `&mut` so a recursive `call` reborrows it cleanly.
 struct Ctx<'a> {
     module: &'a Module,
     func_bodies: &'a [FuncBody],
@@ -167,6 +205,44 @@ impl Instance {
             globals.push(v);
         }
 
+        // Linear memories: allocate each defined memory sized to its declared minimum
+        // (demand-zero via `vec![0; n]`), bounded by the per-instance budget.
+        let mut memories: Vec<Memory> = Vec::with_capacity(module.memories.len());
+        let mut total_bytes: usize = 0;
+        for mt in &module.memories {
+            let min_pages = usize::try_from(mt.limits.min).map_err(|_| Trap::MemoryLimitExceeded)?;
+            let nbytes = min_pages
+                .checked_mul(PAGE_SIZE)
+                .ok_or(Trap::MemoryLimitExceeded)?;
+            total_bytes = total_bytes
+                .checked_add(nbytes)
+                .filter(|&t| t <= DEFAULT_MAX_MEMORY_BYTES)
+                .ok_or(Trap::MemoryLimitExceeded)?;
+            memories.push(Memory {
+                bytes: vec![0u8; nbytes],
+                max: mt.limits.max,
+                is64: mt.limits.is64,
+            });
+        }
+
+        // Apply active data segments, then mark them (and only them) dropped (§4.5.4).
+        for seg in &module.data {
+            if !seg.active {
+                continue;
+            }
+            let mem = memories
+                .get_mut(seg.mem_index as usize)
+                .ok_or(Trap::NoMemory)?;
+            let offset = eval_const_offset(&seg.offset_expr, &globals, mem.is64)?;
+            let start = usize::try_from(offset).map_err(|_| Trap::MemoryOutOfBounds)?;
+            let end = start
+                .checked_add(seg.bytes.len())
+                .filter(|&e| e <= mem.bytes.len())
+                .ok_or(Trap::MemoryOutOfBounds)?;
+            mem.bytes[start..end].copy_from_slice(&seg.bytes);
+        }
+        let data_dropped: Vec<bool> = module.data.iter().map(|s| s.active).collect();
+
         // Prepare each defined function: decode its body + precompute control flow.
         let mut func_bodies = Vec::with_capacity(module.functions.len());
         for (&type_index, code) in module.functions.iter().zip(&module.code) {
@@ -186,7 +262,11 @@ impl Instance {
         Ok(Instance {
             module,
             func_bodies,
-            globals,
+            store: Store {
+                globals,
+                memories,
+                data_dropped,
+            },
         })
     }
 
@@ -222,7 +302,7 @@ impl Instance {
             module: &self.module,
             func_bodies: &self.func_bodies,
         };
-        call_function(&ctx, &mut self.globals, func_index, args, 1)
+        call_function(&ctx, &mut self.store, func_index, args, 1)
     }
 }
 
@@ -307,6 +387,14 @@ impl Frame<'_> {
     fn pop_f64(&mut self) -> f64 {
         as_f64(self.pop())
     }
+    /// Pop a memory address/count: i64 for a memory64 memory, else i32 (zero-extended).
+    fn pop_mem(&mut self, is64: bool) -> u64 {
+        if is64 {
+            self.pop_i64() as u64
+        } else {
+            u64::from(self.pop_i32() as u32)
+        }
+    }
 
     fn stack_base(&self, n: usize) -> Result<usize> {
         self.vstack.len().checked_sub(n).ok_or(Trap::StackUnderflow)
@@ -352,7 +440,7 @@ fn block_arity(ctx: &Ctx, bt: BlockType, want_params: bool) -> u32 {
 
 fn call_function(
     ctx: &Ctx,
-    globals: &mut [Value],
+    store: &mut Store,
     func_index: u32,
     args: &[Value],
     depth: usize,
@@ -379,14 +467,14 @@ fn call_function(
             stack_base: 0,
         }],
     };
-    run(&mut frame, ctx, globals, depth)?;
+    run(&mut frame, ctx, store, depth)?;
 
     let n = body.ty.results.len();
     let base = frame.stack_base(n)?;
     Ok(frame.vstack[base..].to_vec())
 }
 
-fn run(frame: &mut Frame, ctx: &Ctx, globals: &mut [Value], depth: usize) -> Result<()> {
+fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<()> {
     let body = frame.body;
     let ir = &body.ir;
     let mut pc = 0usize;
@@ -460,7 +548,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, globals: &mut [Value], depth: usize) -> Res
                 let Imm::Global(gi) = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                let v = *globals.get(gi as usize).ok_or(Trap::UndefinedGlobal)?;
+                let v = *store.globals.get(gi as usize).ok_or(Trap::UndefinedGlobal)?;
                 frame.push(v);
                 pc += 1;
             }
@@ -469,7 +557,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, globals: &mut [Value], depth: usize) -> Res
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let v = frame.pop();
-                *globals.get_mut(gi as usize).ok_or(Trap::UndefinedGlobal)? = v;
+                *store.globals.get_mut(gi as usize).ok_or(Trap::UndefinedGlobal)? = v;
                 pc += 1;
             }
 
@@ -557,9 +645,61 @@ fn run(frame: &mut Frame, ctx: &Ctx, globals: &mut [Value], depth: usize) -> Res
                 let np = ft.params.len();
                 let base = frame.stack_base(np)?;
                 let args = frame.vstack[base..].to_vec();
-                let results = call_function(ctx, globals, f, &args, depth + 1)?;
+                let results = call_function(ctx, store, f, &args, depth + 1)?;
                 frame.vstack.truncate(base);
                 frame.vstack.extend_from_slice(&results);
+                pc += 1;
+            }
+
+            // --- Linear memory (loads/stores, size/grow) ---
+            Op::I32Load
+            | Op::I64Load
+            | Op::F32Load
+            | Op::F64Load
+            | Op::I32Load8S
+            | Op::I32Load8U
+            | Op::I32Load16S
+            | Op::I32Load16U
+            | Op::I64Load8S
+            | Op::I64Load8U
+            | Op::I64Load16S
+            | Op::I64Load16U
+            | Op::I64Load32S
+            | Op::I64Load32U
+            | Op::I32Store
+            | Op::I64Store
+            | Op::F32Store
+            | Op::F64Store
+            | Op::I32Store8
+            | Op::I32Store16
+            | Op::I64Store8
+            | Op::I64Store16
+            | Op::I64Store32
+            | Op::MemorySize
+            | Op::MemoryGrow => {
+                exec_memory(frame, store, instr)?;
+                pc += 1;
+            }
+            Op::MemoryCopy => {
+                exec_memory_copy(frame, store, instr)?;
+                pc += 1;
+            }
+            Op::MemoryFill => {
+                exec_memory_fill(frame, store, instr)?;
+                pc += 1;
+            }
+            Op::MemoryInit => {
+                exec_memory_init(frame, ctx, store, instr)?;
+                pc += 1;
+            }
+            Op::DataDrop => {
+                let Imm::Data(d) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                *store
+                    .data_dropped
+                    .get_mut(d as usize)
+                    .ok_or(Trap::UndefinedData)? = true;
                 pc += 1;
             }
 
@@ -593,6 +733,280 @@ fn block_type(instr: &Instr) -> Result<BlockType> {
     } else {
         Err(Trap::UnsupportedInstruction)
     }
+}
+
+/// Overflow-safe range check: is `base + n <= len`? Returns `base` as `usize` (then `< len`,
+/// so it fits) or `None` for out-of-bounds.
+fn mem_range(base: u64, n: u64, len: usize) -> Option<usize> {
+    if base.checked_add(n)? > len as u64 {
+        return None;
+    }
+    usize::try_from(base).ok()
+}
+
+/// Read `n` (1..=8) bytes little-endian from memory `ma.memory` at (popped address + offset),
+/// zero-extended into a `u64`. The caller sign/zero-extends into the target slot.
+fn load_bytes(frame: &mut Frame, store: &Store, ma: crate::opcode::MemArg, n: usize) -> Result<u64> {
+    let mem = store.memories.get(ma.memory as usize).ok_or(Trap::NoMemory)?;
+    let addr = frame.pop_mem(mem.is64);
+    let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
+    let end = ea.checked_add(n as u64).ok_or(Trap::MemoryOutOfBounds)?;
+    if end > mem.bytes.len() as u64 {
+        return Err(Trap::MemoryOutOfBounds);
+    }
+    let start = ea as usize;
+    let mut v = 0u64;
+    for (i, &b) in mem.bytes[start..start + n].iter().enumerate() {
+        v |= u64::from(b) << (8 * i);
+    }
+    Ok(v)
+}
+
+/// Write the low `n` bytes of `val` little-endian to memory `ma.memory`. The value was already
+/// popped by the caller; this pops the address.
+fn store_bytes(
+    frame: &mut Frame,
+    store: &mut Store,
+    ma: crate::opcode::MemArg,
+    n: usize,
+    val: u64,
+) -> Result<()> {
+    let mem = store.memories.get_mut(ma.memory as usize).ok_or(Trap::NoMemory)?;
+    let addr = frame.pop_mem(mem.is64);
+    let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
+    let end = ea.checked_add(n as u64).ok_or(Trap::MemoryOutOfBounds)?;
+    if end > mem.bytes.len() as u64 {
+        return Err(Trap::MemoryOutOfBounds);
+    }
+    let start = ea as usize;
+    for (i, b) in mem.bytes[start..start + n].iter_mut().enumerate() {
+        *b = (val >> (8 * i)) as u8;
+    }
+    Ok(())
+}
+
+/// Loads/stores + `memory.size`/`grow`.
+fn exec_memory(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+    match instr.op {
+        Op::MemorySize => {
+            let Imm::MemIndex(mi) = instr.imm else {
+                return Err(Trap::UnsupportedInstruction);
+            };
+            let mem = store.memories.get(mi as usize).ok_or(Trap::NoMemory)?;
+            let pages = (mem.bytes.len() / PAGE_SIZE) as u64;
+            if mem.is64 {
+                frame.push_i64(pages as i64);
+            } else {
+                frame.push_i32(pages as i32);
+            }
+            return Ok(());
+        }
+        Op::MemoryGrow => return memory_grow(frame, store, instr),
+        _ => {}
+    }
+    let Imm::Mem(ma) = instr.imm else {
+        return Err(Trap::UnsupportedInstruction);
+    };
+    match instr.op {
+        Op::I32Load => {
+            let v = load_bytes(frame, store, ma, 4)?;
+            frame.push_i32(v as u32 as i32);
+        }
+        Op::I64Load => {
+            let v = load_bytes(frame, store, ma, 8)?;
+            frame.push_i64(v as i64);
+        }
+        Op::F32Load => {
+            let v = load_bytes(frame, store, ma, 4)?;
+            frame.push(v);
+        }
+        Op::F64Load => {
+            let v = load_bytes(frame, store, ma, 8)?;
+            frame.push(v);
+        }
+        Op::I32Load8S => {
+            let v = load_bytes(frame, store, ma, 1)?;
+            frame.push_i32(i32::from(v as u8 as i8));
+        }
+        Op::I32Load8U => {
+            let v = load_bytes(frame, store, ma, 1)?;
+            frame.push_i32(i32::from(v as u8));
+        }
+        Op::I32Load16S => {
+            let v = load_bytes(frame, store, ma, 2)?;
+            frame.push_i32(i32::from(v as u16 as i16));
+        }
+        Op::I32Load16U => {
+            let v = load_bytes(frame, store, ma, 2)?;
+            frame.push_i32(i32::from(v as u16));
+        }
+        Op::I64Load8S => {
+            let v = load_bytes(frame, store, ma, 1)?;
+            frame.push_i64(i64::from(v as u8 as i8));
+        }
+        Op::I64Load8U => {
+            let v = load_bytes(frame, store, ma, 1)?;
+            frame.push_i64(i64::from(v as u8));
+        }
+        Op::I64Load16S => {
+            let v = load_bytes(frame, store, ma, 2)?;
+            frame.push_i64(i64::from(v as u16 as i16));
+        }
+        Op::I64Load16U => {
+            let v = load_bytes(frame, store, ma, 2)?;
+            frame.push_i64(i64::from(v as u16));
+        }
+        Op::I64Load32S => {
+            let v = load_bytes(frame, store, ma, 4)?;
+            frame.push_i64(i64::from(v as u32 as i32));
+        }
+        Op::I64Load32U => {
+            let v = load_bytes(frame, store, ma, 4)?;
+            frame.push_i64(i64::from(v as u32));
+        }
+        Op::I32Store => {
+            let val = u64::from(frame.pop_i32() as u32);
+            store_bytes(frame, store, ma, 4, val)?;
+        }
+        Op::I64Store => {
+            let val = frame.pop_i64() as u64;
+            store_bytes(frame, store, ma, 8, val)?;
+        }
+        Op::F32Store => {
+            let val = frame.pop() & 0xffff_ffff;
+            store_bytes(frame, store, ma, 4, val)?;
+        }
+        Op::F64Store => {
+            let val = frame.pop();
+            store_bytes(frame, store, ma, 8, val)?;
+        }
+        Op::I32Store8 => {
+            let val = u64::from(frame.pop_i32() as u32);
+            store_bytes(frame, store, ma, 1, val)?;
+        }
+        Op::I32Store16 => {
+            let val = u64::from(frame.pop_i32() as u32);
+            store_bytes(frame, store, ma, 2, val)?;
+        }
+        Op::I64Store8 => {
+            let val = frame.pop_i64() as u64;
+            store_bytes(frame, store, ma, 1, val)?;
+        }
+        Op::I64Store16 => {
+            let val = frame.pop_i64() as u64;
+            store_bytes(frame, store, ma, 2, val)?;
+        }
+        Op::I64Store32 => {
+            let val = frame.pop_i64() as u64;
+            store_bytes(frame, store, ma, 4, val)?;
+        }
+        _ => return Err(Trap::UnsupportedInstruction),
+    }
+    Ok(())
+}
+
+fn memory_grow(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+    let Imm::MemIndex(mi) = instr.imm else {
+        return Err(Trap::UnsupportedInstruction);
+    };
+    let mi = mi as usize;
+    let is64 = store.memories.get(mi).ok_or(Trap::NoMemory)?.is64;
+    let delta = frame.pop_mem(is64);
+    let mem = &mut store.memories[mi];
+    let old_pages = (mem.bytes.len() / PAGE_SIZE) as u64;
+    let cap: u64 = if is64 { 0x1_0000_0000_0000 } else { 65536 };
+    let limit = mem.max.unwrap_or(cap).min(cap);
+    let target = old_pages
+        .checked_add(delta)
+        .filter(|&p| p <= limit)
+        .and_then(|p| usize::try_from(p).ok())
+        .and_then(|p| p.checked_mul(PAGE_SIZE))
+        .filter(|&n| n <= DEFAULT_MAX_MEMORY_BYTES);
+    match target {
+        Some(nbytes) => {
+            mem.bytes.resize(nbytes, 0);
+            if is64 {
+                frame.push_i64(old_pages as i64);
+            } else {
+                frame.push_i32(old_pages as i32);
+            }
+        }
+        None if is64 => frame.push_i64(-1), // growth refused
+        None => frame.push_i32(-1),
+    }
+    Ok(())
+}
+
+fn exec_memory_copy(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+    let Imm::MemCopy { dst, src } = instr.imm else {
+        return Err(Trap::UnsupportedInstruction);
+    };
+    let (dst, src) = (dst as usize, src as usize);
+    let dst64 = store.memories.get(dst).ok_or(Trap::NoMemory)?.is64;
+    let src64 = store.memories.get(src).ok_or(Trap::NoMemory)?.is64;
+    let n = frame.pop_mem(dst64 && src64);
+    let srca = frame.pop_mem(src64);
+    let dsta = frame.pop_mem(dst64);
+    let si = mem_range(srca, n, store.memories[src].bytes.len()).ok_or(Trap::MemoryOutOfBounds)?;
+    let di = mem_range(dsta, n, store.memories[dst].bytes.len()).ok_or(Trap::MemoryOutOfBounds)?;
+    let ni = n as usize;
+    if dst == src {
+        store.memories[dst].bytes.copy_within(si..si + ni, di);
+    } else {
+        let tmp = store.memories[src].bytes[si..si + ni].to_vec();
+        store.memories[dst].bytes[di..di + ni].copy_from_slice(&tmp);
+    }
+    Ok(())
+}
+
+fn exec_memory_fill(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+    let Imm::MemIndex(mi) = instr.imm else {
+        return Err(Trap::UnsupportedInstruction);
+    };
+    let mi = mi as usize;
+    let is64 = store.memories.get(mi).ok_or(Trap::NoMemory)?.is64;
+    let n = frame.pop_mem(is64);
+    let byte = frame.pop_i32() as u8;
+    let dst = frame.pop_mem(is64);
+    let mem = &mut store.memories[mi];
+    let di = mem_range(dst, n, mem.bytes.len()).ok_or(Trap::MemoryOutOfBounds)?;
+    mem.bytes[di..di + n as usize].fill(byte);
+    Ok(())
+}
+
+fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Store, instr: &Instr) -> Result<()> {
+    let Imm::MemInit { data, mem } = instr.imm else {
+        return Err(Trap::UnsupportedInstruction);
+    };
+    let (mi, di) = (mem as usize, data as usize);
+    let is64 = store.memories.get(mi).ok_or(Trap::NoMemory)?.is64;
+    let dropped = *store.data_dropped.get(di).ok_or(Trap::UndefinedData)?;
+    let empty: &[u8] = &[];
+    let seg: &[u8] = if dropped {
+        empty
+    } else {
+        &ctx.module.data.get(di).ok_or(Trap::UndefinedData)?.bytes
+    };
+    // n/src index the data segment (always i32); dst is a memory address.
+    let n = u64::from(frame.pop_i32() as u32);
+    let src = u64::from(frame.pop_i32() as u32);
+    let dst = frame.pop_mem(is64);
+    let si = mem_range(src, n, seg.len()).ok_or(Trap::MemoryOutOfBounds)?;
+    let mem = &mut store.memories[mi];
+    let di_addr = mem_range(dst, n, mem.bytes.len()).ok_or(Trap::MemoryOutOfBounds)?;
+    let ni = n as usize;
+    mem.bytes[di_addr..di_addr + ni].copy_from_slice(&seg[si..si + ni]);
+    Ok(())
+}
+
+/// Interpret a data/element-segment offset constant expression as an address.
+fn eval_const_offset(expr: &[u8], globals: &[Value], is64: bool) -> Result<u64> {
+    let v = eval_const_expr(expr, globals)?;
+    Ok(if is64 {
+        v
+    } else {
+        u64::from(as_i32(v) as u32)
+    })
 }
 
 /// Integer arithmetic / comparison / bitwise / conversion opcodes. Anything else (float,
@@ -1497,6 +1911,85 @@ mod tests {
         let ms = single_func(&[0x7c], &[0x7f], &sat_entry, "s");
         assert_eq!(as_i32(run1(&ms, "s", &[f64_value(1e300)]).unwrap()[0]), i32::MAX);
         assert_eq!(as_i32(run1(&ms, "s", &[f64_value(f64::NAN)]).unwrap()[0]), 0);
+    }
+
+    /// Assemble a module from `(section-id, content)` pairs (magic + version prepended).
+    fn asm(sections: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut m = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        for (id, content) in sections {
+            m.push(*id);
+            write_uleb(&mut m, content.len() as u32);
+            m.extend_from_slice(content);
+        }
+        m
+    }
+    /// Wrap a code body (locals-vec + instrs incl. `end`) as a 1-entry code section content.
+    fn code1(entry: &[u8]) -> Vec<u8> {
+        let mut c = vec![0x01u8];
+        write_uleb(&mut c, entry.len() as u32);
+        c.extend_from_slice(entry);
+        c
+    }
+
+    #[test]
+    fn memory_store_load_roundtrip() {
+        // (memory 1) (func (param i32) (result i32) i32.store[0] (get 0); i32.load[0])
+        let entry = [
+            0x00, 0x41, 0x00, 0x20, 0x00, 0x36, 0x02, 0x00, // i32.store (addr 0) (local 0)
+            0x41, 0x00, 0x28, 0x02, 0x00, // i32.load (addr 0)
+            0x0b,
+        ];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x01, 0x00, 0x01]), // memory: min 1
+            (7, vec![0x01, 0x02, b'r', b't', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "rt", &[i32_value(0x1234_5678)]).unwrap()[0]), 0x1234_5678);
+    }
+
+    #[test]
+    fn memory_size_and_grow() {
+        // (memory 1) (func (result i32) i32.const 2; memory.grow; drop; memory.size)
+        let entry = [0x00, 0x41, 0x02, 0x40, 0x00, 0x1a, 0x3f, 0x00, 0x0b];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x01, 0x00, 0x01]),
+            (7, vec![0x01, 0x01, b'g', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "g", &[]).unwrap()[0]), 3); // 1 + 2 pages
+    }
+
+    #[test]
+    fn active_data_segment_initializes_memory() {
+        // (memory 1) (data (i32.const 0) "\2a") (func (result i32) i32.load8_u 0)
+        let entry = [0x00, 0x41, 0x00, 0x2d, 0x00, 0x00, 0x0b];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x01, 0x00, 0x01]),
+            (7, vec![0x01, 0x01, b'd', 0x00, 0x00]),
+            (10, code1(&entry)),
+            (11, vec![0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x2a]), // active seg @0, bytes [0x2a]
+        ]);
+        assert_eq!(as_i32(run1(&m, "d", &[]).unwrap()[0]), 42);
+    }
+
+    #[test]
+    fn memory_out_of_bounds_traps() {
+        // (memory 1) (func (result i32) i32.load (i32.const 100000))  — past 1 page (65536)
+        let entry = [0x00, 0x41, 0xa0, 0x8d, 0x06, 0x28, 0x02, 0x00, 0x0b];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x01, 0x00, 0x01]),
+            (7, vec![0x01, 0x01, b'o', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(run1(&m, "o", &[]), Err(Trap::MemoryOutOfBounds));
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {

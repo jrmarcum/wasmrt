@@ -7,9 +7,9 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–2 (v0.6.0 integer
-compute, v0.6.1 float) DONE. Next: 0.6.x — linear memory, then the rest + fold in the deferred 0.5.x
-validation arms.**
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–3 (v0.6.0 integer,
+v0.6.1 float, v0.6.2 linear memory) DONE. Next: 0.6.x — tables/reftypes → GC → SIMD → threads → EH +
+host imports; + the deferred 0.5.x validation arms.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -86,9 +86,15 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     + float↔int trapping & saturating (Rust's `as` cast matches wasm sat exactly) + demote/promote/
     reinterpret. **`sqrt` is `std`-gated** (platform libm; no_std build traps on sqrt only — everything
     else float is no_std-clean). 65 core tests, clippy clean.
-  - **0.6.x remaining slices (per the roadmap order below):** linear memory NEXT → tables/reftypes → GC →
-    SIMD → multi-memory → threads → memory64 → EH. Also fold in host imports (WASI needs them) + the
-    deferred 0.5.x validation arms. Original T5 detail:
+  - **Slice 3 — linear memory. ✅ DONE 2026-07-28 (v0.6.2).** All loads/stores (widths + sign/zero
+    extend), `memory.size`/`grow`, bulk (`memory.copy`/`fill`/`init`, `data.drop`), active data-segment
+    init at instantiation; overflow-safe effective-address bounds checks; per-memory (memory64) address
+    typing; 1 GiB per-instance budget; `alloc_zeroed`-backed (demand-zero). **Refactor:** the mutable
+    runtime state (globals/memories/data_dropped) is now a `Store` threaded as `&mut` (recursive `call`
+    reborrows cleanly). 69 core tests; store/load round-trips via CLI. `wasm_mod`-class guests now run.
+  - **0.6.x remaining slices (per the roadmap order below):** tables/reftypes → GC → SIMD → multi-memory →
+    threads → memory64 → EH. Also fold in host imports (WASI needs them) + the deferred 0.5.x validation
+    arms. Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant
   (`null_ref` before `i31_tag`); `#[cold]`/`#[inline(never)]` trap path with lazy byte-offset resolve;
   shared `Memory`/`Table` (`Rc<RefCell>`, `Cell<u32>` refcount — single-thread ABI); `Instance` retains
