@@ -4,15 +4,17 @@ The Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate
 pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
 `00-synthesis.md`, `02-decode-core.md`, `03-validate-interp.md`, `06-build-docs-licensing.md`).
 
-**Realized so far (through T5 slice 5 / v0.6.4):** the workspace + all three crates exist; `wasmrt-core`
+**Realized so far (through T5 slice 6 / v0.6.5):** the workspace + all three crates exist; `wasmrt-core`
 has `types`, `reader`, `opcode`, `module` (decode), `validate` (core-language type-checker), and `interp`
 (switch interpreter — integer + float compute + linear memory + tables/`call_indirect`/reference types +
-**WasmGC** structs/arrays/`i31`/casts over a `Store`-owned GC heap) implemented and parity-tested; `text` /
-`wasi` / `pin` are still stubs, filled in bottom-up per `roadmap.md`. The CLI does summarize + validate +
-`run`. Two idiomatic divergences worth noting: owned `Vec`/`String` data (frees on drop, no
-arena/`deinit`), and the interpreter's immutable-`module`/`func_bodies` vs `&mut Store` (globals +
-memories + tables + dropped-data + **`gc_heap`**) borrow split (recursive `call` reborrows cleanly, no
-`RefCell`).
+**WasmGC** structs/arrays/`i31`/casts over a `Store`-owned GC heap + **SIMD** the full `v128` fixed-width
++ relaxed set) implemented and parity-tested; `text` / `wasi` / `pin` are still stubs, filled in bottom-up
+per `roadmap.md`. The CLI does summarize + validate + `run`. Three idiomatic divergences worth noting:
+owned `Vec`/`String` data (frees on drop, no arena/`deinit`); the interpreter's
+immutable-`module`/`func_bodies` vs `&mut Store` (globals + memories + tables + dropped-data + `gc_heap`)
+borrow split (recursive `call` reborrows cleanly, no `RefCell`); and the **128-bit value slot**
+(`Value = u128`) so a `v128` is one slot — wazmrt uses two `u64` slots + width tables, wasmrt keeps
+"one slot per value" (behavior identical; scalars/refs in the low 64, sentinels unchanged).
 
 _(Earlier snapshot, superseded:)_ Through T3 / v0.4.0: the workspace + all three crates exist; `wasmrt-core` has
 `types`, `reader`, `opcode` (the shared IR + `decode_body`), and `module` (full binary decode)
@@ -59,7 +61,9 @@ reintroduce the MSVC dependency wazmrt deliberately avoided. `rust-toolchain.tom
 
 ## Interpreter shape — Option A (carried from wazmrt)
 
-Switch dispatch over a **pre-decoded IR**, untyped `u64` value slots (validation proves types). Keep
+Switch dispatch over a **pre-decoded IR**, untyped **128-bit** value slots (`Value = u128`; validation
+proves types). The slot was `u64` through v0.6.4; widened at the SIMD slice (v0.6.5) so a `v128` occupies
+one slot (scalars/refs use the low 64) — wazmrt instead uses two `u64` slots + width tables. Keep
 the IR a clean seam so a register-machine pass (Option B) is layerable later if benchmarks demand it.
 **Not a JIT/AOT** — a native codegen backend violates smallest-binary *and* can't run on the
 `wasm32`-freestanding self-embed target. See [design-decisions.md](design-decisions.md) for the perf

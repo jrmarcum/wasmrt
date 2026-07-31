@@ -20,14 +20,21 @@ use core::fmt;
 use crate::module::{CompKind, CompType, FuncType, Module, StorageType};
 use crate::opcode::{decode_body, BlockType, HeapType, Imm, Instr, Op, RefType};
 use crate::reader::Reader;
-use crate::types::{DecodeError, RefHeap, ValType};
+use crate::types::{DecodeError, RefHeap};
 
-/// A runtime value: a raw 64-bit slot reinterpreted per the (validated) type.
-pub type Value = u64;
+/// A runtime value: a raw 128-bit slot reinterpreted per the (validated) type.
+///
+/// The slot is 128 bits wide so a `v128` (SIMD) fits in a **single** stack/local/table/global
+/// entry — keeping the whole interpreter on the "one slot per value" model (arity, `select`,
+/// `drop`, branch copies, locals, and call marshaling never have to reason about slot width).
+/// This is an idiomatic-Rust divergence from wazmrt, which stores a `v128` as two `u64` slots
+/// and carries width tables to size `drop`/`select`; observable behavior is identical. Scalars
+/// (`i32`/`i64`/`f32`/`f64`) and references live in the low bits, high 64 zero.
+pub type Value = u128;
 
 #[must_use]
 pub fn i32_value(x: i32) -> Value {
-    u64::from(x as u32)
+    Value::from(x as u32)
 }
 #[must_use]
 pub fn as_i32(v: Value) -> i32 {
@@ -35,15 +42,15 @@ pub fn as_i32(v: Value) -> i32 {
 }
 #[must_use]
 pub fn i64_value(x: i64) -> Value {
-    x as u64
+    Value::from(x as u64)
 }
 #[must_use]
 pub fn as_i64(v: Value) -> i64 {
-    v as i64
+    v as u64 as i64
 }
 #[must_use]
 pub fn f32_value(x: f32) -> Value {
-    u64::from(x.to_bits())
+    Value::from(x.to_bits())
 }
 #[must_use]
 pub fn as_f32(v: Value) -> f32 {
@@ -51,11 +58,11 @@ pub fn as_f32(v: Value) -> f32 {
 }
 #[must_use]
 pub fn f64_value(x: f64) -> Value {
-    x.to_bits()
+    Value::from(x.to_bits())
 }
 #[must_use]
 pub fn as_f64(v: Value) -> f64 {
-    f64::from_bits(v)
+    f64::from_bits(v as u64)
 }
 
 /// Cap on guest call depth (a `call` recurses natively, so this bounds host stack use).
@@ -79,19 +86,20 @@ const DEFAULT_MAX_TABLE_ELEMS: usize = 1 << 27;
 ///
 /// **Invariant (do not drift):** `null_ref` (all bits set) is checked *before* [`I31_TAG`]
 /// (bit 63), so the two never confuse (`cmem/design-decisions.md`).
-pub const NULL_REF: Value = u64::MAX;
+pub const NULL_REF: Value = u64::MAX as Value;
 
 /// Tag bit marking a value slot as an unboxed i31 (WasmGC). Set on `ref.i31` results so
 /// `ref.test`/`ref.cast` can tell an i31 from a heap-object index (bit 63 clear) within the
 /// `any` hierarchy. Checked *after* [`NULL_REF`] (all bits set), so the two never confuse.
 const I31_TAG: Value = 1 << 63;
+const _: () = assert!(I31_TAG == (1u128 << 63)); // i31 tag lives in the low 64 bits
 
 /// Cap on live GC objects per instance. There is no collector (a proposal-scope decision), so
 /// this backstop keeps a guest allocation loop from exhausting host memory.
 const MAX_GC_OBJECTS: usize = 1 << 24;
 
 /// A heap-allocated GC object: its declared type index (RTT) + its struct fields / array
-/// elements (`fieldIsV128` GC×SIMD fields are rejected, so one `Value` per field suffices).
+/// elements. One `Value` (128-bit) per field — enough for every field type incl. `v128`.
 struct HeapObject {
     type_index: u32,
     fields: Vec<Value>,
@@ -574,7 +582,7 @@ fn call_function(
     let defined = func_index as usize;
     let body = ctx.func_bodies.get(defined).ok_or(Trap::UndefinedFunc)?;
 
-    let mut locals = vec![0u64; body.num_locals];
+    let mut locals = vec![0 as Value; body.num_locals];
     let n_args = args.len().min(locals.len());
     locals[..n_args].copy_from_slice(&args[..n_args]);
 
@@ -636,14 +644,14 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let Imm::F32(bits) = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                frame.push(u64::from(bits));
+                frame.push(Value::from(bits));
                 pc += 1;
             }
             Op::F64Const => {
                 let Imm::F64(bits) = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                frame.push(bits);
+                frame.push(Value::from(bits));
                 pc += 1;
             }
 
@@ -1044,7 +1052,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
             // --- WasmGC: i31 (unboxed; i31_tag checked AFTER null_ref) ---
             Op::RefI31 => {
                 let x = frame.pop_i32() as u32;
-                frame.push(I31_TAG | u64::from(x & 0x7fff_ffff)); // wrap to 31 bits, non-null
+                frame.push(I31_TAG | Value::from(x & 0x7fff_ffff)); // wrap to 31 bits, non-null
                 pc += 1;
             }
             Op::I31GetS => {
@@ -1077,9 +1085,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
-                if sf.iter().any(|f| field_is_v128(f.storage)) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let base = frame.stack_base(sf.len())?;
                 let obj: Vec<Value> = sf
                     .iter()
@@ -1096,9 +1101,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
-                if sf.iter().any(|f| field_is_v128(f.storage)) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let obj: Vec<Value> = sf.iter().map(|f| default_field(f.storage)).collect();
                 let r = alloc_object(store, ti, obj)?;
                 frame.push(r);
@@ -1116,9 +1118,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     .get(field as usize)
                     .ok_or(Trap::GcOutOfBounds)?
                     .storage;
-                if field_is_v128(storage) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let v = *store.gc_heap[idx]
                     .fields
                     .get(field as usize)
@@ -1139,9 +1138,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     .get(field as usize)
                     .ok_or(Trap::GcOutOfBounds)?
                     .storage;
-                if field_is_v128(storage) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let slot = store.gc_heap[idx]
                     .fields
                     .get_mut(field as usize)
@@ -1156,9 +1152,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                if field_is_v128(f.storage) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let len = frame.pop_i32() as u32 as usize;
                 let init = pack_field(f.storage, frame.pop());
                 let r = alloc_object(store, ti, vec![init; len])?;
@@ -1170,9 +1163,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                if field_is_v128(f.storage) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let len = frame.pop_i32() as u32 as usize;
                 let r = alloc_object(store, ti, vec![default_field(f.storage); len])?;
                 frame.push(r);
@@ -1183,9 +1173,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let f = ctx.module.array_field(type_index).ok_or(Trap::UndefinedType)?;
-                if field_is_v128(f.storage) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let base = frame.stack_base(n as usize)?;
                 let obj: Vec<Value> = (0..n as usize)
                     .map(|k| pack_field(f.storage, frame.vstack[base + k]))
@@ -1200,9 +1187,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                if field_is_v128(f.storage) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let index = frame.pop_i32() as u32 as usize;
                 let idx = gc_object_index(store, frame.pop())?;
                 let v = *store.gc_heap[idx]
@@ -1217,9 +1201,6 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                if field_is_v128(f.storage) {
-                    return Err(Trap::UnsupportedInstruction);
-                }
                 let v = frame.pop();
                 let index = frame.pop_i32() as u32 as usize;
                 let idx = gc_object_index(store, frame.pop())?;
@@ -1276,6 +1257,15 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 } else {
                     frame.branch(label)?
                 };
+            }
+
+            // --- SIMD (v128, 0xFD family) ---
+            Op::Simd => {
+                let Imm::Simd(s) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                exec_simd(frame, store, s)?;
+                pc += 1;
             }
 
             // Integer arithmetic / comparison / bitwise / conversion.
@@ -1400,11 +1390,11 @@ fn exec_memory(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()
         }
         Op::F32Load => {
             let v = load_bytes(frame, store, ma, 4)?;
-            frame.push(v);
+            frame.push(Value::from(v));
         }
         Op::F64Load => {
             let v = load_bytes(frame, store, ma, 8)?;
-            frame.push(v);
+            frame.push(Value::from(v));
         }
         Op::I32Load8S => {
             let v = load_bytes(frame, store, ma, 1)?;
@@ -1455,11 +1445,11 @@ fn exec_memory(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()
             store_bytes(frame, store, ma, 8, val)?;
         }
         Op::F32Store => {
-            let val = frame.pop() & 0xffff_ffff;
+            let val = frame.pop() as u64 & 0xffff_ffff;
             store_bytes(frame, store, ma, 4, val)?;
         }
         Op::F64Store => {
-            let val = frame.pop();
+            let val = frame.pop() as u64;
             store_bytes(frame, store, ma, 8, val)?;
         }
         Op::I32Store8 => {
@@ -1585,7 +1575,7 @@ fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Store, instr: &Ins
 fn eval_const_offset(expr: &[u8], globals: &[Value], is64: bool) -> Result<u64> {
     let v = eval_const_expr(expr, globals)?;
     Ok(if is64 {
-        v
+        v as u64
     } else {
         u64::from(as_i32(v) as u32)
     })
@@ -1593,12 +1583,8 @@ fn eval_const_offset(expr: &[u8], globals: &[Value], is64: bool) -> Result<u64> 
 
 // --- WasmGC helpers ----------------------------------------------------------
 
-/// A `v128` field can't fit the one-`Value`-per-field object model; GC ops reject it.
-fn field_is_v128(storage: StorageType) -> bool {
-    storage.unpacked() == ValType::V128
-}
-
-/// Narrow a value to a field's storage width before storing (packed i8/i16 keep low bits).
+/// Narrow a value to a field's storage width before storing (packed i8/i16 keep low bits;
+/// an unpacked field — including a `v128`, which fits one 128-bit `Value` — is verbatim).
 fn pack_field(storage: StorageType, v: Value) -> Value {
     match storage {
         StorageType::Val(_) => v,
@@ -2256,6 +2242,790 @@ fn sqrt_f64(_x: f64) -> Result<f64> {
     Err(Trap::UnsupportedInstruction)
 }
 
+// ============================ SIMD (v128, 0xFD) =============================
+//
+// A `v128` is a single 128-bit `Value` slot, so `frame.push`/`frame.pop` move it
+// with no special-casing. These `v_*`/`p_*` helpers view a `Value` as a
+// little-endian lane array and back — endian-explicit (`to_le_bytes`), so the
+// wasm SIMD little-endian lane order holds on any host. Ported opcode-for-opcode
+// from wazmrt `interp.zig` `execSimd` (frozen oracle @dadc727).
+
+macro_rules! lane_views {
+    ($unpack:ident, $pack:ident, $t:ty, $n:expr, $sz:expr) => {
+        #[inline]
+        fn $unpack(v: Value) -> [$t; $n] {
+            let b = v.to_le_bytes();
+            core::array::from_fn(|i| <$t>::from_le_bytes(b[i * $sz..i * $sz + $sz].try_into().unwrap()))
+        }
+        #[inline]
+        fn $pack(a: [$t; $n]) -> Value {
+            let mut b = [0u8; 16];
+            for (i, x) in a.iter().enumerate() {
+                b[i * $sz..i * $sz + $sz].copy_from_slice(&x.to_le_bytes());
+            }
+            Value::from_le_bytes(b)
+        }
+    };
+}
+lane_views!(v_u8x16, p_u8x16, u8, 16, 1);
+lane_views!(v_i8x16, p_i8x16, i8, 16, 1);
+lane_views!(v_u16x8, p_u16x8, u16, 8, 2);
+lane_views!(v_i16x8, p_i16x8, i16, 8, 2);
+lane_views!(v_u32x4, p_u32x4, u32, 4, 4);
+lane_views!(v_i32x4, p_i32x4, i32, 4, 4);
+lane_views!(v_u64x2, p_u64x2, u64, 2, 8);
+lane_views!(v_i64x2, p_i64x2, i64, 2, 8);
+lane_views!(v_f32x4, p_f32x4, f32, 4, 4);
+lane_views!(v_f64x2, p_f64x2, f64, 2, 8);
+
+/// Saturating float→int truncation for one lane (NaN→0), bounds compared in f64.
+fn sat_trunc_i32(x: f64) -> i32 {
+    if x.is_nan() {
+        return 0;
+    }
+    let t = trunc_f64(x);
+    if t <= i32::MIN as f64 {
+        return i32::MIN;
+    }
+    if t >= i32::MAX as f64 {
+        return i32::MAX;
+    }
+    t as i32
+}
+fn sat_trunc_u32(x: f64) -> u32 {
+    if x.is_nan() {
+        return 0;
+    }
+    let t = trunc_f64(x);
+    if t <= 0.0 {
+        return 0;
+    }
+    if t >= u32::MAX as f64 {
+        return u32::MAX;
+    }
+    t as u32
+}
+#[inline]
+fn fneg_f32(x: f32) -> f32 {
+    f32::from_bits(x.to_bits() ^ 0x8000_0000)
+}
+#[inline]
+fn fneg_f64(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() ^ 0x8000_0000_0000_0000)
+}
+
+/// Pop an address and bounds-check `n` bytes for a SIMD memory op; returns the
+/// effective byte offset into memory `ma.memory` (memory64-aware, overflow-safe).
+fn simd_mem_ea(frame: &mut Frame, store: &Store, ma: crate::opcode::MemArg, n: u64) -> Result<usize> {
+    let mem = store.memories.get(ma.memory as usize).ok_or(Trap::NoMemory)?;
+    let addr = frame.pop_mem(mem.is64);
+    let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
+    let end = ea.checked_add(n).ok_or(Trap::MemoryOutOfBounds)?;
+    if end > mem.bytes.len() as u64 {
+        return Err(Trap::MemoryOutOfBounds);
+    }
+    Ok(ea as usize)
+}
+
+// Lane-wise op macros (the comptime-helper analogs). `$f` is the frame.
+macro_rules! simd_bin {
+    ($f:expr, $up:ident, $pk:ident, |$a:ident, $b:ident| $body:expr) => {{
+        let bb = $up($f.pop());
+        let aa = $up($f.pop());
+        let mut r = aa;
+        for (i, slot) in r.iter_mut().enumerate() {
+            let $a = aa[i];
+            let $b = bb[i];
+            *slot = $body;
+        }
+        $f.push($pk(r));
+    }};
+}
+macro_rules! simd_un {
+    ($f:expr, $up:ident, $pk:ident, |$x:ident| $body:expr) => {{
+        let aa = $up($f.pop());
+        let mut r = aa;
+        for (i, slot) in r.iter_mut().enumerate() {
+            let $x = aa[i];
+            *slot = $body;
+        }
+        $f.push($pk(r));
+    }};
+}
+macro_rules! simd_cmp {
+    ($f:expr, $up:ident, $pk:ident, $ures:ty, |$a:ident, $b:ident| $body:expr) => {{
+        let bb = $up($f.pop());
+        let aa = $up($f.pop());
+        $f.push($pk(core::array::from_fn(|i| {
+            let $a = aa[i];
+            let $b = bb[i];
+            if $body { <$ures>::MAX } else { 0 }
+        })));
+    }};
+}
+macro_rules! simd_shift {
+    ($f:expr, $up:ident, $pk:ident, $bits:expr, $op:tt) => {{
+        let amt = ($f.pop_i32() as u32) % $bits;
+        let aa = $up($f.pop());
+        $f.push($pk(aa.map(|x| x $op amt)));
+    }};
+}
+macro_rules! simd_extend {
+    ($f:expr, $up:ident, $pk:ident, $dst:ty, $half:expr, $high:expr) => {{
+        let src = $up($f.pop());
+        let base: usize = if $high { $half } else { 0 };
+        $f.push($pk(core::array::from_fn(|i| src[base + i] as $dst)));
+    }};
+}
+macro_rules! simd_narrow {
+    ($f:expr, $up:ident, $pk:ident, $src:ty, $dst:ty) => {{
+        let b = $up($f.pop());
+        let a = $up($f.pop());
+        let half = a.len();
+        $f.push($pk(core::array::from_fn(|i| {
+            let x: $src = if i < half { a[i] } else { b[i - half] };
+            x.clamp(<$dst>::MIN as $src, <$dst>::MAX as $src) as $dst
+        })));
+    }};
+}
+macro_rules! simd_convert {
+    ($f:expr, $up:ident, $pk:ident, $dst:ty) => {{
+        let src = $up($f.pop());
+        $f.push($pk(core::array::from_fn(|i| src[i] as $dst)));
+    }};
+}
+macro_rules! simd_extmul {
+    ($f:expr, $up:ident, $pk:ident, $dst:ty, $n:expr, $high:expr) => {{
+        let b = $up($f.pop());
+        let a = $up($f.pop());
+        let base: usize = if $high { $n } else { 0 };
+        $f.push($pk(core::array::from_fn(|i| (a[base + i] as $dst) * (b[base + i] as $dst))));
+    }};
+}
+macro_rules! simd_extadd {
+    ($f:expr, $up:ident, $pk:ident, $dst:ty) => {{
+        let src = $up($f.pop());
+        $f.push($pk(core::array::from_fn(|i| src[2 * i] as $dst + src[2 * i + 1] as $dst)));
+    }};
+}
+macro_rules! simd_load_extend {
+    ($f:expr, $store:expr, $mem:expr, $srcty:ty, $srcsz:expr, $n:expr, $pk:ident, $dst:ty) => {{
+        let ea = simd_mem_ea($f, $store, $mem, 8)?;
+        let m = &$store.memories[$mem.memory as usize];
+        let src: [$srcty; $n] = core::array::from_fn(|i| {
+            <$srcty>::from_le_bytes(m.bytes[ea + i * $srcsz..ea + i * $srcsz + $srcsz].try_into().unwrap())
+        });
+        $f.push($pk(core::array::from_fn(|i| src[i] as $dst)));
+    }};
+}
+
+/// Execute a `0xFD` SIMD instruction. Covers the entire fixed-width + relaxed SIMD
+/// set; an unknown sub-opcode traps `UnsupportedInstruction`.
+#[allow(clippy::too_many_lines)]
+fn exec_simd(frame: &mut Frame, store: &mut Store, s: crate::opcode::Simd) -> Result<()> {
+    let lane = s.lane as usize;
+    match s.sub {
+        // --- const / load / store ---
+        0x0c => frame.push(s.bytes), // v128.const
+        0x00 => {
+            let ea = simd_mem_ea(frame, store, s.mem, 16)?;
+            let m = &store.memories[s.mem.memory as usize];
+            frame.push(u128::from_le_bytes(m.bytes[ea..ea + 16].try_into().unwrap()));
+        }
+        0x0b => {
+            let v = frame.pop();
+            let ea = simd_mem_ea(frame, store, s.mem, 16)?;
+            store.memories[s.mem.memory as usize].bytes[ea..ea + 16].copy_from_slice(&v.to_le_bytes());
+        }
+        // --- shuffle / swizzle ---
+        0x0d => {
+            let b = v_u8x16(frame.pop());
+            let a = v_u8x16(frame.pop());
+            let idx = s.bytes.to_le_bytes();
+            frame.push(p_u8x16(core::array::from_fn(|i| {
+                let j = idx[i] as usize;
+                if j < 16 {
+                    a[j]
+                } else if j < 32 {
+                    b[j - 16]
+                } else {
+                    0
+                }
+            })));
+        }
+        0x0e | 0x100 => {
+            let idx = v_u8x16(frame.pop());
+            let a = v_u8x16(frame.pop());
+            frame.push(p_u8x16(core::array::from_fn(|i| {
+                let j = idx[i] as usize;
+                if j < 16 { a[j] } else { 0 }
+            })));
+        }
+        // --- splat ---
+        0x0f => {
+            let x = frame.pop_i32() as u8;
+            frame.push(p_u8x16([x; 16]));
+        }
+        0x10 => {
+            let x = frame.pop_i32() as u16;
+            frame.push(p_u16x8([x; 8]));
+        }
+        0x11 => {
+            let x = frame.pop_i32() as u32;
+            frame.push(p_u32x4([x; 4]));
+        }
+        0x12 => {
+            let x = frame.pop_i64() as u64;
+            frame.push(p_u64x2([x; 2]));
+        }
+        0x13 => {
+            let x = frame.pop() as u32;
+            frame.push(p_u32x4([x; 4]));
+        }
+        0x14 => {
+            let x = frame.pop() as u64;
+            frame.push(p_u64x2([x; 2]));
+        }
+        // --- extract_lane ---
+        0x15 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_i8x16(v)[lane]));
+        }
+        0x16 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_u8x16(v)[lane]));
+        }
+        0x18 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_i16x8(v)[lane]));
+        }
+        0x19 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_u16x8(v)[lane]));
+        }
+        0x1b => {
+            let v = frame.pop();
+            frame.push_i32(v_i32x4(v)[lane]);
+        }
+        0x1d => {
+            let v = frame.pop();
+            frame.push(Value::from(v_u64x2(v)[lane]));
+        }
+        0x1f => {
+            let v = frame.pop();
+            frame.push(Value::from(v_u32x4(v)[lane]));
+        }
+        0x21 => {
+            let v = frame.pop();
+            frame.push(Value::from(v_u64x2(v)[lane]));
+        }
+        // --- replace_lane ---
+        0x17 => {
+            let x = frame.pop_i32() as u8;
+            let mut a = v_u8x16(frame.pop());
+            a[lane] = x;
+            frame.push(p_u8x16(a));
+        }
+        0x1a => {
+            let x = frame.pop_i32() as u16;
+            let mut a = v_u16x8(frame.pop());
+            a[lane] = x;
+            frame.push(p_u16x8(a));
+        }
+        0x1c => {
+            let x = frame.pop_i32() as u32;
+            let mut a = v_u32x4(frame.pop());
+            a[lane] = x;
+            frame.push(p_u32x4(a));
+        }
+        0x1e => {
+            let x = frame.pop_i64() as u64;
+            let mut a = v_u64x2(frame.pop());
+            a[lane] = x;
+            frame.push(p_u64x2(a));
+        }
+        0x20 => {
+            let x = frame.pop() as u32;
+            let mut a = v_u32x4(frame.pop());
+            a[lane] = x;
+            frame.push(p_u32x4(a));
+        }
+        0x22 => {
+            let x = frame.pop() as u64;
+            let mut a = v_u64x2(frame.pop());
+            a[lane] = x;
+            frame.push(p_u64x2(a));
+        }
+        // --- comparisons ---
+        0x23 => simd_cmp!(frame, v_u8x16, p_u8x16, u8, |a, b| a == b),
+        0x24 => simd_cmp!(frame, v_u8x16, p_u8x16, u8, |a, b| a != b),
+        0x25 => simd_cmp!(frame, v_i8x16, p_u8x16, u8, |a, b| a < b),
+        0x26 => simd_cmp!(frame, v_u8x16, p_u8x16, u8, |a, b| a < b),
+        0x27 => simd_cmp!(frame, v_i8x16, p_u8x16, u8, |a, b| a > b),
+        0x28 => simd_cmp!(frame, v_u8x16, p_u8x16, u8, |a, b| a > b),
+        0x29 => simd_cmp!(frame, v_i8x16, p_u8x16, u8, |a, b| a <= b),
+        0x2a => simd_cmp!(frame, v_u8x16, p_u8x16, u8, |a, b| a <= b),
+        0x2b => simd_cmp!(frame, v_i8x16, p_u8x16, u8, |a, b| a >= b),
+        0x2c => simd_cmp!(frame, v_u8x16, p_u8x16, u8, |a, b| a >= b),
+        0x2d => simd_cmp!(frame, v_u16x8, p_u16x8, u16, |a, b| a == b),
+        0x2e => simd_cmp!(frame, v_u16x8, p_u16x8, u16, |a, b| a != b),
+        0x2f => simd_cmp!(frame, v_i16x8, p_u16x8, u16, |a, b| a < b),
+        0x30 => simd_cmp!(frame, v_u16x8, p_u16x8, u16, |a, b| a < b),
+        0x31 => simd_cmp!(frame, v_i16x8, p_u16x8, u16, |a, b| a > b),
+        0x32 => simd_cmp!(frame, v_u16x8, p_u16x8, u16, |a, b| a > b),
+        0x33 => simd_cmp!(frame, v_i16x8, p_u16x8, u16, |a, b| a <= b),
+        0x34 => simd_cmp!(frame, v_u16x8, p_u16x8, u16, |a, b| a <= b),
+        0x35 => simd_cmp!(frame, v_i16x8, p_u16x8, u16, |a, b| a >= b),
+        0x36 => simd_cmp!(frame, v_u16x8, p_u16x8, u16, |a, b| a >= b),
+        0x37 => simd_cmp!(frame, v_u32x4, p_u32x4, u32, |a, b| a == b),
+        0x38 => simd_cmp!(frame, v_u32x4, p_u32x4, u32, |a, b| a != b),
+        0x39 => simd_cmp!(frame, v_i32x4, p_u32x4, u32, |a, b| a < b),
+        0x3a => simd_cmp!(frame, v_u32x4, p_u32x4, u32, |a, b| a < b),
+        0x3b => simd_cmp!(frame, v_i32x4, p_u32x4, u32, |a, b| a > b),
+        0x3c => simd_cmp!(frame, v_u32x4, p_u32x4, u32, |a, b| a > b),
+        0x3d => simd_cmp!(frame, v_i32x4, p_u32x4, u32, |a, b| a <= b),
+        0x3e => simd_cmp!(frame, v_u32x4, p_u32x4, u32, |a, b| a <= b),
+        0x3f => simd_cmp!(frame, v_i32x4, p_u32x4, u32, |a, b| a >= b),
+        0x40 => simd_cmp!(frame, v_u32x4, p_u32x4, u32, |a, b| a >= b),
+        0x41 => simd_cmp!(frame, v_f32x4, p_u32x4, u32, |a, b| a == b),
+        0x42 => simd_cmp!(frame, v_f32x4, p_u32x4, u32, |a, b| a != b),
+        0x43 => simd_cmp!(frame, v_f32x4, p_u32x4, u32, |a, b| a < b),
+        0x44 => simd_cmp!(frame, v_f32x4, p_u32x4, u32, |a, b| a > b),
+        0x45 => simd_cmp!(frame, v_f32x4, p_u32x4, u32, |a, b| a <= b),
+        0x46 => simd_cmp!(frame, v_f32x4, p_u32x4, u32, |a, b| a >= b),
+        0x47 => simd_cmp!(frame, v_f64x2, p_u64x2, u64, |a, b| a == b),
+        0x48 => simd_cmp!(frame, v_f64x2, p_u64x2, u64, |a, b| a != b),
+        0x49 => simd_cmp!(frame, v_f64x2, p_u64x2, u64, |a, b| a < b),
+        0x4a => simd_cmp!(frame, v_f64x2, p_u64x2, u64, |a, b| a > b),
+        0x4b => simd_cmp!(frame, v_f64x2, p_u64x2, u64, |a, b| a <= b),
+        0x4c => simd_cmp!(frame, v_f64x2, p_u64x2, u64, |a, b| a >= b),
+        0xd6 => simd_cmp!(frame, v_u64x2, p_u64x2, u64, |a, b| a == b),
+        0xd7 => simd_cmp!(frame, v_u64x2, p_u64x2, u64, |a, b| a != b),
+        0xd8 => simd_cmp!(frame, v_i64x2, p_u64x2, u64, |a, b| a < b),
+        0xd9 => simd_cmp!(frame, v_i64x2, p_u64x2, u64, |a, b| a > b),
+        0xda => simd_cmp!(frame, v_i64x2, p_u64x2, u64, |a, b| a <= b),
+        0xdb => simd_cmp!(frame, v_i64x2, p_u64x2, u64, |a, b| a >= b),
+        // --- bitwise (whole register) ---
+        0x4d => {
+            let v = frame.pop();
+            frame.push(!v);
+        }
+        0x4e => {
+            let b = frame.pop();
+            let a = frame.pop();
+            frame.push(a & b);
+        }
+        0x4f => {
+            let b = frame.pop();
+            let a = frame.pop();
+            frame.push(a & !b);
+        }
+        0x50 => {
+            let b = frame.pop();
+            let a = frame.pop();
+            frame.push(a | b);
+        }
+        0x51 => {
+            let b = frame.pop();
+            let a = frame.pop();
+            frame.push(a ^ b);
+        }
+        0x52 => {
+            let c = frame.pop();
+            let b = frame.pop();
+            let a = frame.pop();
+            frame.push((a & c) | (b & !c));
+        }
+        0x53 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v != 0)); // v128.any_true
+        }
+        // --- i8x16 ---
+        0x60 => simd_un!(frame, v_i8x16, p_i8x16, |x| x.wrapping_abs()),
+        0x61 => simd_un!(frame, v_i8x16, p_i8x16, |x| x.wrapping_neg()),
+        0x62 => simd_un!(frame, v_u8x16, p_u8x16, |x| x.count_ones() as u8),
+        0x63 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_u8x16(v).iter().all(|&x| x != 0)));
+        }
+        0x64 => {
+            let v = frame.pop();
+            frame.push_i32(simd_bitmask(&v_u8x16(v), 8));
+        }
+        0x6b => simd_shift!(frame, v_u8x16, p_u8x16, 8, <<),
+        0x6c => simd_shift!(frame, v_i8x16, p_i8x16, 8, >>),
+        0x6d => simd_shift!(frame, v_u8x16, p_u8x16, 8, >>),
+        0x6e => simd_bin!(frame, v_u8x16, p_u8x16, |a, b| a.wrapping_add(b)),
+        0x6f => simd_bin!(frame, v_i8x16, p_i8x16, |a, b| a.saturating_add(b)),
+        0x70 => simd_bin!(frame, v_u8x16, p_u8x16, |a, b| a.saturating_add(b)),
+        0x71 => simd_bin!(frame, v_u8x16, p_u8x16, |a, b| a.wrapping_sub(b)),
+        0x72 => simd_bin!(frame, v_i8x16, p_i8x16, |a, b| a.saturating_sub(b)),
+        0x73 => simd_bin!(frame, v_u8x16, p_u8x16, |a, b| a.saturating_sub(b)),
+        0x76 => simd_bin!(frame, v_i8x16, p_i8x16, |a, b| a.min(b)),
+        0x77 => simd_bin!(frame, v_u8x16, p_u8x16, |a, b| a.min(b)),
+        0x78 => simd_bin!(frame, v_i8x16, p_i8x16, |a, b| a.max(b)),
+        0x79 => simd_bin!(frame, v_u8x16, p_u8x16, |a, b| a.max(b)),
+        0x7b => simd_bin!(frame, v_u8x16, p_u8x16, |a, b| ((u16::from(a) + u16::from(b) + 1) >> 1) as u8),
+        0x7c => simd_extadd!(frame, v_i8x16, p_i16x8, i16),
+        0x7d => simd_extadd!(frame, v_u8x16, p_u16x8, u16),
+        0x7e => simd_extadd!(frame, v_i16x8, p_i32x4, i32),
+        0x7f => simd_extadd!(frame, v_u16x8, p_u32x4, u32),
+        // --- i16x8 ---
+        0x80 => simd_un!(frame, v_i16x8, p_i16x8, |x| x.wrapping_abs()),
+        0x81 => simd_un!(frame, v_i16x8, p_i16x8, |x| x.wrapping_neg()),
+        0x82 => {
+            let b = v_i16x8(frame.pop());
+            let a = v_i16x8(frame.pop());
+            frame.push(p_i16x8(core::array::from_fn(|i| {
+                let p = (i32::from(a[i]) * i32::from(b[i]) + 0x4000) >> 15;
+                p.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+            })));
+        }
+        0x83 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_u16x8(v).iter().all(|&x| x != 0)));
+        }
+        0x84 => {
+            let v = frame.pop();
+            frame.push_i32(simd_bitmask(&v_u16x8(v), 16));
+        }
+        0x85 => simd_narrow!(frame, v_i32x4, p_i16x8, i32, i16),
+        0x86 => simd_narrow!(frame, v_i32x4, p_u16x8, i32, u16),
+        0x87 => simd_extend!(frame, v_i8x16, p_i16x8, i16, 8, false),
+        0x88 => simd_extend!(frame, v_i8x16, p_i16x8, i16, 8, true),
+        0x89 => simd_extend!(frame, v_u8x16, p_u16x8, u16, 8, false),
+        0x8a => simd_extend!(frame, v_u8x16, p_u16x8, u16, 8, true),
+        0x8b => simd_shift!(frame, v_u16x8, p_u16x8, 16, <<),
+        0x8c => simd_shift!(frame, v_i16x8, p_i16x8, 16, >>),
+        0x8d => simd_shift!(frame, v_u16x8, p_u16x8, 16, >>),
+        0x8e => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| a.wrapping_add(b)),
+        0x8f => simd_bin!(frame, v_i16x8, p_i16x8, |a, b| a.saturating_add(b)),
+        0x90 => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| a.saturating_add(b)),
+        0x91 => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| a.wrapping_sub(b)),
+        0x92 => simd_bin!(frame, v_i16x8, p_i16x8, |a, b| a.saturating_sub(b)),
+        0x93 => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| a.saturating_sub(b)),
+        0x95 => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| a.wrapping_mul(b)),
+        0x96 => simd_bin!(frame, v_i16x8, p_i16x8, |a, b| a.min(b)),
+        0x97 => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| a.min(b)),
+        0x98 => simd_bin!(frame, v_i16x8, p_i16x8, |a, b| a.max(b)),
+        0x99 => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| a.max(b)),
+        0x9b => simd_bin!(frame, v_u16x8, p_u16x8, |a, b| ((u32::from(a) + u32::from(b) + 1) >> 1) as u16),
+        0x9c => simd_extmul!(frame, v_i8x16, p_i16x8, i16, 8, false),
+        0x9d => simd_extmul!(frame, v_i8x16, p_i16x8, i16, 8, true),
+        0x9e => simd_extmul!(frame, v_u8x16, p_u16x8, u16, 8, false),
+        0x9f => simd_extmul!(frame, v_u8x16, p_u16x8, u16, 8, true),
+        // --- i32x4 ---
+        0xa0 => simd_un!(frame, v_i32x4, p_i32x4, |x| x.wrapping_abs()),
+        0xa1 => simd_un!(frame, v_i32x4, p_i32x4, |x| x.wrapping_neg()),
+        0xa3 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_u32x4(v).iter().all(|&x| x != 0)));
+        }
+        0xa4 => {
+            let v = frame.pop();
+            frame.push_i32(simd_bitmask(&v_u32x4(v), 32));
+        }
+        0xa7 => simd_extend!(frame, v_i16x8, p_i32x4, i32, 4, false),
+        0xa8 => simd_extend!(frame, v_i16x8, p_i32x4, i32, 4, true),
+        0xa9 => simd_extend!(frame, v_u16x8, p_u32x4, u32, 4, false),
+        0xaa => simd_extend!(frame, v_u16x8, p_u32x4, u32, 4, true),
+        0xab => simd_shift!(frame, v_u32x4, p_u32x4, 32, <<),
+        0xac => simd_shift!(frame, v_i32x4, p_i32x4, 32, >>),
+        0xad => simd_shift!(frame, v_u32x4, p_u32x4, 32, >>),
+        0xae => simd_bin!(frame, v_u32x4, p_u32x4, |a, b| a.wrapping_add(b)),
+        0xb1 => simd_bin!(frame, v_u32x4, p_u32x4, |a, b| a.wrapping_sub(b)),
+        0xb5 => simd_bin!(frame, v_u32x4, p_u32x4, |a, b| a.wrapping_mul(b)),
+        0xb6 => simd_bin!(frame, v_i32x4, p_i32x4, |a, b| a.min(b)),
+        0xb7 => simd_bin!(frame, v_u32x4, p_u32x4, |a, b| a.min(b)),
+        0xb8 => simd_bin!(frame, v_i32x4, p_i32x4, |a, b| a.max(b)),
+        0xb9 => simd_bin!(frame, v_u32x4, p_u32x4, |a, b| a.max(b)),
+        0xba => {
+            let b = v_i16x8(frame.pop());
+            let a = v_i16x8(frame.pop());
+            frame.push(p_i32x4(core::array::from_fn(|i| {
+                (i32::from(a[2 * i]) * i32::from(b[2 * i]))
+                    .wrapping_add(i32::from(a[2 * i + 1]) * i32::from(b[2 * i + 1]))
+            })));
+        }
+        0xbc => simd_extmul!(frame, v_i16x8, p_i32x4, i32, 4, false),
+        0xbd => simd_extmul!(frame, v_i16x8, p_i32x4, i32, 4, true),
+        0xbe => simd_extmul!(frame, v_u16x8, p_u32x4, u32, 4, false),
+        0xbf => simd_extmul!(frame, v_u16x8, p_u32x4, u32, 4, true),
+        // --- i64x2 ---
+        0xc0 => simd_un!(frame, v_i64x2, p_i64x2, |x| x.wrapping_abs()),
+        0xc1 => simd_un!(frame, v_i64x2, p_i64x2, |x| x.wrapping_neg()),
+        0xc3 => {
+            let v = frame.pop();
+            frame.push_i32(i32::from(v_u64x2(v).iter().all(|&x| x != 0)));
+        }
+        0xc4 => {
+            let v = frame.pop();
+            frame.push_i32(simd_bitmask(&v_u64x2(v), 64));
+        }
+        0xc7 => simd_extend!(frame, v_i32x4, p_i64x2, i64, 2, false),
+        0xc8 => simd_extend!(frame, v_i32x4, p_i64x2, i64, 2, true),
+        0xc9 => simd_extend!(frame, v_u32x4, p_u64x2, u64, 2, false),
+        0xca => simd_extend!(frame, v_u32x4, p_u64x2, u64, 2, true),
+        0xcb => simd_shift!(frame, v_u64x2, p_u64x2, 64, <<),
+        0xcc => simd_shift!(frame, v_i64x2, p_i64x2, 64, >>),
+        0xcd => simd_shift!(frame, v_u64x2, p_u64x2, 64, >>),
+        0xce => simd_bin!(frame, v_u64x2, p_u64x2, |a, b| a.wrapping_add(b)),
+        0xd1 => simd_bin!(frame, v_u64x2, p_u64x2, |a, b| a.wrapping_sub(b)),
+        0xd5 => simd_bin!(frame, v_u64x2, p_u64x2, |a, b| a.wrapping_mul(b)),
+        0xdc => simd_extmul!(frame, v_i32x4, p_i64x2, i64, 2, false),
+        0xdd => simd_extmul!(frame, v_i32x4, p_i64x2, i64, 2, true),
+        0xde => simd_extmul!(frame, v_u32x4, p_u64x2, u64, 2, false),
+        0xdf => simd_extmul!(frame, v_u32x4, p_u64x2, u64, 2, true),
+        // --- f32x4 ---
+        0x67 => simd_un!(frame, v_f32x4, p_f32x4, |x| ceil_f32(x)),
+        0x68 => simd_un!(frame, v_f32x4, p_f32x4, |x| floor_f32(x)),
+        0x69 => simd_un!(frame, v_f32x4, p_f32x4, |x| trunc_f32(x)),
+        0x6a => simd_un!(frame, v_f32x4, p_f32x4, |x| nearest_f32(x)),
+        0xe0 => simd_un!(frame, v_f32x4, p_f32x4, |x| fabs_f32(x)),
+        0xe1 => simd_un!(frame, v_f32x4, p_f32x4, |x| fneg_f32(x)),
+        0xe3 => {
+            let a = v_f32x4(frame.pop());
+            let mut r = a;
+            for (i, slot) in r.iter_mut().enumerate() {
+                *slot = sqrt_f32(a[i])?;
+            }
+            frame.push(p_f32x4(r));
+        }
+        0xe4 => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| a + b),
+        0xe5 => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| a - b),
+        0xe6 => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| a * b),
+        0xe7 => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| a / b),
+        0xe8 => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| fmin_f32(a, b)),
+        0xe9 => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| fmax_f32(a, b)),
+        0xea => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| if b < a { b } else { a }),
+        0xeb => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| if a < b { b } else { a }),
+        // --- f64x2 ---
+        0x74 => simd_un!(frame, v_f64x2, p_f64x2, |x| ceil_f64(x)),
+        0x75 => simd_un!(frame, v_f64x2, p_f64x2, |x| floor_f64(x)),
+        0x7a => simd_un!(frame, v_f64x2, p_f64x2, |x| trunc_f64(x)),
+        0x94 => simd_un!(frame, v_f64x2, p_f64x2, |x| nearest_f64(x)),
+        0xec => simd_un!(frame, v_f64x2, p_f64x2, |x| fabs_f64(x)),
+        0xed => simd_un!(frame, v_f64x2, p_f64x2, |x| fneg_f64(x)),
+        0xef => {
+            let a = v_f64x2(frame.pop());
+            let mut r = a;
+            for (i, slot) in r.iter_mut().enumerate() {
+                *slot = sqrt_f64(a[i])?;
+            }
+            frame.push(p_f64x2(r));
+        }
+        0xf0 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| a + b),
+        0xf1 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| a - b),
+        0xf2 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| a * b),
+        0xf3 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| a / b),
+        0xf4 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| fmin_f64(a, b)),
+        0xf5 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| fmax_f64(a, b)),
+        0xf6 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| if b < a { b } else { a }),
+        0xf7 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| if a < b { b } else { a }),
+        // --- saturating add/sub group members already handled above; narrow group ---
+        0x65 => simd_narrow!(frame, v_i16x8, p_i8x16, i16, i8),
+        0x66 => simd_narrow!(frame, v_i16x8, p_u8x16, i16, u8),
+        // --- int<->float conversions ---
+        0xfa => simd_convert!(frame, v_i32x4, p_f32x4, f32),
+        0xfb => simd_convert!(frame, v_u32x4, p_f32x4, f32),
+        0xfe => simd_convert!(frame, v_i32x4, p_f64x2, f64),
+        0xff => simd_convert!(frame, v_u32x4, p_f64x2, f64),
+        0xf8 | 0x101 => {
+            let s4 = v_f32x4(frame.pop());
+            frame.push(p_i32x4(core::array::from_fn(|i| sat_trunc_i32(f64::from(s4[i])))));
+        }
+        0xf9 | 0x102 => {
+            let s4 = v_f32x4(frame.pop());
+            frame.push(p_u32x4(core::array::from_fn(|i| sat_trunc_u32(f64::from(s4[i])))));
+        }
+        0xfc | 0x103 => {
+            let s2 = v_f64x2(frame.pop());
+            frame.push(p_i32x4(core::array::from_fn(|i| if i < 2 { sat_trunc_i32(s2[i]) } else { 0 })));
+        }
+        0xfd | 0x104 => {
+            let s2 = v_f64x2(frame.pop());
+            frame.push(p_u32x4(core::array::from_fn(|i| if i < 2 { sat_trunc_u32(s2[i]) } else { 0 })));
+        }
+        0x5e => {
+            let s2 = v_f64x2(frame.pop());
+            frame.push(p_f32x4([s2[0] as f32, s2[1] as f32, 0.0, 0.0]));
+        }
+        0x5f => {
+            let s4 = v_f32x4(frame.pop());
+            frame.push(p_f64x2([f64::from(s4[0]), f64::from(s4[1])]));
+        }
+        // --- widening loads / splat / zero ---
+        0x01 => simd_load_extend!(frame, store, s.mem, i8, 1, 8, p_i16x8, i16),
+        0x02 => simd_load_extend!(frame, store, s.mem, u8, 1, 8, p_u16x8, u16),
+        0x03 => simd_load_extend!(frame, store, s.mem, i16, 2, 4, p_i32x4, i32),
+        0x04 => simd_load_extend!(frame, store, s.mem, u16, 2, 4, p_u32x4, u32),
+        0x05 => simd_load_extend!(frame, store, s.mem, i32, 4, 2, p_i64x2, i64),
+        0x06 => simd_load_extend!(frame, store, s.mem, u32, 4, 2, p_u64x2, u64),
+        0x07 => {
+            let ea = simd_mem_ea(frame, store, s.mem, 1)?;
+            let x = store.memories[s.mem.memory as usize].bytes[ea];
+            frame.push(p_u8x16([x; 16]));
+        }
+        0x08 => {
+            let ea = simd_mem_ea(frame, store, s.mem, 2)?;
+            let m = &store.memories[s.mem.memory as usize];
+            let x = u16::from_le_bytes(m.bytes[ea..ea + 2].try_into().unwrap());
+            frame.push(p_u16x8([x; 8]));
+        }
+        0x09 => {
+            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
+            let m = &store.memories[s.mem.memory as usize];
+            let x = u32::from_le_bytes(m.bytes[ea..ea + 4].try_into().unwrap());
+            frame.push(p_u32x4([x; 4]));
+        }
+        0x0a => {
+            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
+            let m = &store.memories[s.mem.memory as usize];
+            let x = u64::from_le_bytes(m.bytes[ea..ea + 8].try_into().unwrap());
+            frame.push(p_u64x2([x; 2]));
+        }
+        0x5c => {
+            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
+            let m = &store.memories[s.mem.memory as usize];
+            let mut b = [0u8; 16];
+            b[0..4].copy_from_slice(&m.bytes[ea..ea + 4]);
+            frame.push(Value::from_le_bytes(b));
+        }
+        0x5d => {
+            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
+            let m = &store.memories[s.mem.memory as usize];
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&m.bytes[ea..ea + 8]);
+            frame.push(Value::from_le_bytes(b));
+        }
+        // --- load_lane / store_lane ---
+        0x54 => {
+            let mut a = v_u8x16(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 1)?;
+            a[lane] = store.memories[s.mem.memory as usize].bytes[ea];
+            frame.push(p_u8x16(a));
+        }
+        0x55 => {
+            let mut a = v_u16x8(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 2)?;
+            let m = &store.memories[s.mem.memory as usize];
+            a[lane] = u16::from_le_bytes(m.bytes[ea..ea + 2].try_into().unwrap());
+            frame.push(p_u16x8(a));
+        }
+        0x56 => {
+            let mut a = v_u32x4(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
+            let m = &store.memories[s.mem.memory as usize];
+            a[lane] = u32::from_le_bytes(m.bytes[ea..ea + 4].try_into().unwrap());
+            frame.push(p_u32x4(a));
+        }
+        0x57 => {
+            let mut a = v_u64x2(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
+            let m = &store.memories[s.mem.memory as usize];
+            a[lane] = u64::from_le_bytes(m.bytes[ea..ea + 8].try_into().unwrap());
+            frame.push(p_u64x2(a));
+        }
+        0x58 => {
+            let a = v_u8x16(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 1)?;
+            store.memories[s.mem.memory as usize].bytes[ea] = a[lane];
+        }
+        0x59 => {
+            let a = v_u16x8(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 2)?;
+            store.memories[s.mem.memory as usize].bytes[ea..ea + 2].copy_from_slice(&a[lane].to_le_bytes());
+        }
+        0x5a => {
+            let a = v_u32x4(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
+            store.memories[s.mem.memory as usize].bytes[ea..ea + 4].copy_from_slice(&a[lane].to_le_bytes());
+        }
+        0x5b => {
+            let a = v_u64x2(frame.pop());
+            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
+            store.memories[s.mem.memory as usize].bytes[ea..ea + 8].copy_from_slice(&a[lane].to_le_bytes());
+        }
+        // --- relaxed SIMD (deterministic choices per wazmrt) ---
+        0x105 => {
+            let c = v_f32x4(frame.pop());
+            let b = v_f32x4(frame.pop());
+            let a = v_f32x4(frame.pop());
+            frame.push(p_f32x4(core::array::from_fn(|i| a[i] * b[i] + c[i])));
+        }
+        0x106 => {
+            let c = v_f32x4(frame.pop());
+            let b = v_f32x4(frame.pop());
+            let a = v_f32x4(frame.pop());
+            frame.push(p_f32x4(core::array::from_fn(|i| c[i] - a[i] * b[i])));
+        }
+        0x107 => {
+            let c = v_f64x2(frame.pop());
+            let b = v_f64x2(frame.pop());
+            let a = v_f64x2(frame.pop());
+            frame.push(p_f64x2(core::array::from_fn(|i| a[i] * b[i] + c[i])));
+        }
+        0x108 => {
+            let c = v_f64x2(frame.pop());
+            let b = v_f64x2(frame.pop());
+            let a = v_f64x2(frame.pop());
+            frame.push(p_f64x2(core::array::from_fn(|i| c[i] - a[i] * b[i])));
+        }
+        0x109..=0x10c => {
+            let m = frame.pop();
+            let b = frame.pop();
+            let a = frame.pop();
+            frame.push((a & m) | (b & !m));
+        }
+        0x10d => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| fmin_f32(a, b)),
+        0x10e => simd_bin!(frame, v_f32x4, p_f32x4, |a, b| fmax_f32(a, b)),
+        0x10f => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| fmin_f64(a, b)),
+        0x110 => simd_bin!(frame, v_f64x2, p_f64x2, |a, b| fmax_f64(a, b)),
+        0x111 => {
+            let b = v_i16x8(frame.pop());
+            let a = v_i16x8(frame.pop());
+            frame.push(p_i16x8(core::array::from_fn(|i| {
+                let p = (i32::from(a[i]) * i32::from(b[i]) + 0x4000) >> 15;
+                p.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+            })));
+        }
+        0x112 => {
+            let b = v_i8x16(frame.pop());
+            let a = v_i8x16(frame.pop());
+            frame.push(p_i16x8(core::array::from_fn(|i| {
+                let s = i32::from(a[2 * i]) * i32::from(b[2 * i])
+                    + i32::from(a[2 * i + 1]) * i32::from(b[2 * i + 1]);
+                s.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+            })));
+        }
+        0x113 => {
+            let c = v_i32x4(frame.pop());
+            let b = v_i8x16(frame.pop());
+            let a = v_i8x16(frame.pop());
+            frame.push(p_i32x4(core::array::from_fn(|i| {
+                let p0 = i32::from(a[4 * i]) * i32::from(b[4 * i])
+                    + i32::from(a[4 * i + 1]) * i32::from(b[4 * i + 1]);
+                let p1 = i32::from(a[4 * i + 2]) * i32::from(b[4 * i + 2])
+                    + i32::from(a[4 * i + 3]) * i32::from(b[4 * i + 3]);
+                p0.wrapping_add(p1).wrapping_add(c[i])
+            })));
+        }
+        _ => return Err(Trap::UnsupportedInstruction),
+    }
+    Ok(())
+}
+
+/// Pack each lane's high (sign) bit into the low bits of an i32 (`iNxM.bitmask`).
+fn simd_bitmask<T: Copy + Into<u128>>(lanes: &[T], bits: u32) -> i32 {
+    let mut m: u32 = 0;
+    for (i, &x) in lanes.iter().enumerate() {
+        if (x.into() >> (bits - 1)) & 1 != 0 {
+            m |= 1 << i;
+        }
+    }
+    m as i32
+}
+
 fn cmp_i32(op: u8, a: i32, b: i32) -> bool {
     let (ua, ub) = (a as u32, b as u32);
     match op {
@@ -2397,8 +3167,8 @@ fn eval_const_expr(expr: &[u8], globals: &[Value]) -> Result<Value> {
             0x0b => break,
             0x41 => stack.push(i32_value(r.read_var_i32()?)),
             0x42 => stack.push(i64_value(r.read_var_i64()?)),
-            0x43 => stack.push(u64::from(r.read_f32_bits()?)),
-            0x44 => stack.push(r.read_f64_bits()?),
+            0x43 => stack.push(Value::from(r.read_f32_bits()?)),
+            0x44 => stack.push(Value::from(r.read_f64_bits()?)),
             0x23 => {
                 let gi = r.read_var_u32()? as usize;
                 stack.push(*globals.get(gi).ok_or(Trap::UndefinedGlobal)?);
@@ -2421,6 +3191,17 @@ fn eval_const_expr(expr: &[u8], globals: &[Value]) -> Result<Value> {
                 let b = as_i64(stack.pop().ok_or(Trap::ConstantExpr)?);
                 let a = as_i64(stack.pop().ok_or(Trap::ConstantExpr)?);
                 stack.push(i64_value(bin_i64(byte, a, b)?));
+            }
+            0xfd => {
+                // v128.const — the only 0xFD op valid in a constant expression.
+                if r.read_var_u32()? != 0x0c {
+                    return Err(Trap::ConstantExpr);
+                }
+                let mut b = [0u8; 16];
+                for slot in &mut b {
+                    *slot = r.read_byte()?;
+                }
+                stack.push(Value::from_le_bytes(b));
             }
             _ => return Err(Trap::ConstantExpr),
         }
@@ -2848,6 +3629,186 @@ mod tests {
             "t",
         );
         assert_eq!(as_i32(run1(&t, "t", &[]).unwrap()[0]), 1);
+    }
+
+    // --- SIMD (v128) ---
+
+    #[test]
+    fn simd_splat_extract() {
+        // i32x4.extract_lane 2 (i32x4.splat 7) -> 7
+        let s = single_func(
+            &[],
+            &[0x7f],
+            &[0x00, 0x41, 0x07, 0xfd, 0x11, 0xfd, 0x1b, 0x02, 0x0b],
+            "s",
+        );
+        assert_eq!(as_i32(run1(&s, "s", &[]).unwrap()[0]), 7);
+    }
+
+    #[test]
+    fn simd_const_extract_u() {
+        // v128.const [0,1,..,15]; i8x16.extract_lane_u 3 -> 3
+        let mut e = vec![0x00, 0xfd, 0x0c];
+        e.extend(0u8..16);
+        e.extend_from_slice(&[0xfd, 0x16, 0x03, 0x0b]);
+        let s = single_func(&[], &[0x7f], &e, "s");
+        assert_eq!(as_i32(run1(&s, "s", &[]).unwrap()[0]), 3);
+    }
+
+    #[test]
+    fn simd_i32x4_add() {
+        // extract_lane 0 (i32x4.add (splat 3) (splat 4)) -> 7
+        let s = single_func(
+            &[],
+            &[0x7f],
+            &[
+                0x00, 0x41, 0x03, 0xfd, 0x11, 0x41, 0x04, 0xfd, 0x11, 0xfd, 0xae, 0x01, 0xfd, 0x1b,
+                0x00, 0x0b,
+            ],
+            "s",
+        );
+        assert_eq!(as_i32(run1(&s, "s", &[]).unwrap()[0]), 7);
+    }
+
+    #[test]
+    fn simd_eq_bitmask() {
+        // i32x4.bitmask (i32x4.eq (splat 5) (splat 5)) -> 0b1111 = 15
+        let s = single_func(
+            &[],
+            &[0x7f],
+            &[
+                0x00, 0x41, 0x05, 0xfd, 0x11, 0x41, 0x05, 0xfd, 0x11, 0xfd, 0x37, 0xfd, 0xa4, 0x01,
+                0x0b,
+            ],
+            "s",
+        );
+        assert_eq!(as_i32(run1(&s, "s", &[]).unwrap()[0]), 15);
+    }
+
+    #[test]
+    fn simd_shift() {
+        // i32x4.extract_lane 0 (i32x4.shl (splat 1) 4) -> 16
+        let s = single_func(
+            &[],
+            &[0x7f],
+            &[
+                0x00, 0x41, 0x01, 0xfd, 0x11, 0x41, 0x04, 0xfd, 0xab, 0x01, 0xfd, 0x1b, 0x00, 0x0b,
+            ],
+            "s",
+        );
+        assert_eq!(as_i32(run1(&s, "s", &[]).unwrap()[0]), 16);
+    }
+
+    #[test]
+    fn simd_f32x4_add() {
+        // f32x4.extract_lane 0 (f32x4.add (splat 2.5) (splat 1.5)) -> 4.0
+        let s = single_func(
+            &[],
+            &[0x7d],
+            &[
+                0x00, //
+                0x43, 0x00, 0x00, 0x20, 0x40, 0xfd, 0x13, // f32.const 2.5; f32x4.splat
+                0x43, 0x00, 0x00, 0xc0, 0x3f, 0xfd, 0x13, // f32.const 1.5; f32x4.splat
+                0xfd, 0xe4, 0x01, // f32x4.add
+                0xfd, 0x1f, 0x00, // f32x4.extract_lane 0
+                0x0b,
+            ],
+            "s",
+        );
+        assert_eq!(as_f32(run1(&s, "s", &[]).unwrap()[0]), 4.0);
+    }
+
+    #[test]
+    fn simd_add_sat_s() {
+        // i8x16.extract_lane_s 0 (i8x16.add_sat_s (splat 100) (splat 100)) -> 127 (saturated)
+        let s = single_func(
+            &[],
+            &[0x7f],
+            &[
+                0x00, 0x41, 0xe4, 0x00, 0xfd, 0x0f, // i32.const 100; i8x16.splat
+                0x41, 0xe4, 0x00, 0xfd, 0x0f, // i32.const 100; i8x16.splat
+                0xfd, 0x6f, // i8x16.add_sat_s
+                0xfd, 0x15, 0x00, // i8x16.extract_lane_s 0
+                0x0b,
+            ],
+            "s",
+        );
+        assert_eq!(as_i32(run1(&s, "s", &[]).unwrap()[0]), 127);
+    }
+
+    #[test]
+    fn simd_load_store_roundtrip() {
+        // store a v128 [10,20,30,40] (i32 lanes) at addr 0, load it back, extract lane 2 -> 30
+        let entry = [
+            0x00, 0x41, 0x00, // i32.const 0 (store addr)
+            0xfd, 0x0c, 10, 0, 0, 0, 20, 0, 0, 0, 30, 0, 0, 0, 40, 0, 0, 0, // v128.const
+            0xfd, 0x0b, 0x00, 0x00, // v128.store align0 off0
+            0x41, 0x00, // i32.const 0 (load addr)
+            0xfd, 0x00, 0x00, 0x00, // v128.load align0 off0
+            0xfd, 0x1b, 0x02, // i32x4.extract_lane 2
+            0x0b,
+        ];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x01, 0x00, 0x01]), // memory: min 1
+            (7, vec![0x01, 0x01, b's', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "s", &[]).unwrap()[0]), 30);
+    }
+
+    #[test]
+    fn simd_v128_struct_field() {
+        // type 1 = (struct (field (mut v128))); store a v128 (i32x4 lane0=7), read it, extract -> 7
+        let mut entry = vec![
+            0x01, 0x01, 0x63, 0x01, // 1 local (ref null 1)
+            0xfb, 0x01, 0x01, // struct.new_default 1
+            0x21, 0x00, // local.set 0
+            0x20, 0x00, // local.get 0
+            0xfd, 0x0c, // v128.const
+        ];
+        entry.extend_from_slice(&[7, 0, 0, 0]);
+        entry.extend_from_slice(&[0; 12]);
+        entry.extend_from_slice(&[
+            0xfb, 0x05, 0x01, 0x00, // struct.set type1 field0
+            0x20, 0x00, // local.get 0
+            0xfb, 0x02, 0x01, 0x00, // struct.get type1 field0
+            0xfd, 0x1b, 0x00, // i32x4.extract_lane 0
+            0x0b,
+        ]);
+        let m = asm(&[
+            (
+                1,
+                vec![
+                    0x02, // 2 types
+                    0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+                    0x5f, 0x01, 0x7b, 0x01, // type 1: struct { (mut v128) }
+                ],
+            ),
+            (3, vec![0x01, 0x00]),
+            (7, vec![0x01, 0x01, b'v', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "v", &[]).unwrap()[0]), 7);
+    }
+
+    #[test]
+    fn simd_v128_global() {
+        // (global v128 (v128.const i32x4 9 0 0 0)); extract_lane 0 (global.get 0) -> 9
+        let mut global = vec![0x01, 0x7b, 0x00, 0xfd, 0x0c]; // 1 global: v128, immutable, v128.const
+        global.extend_from_slice(&[9, 0, 0, 0]);
+        global.extend_from_slice(&[0; 12]);
+        global.push(0x0b); // end of const-expr
+        let entry = [0x00, 0x23, 0x00, 0xfd, 0x1b, 0x00, 0x0b]; // global.get 0; i32x4.extract_lane 0
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (6, global),
+            (7, vec![0x01, 0x01, b'g', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "g", &[]).unwrap()[0]), 9);
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {

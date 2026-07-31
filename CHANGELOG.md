@@ -11,8 +11,32 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next (0.6.x interpreter slices): SIMD, threads, memory64, and exception handling — plus host imports
+_Next (0.6.x interpreter slices): threads/atomics, memory64, and exception handling — plus host imports
 (for WASI). Plus the deferred 0.5.x validation arms._
+
+## [0.6.5] — Interpreter: SIMD (stage T5, slice 6)
+
+### Added
+- Execution for the **entire fixed-width SIMD proposal plus relaxed SIMD** (the `0xFD` `v128` family,
+  ~230 sub-opcodes): `v128.const`, all lane shapes' splat / extract_lane / replace_lane, `i8x16.shuffle`
+  / `swizzle`, lane-wise integer & float arithmetic, comparisons (lane masks), shifts, saturating
+  add/sub, min/max, `avgr_u`, `abs`/`neg`/`popcnt`, bitwise ops + `bitselect`, `any_true`/`all_true`/
+  `bitmask`, narrow/extend/`extmul`/`extadd_pairwise`/`dot`/`q15mulr_sat`, int↔float conversions
+  (convert / `trunc_sat` / demote / promote), all v128 loads/stores (incl. `load_splat`, `load_extend`,
+  `loadN_zero`, `loadN_lane` / `storeN_lane`), and the relaxed ops (each pinned to one deterministic
+  choice — e.g. `relaxed_trunc` → saturating, `relaxed_madd` → double-rounding).
+- `v128.const` is now valid in **constant expressions**, so a module may declare a `v128` global.
+- **WasmGC `v128` fields** now execute (a struct/array field of type `v128`) — the 0.6.4 deferral is lifted.
+
+So `wasmrt run` executes SIMD modules — e.g. `i32x4.extract_lane(i32x4.add(splat a, splat b))`.
+
+### Changed
+- **The interpreter value slot is now 128-bit** (`Value = u128`). A `v128` occupies a single stack /
+  local / table / global / GC-field slot, so the whole engine stays on the "one slot per value" model —
+  `select`, `drop`, branch arity, locals, and call marshaling never reason about slot width. This is an
+  idiomatic-Rust divergence from wazmrt (which stores a `v128` as two `u64` slots and carries width
+  tables); observable behavior is identical. Scalars and references live in the low 64 bits, so the
+  `NULL_REF` / `I31_TAG` sentinel invariants are unchanged.
 
 ## [0.6.4] — Interpreter: WasmGC (stage T5, slice 5)
 

@@ -7,9 +7,9 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–5 (v0.6.0 integer,
-v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC) DONE. Next: 0.6.x —
-SIMD → multi-memory → threads → memory64 → EH + host imports; + the deferred 0.5.x validation arms.**
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–6 (v0.6.0 integer,
+v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC, v0.6.5 SIMD) DONE.
+Next: 0.6.x — multi-memory → threads → memory64 → EH + host imports; + the deferred 0.5.x validation arms.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -107,7 +107,18 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     `br_on_cast`/`br_on_cast_fail` over a runtime subtype check (`ref_matches`). **Deferred, reject loudly:**
     `v128` GC fields (land with SIMD) and GC allocation in const-exprs (`struct.new` in a global init).
     76 core tests, clippy clean, native + wasm32 no_std. `[✅]`
-  - **0.6.x remaining slices (per the roadmap order below):** SIMD → multi-memory → threads →
+  - **Slice 6 — SIMD. ✅ DONE 2026-07-31 (v0.6.5).** The **entire fixed-width + relaxed SIMD set** (`0xFD`
+    `v128`, ~230 sub-opcodes): const/splat/extract/replace, shuffle/swizzle, lane-wise int+float
+    arith/cmp/shift, sat add/sub, min/max, avgr, abs/neg/popcnt, bitwise+bitselect, any/all_true/bitmask,
+    narrow/extend/extmul/extadd/dot/q15, int↔float convert/trunc_sat/demote/promote, all v128 loads/stores
+    (splat/extend/zero/lane), relaxed ops (each pinned to one deterministic choice). **Load-bearing design
+    decision: the value slot was widened to 128-bit (`Value = u128`)** so a `v128` is ONE slot — the whole
+    engine stays "one slot per value" (select/drop/arity/locals/call-marshaling untouched), an idiomatic
+    divergence from wazmrt's 2-`u64`-slots + width-tables. Scalars/refs in the low 64; `NULL_REF`/`I31_TAG`
+    invariants unchanged. Also: `v128.const` in const-exprs (v128 globals) + **the GC `v128`-field
+    deferral lifted** (a field is one `Value`). Ported opcode-for-opcode from wazmrt `interp.zig execSimd`.
+    86 core tests, clippy clean, native + wasm32 no_std. `[✅]`
+  - **0.6.x remaining slices (per the roadmap order below):** multi-memory → threads →
     memory64 → EH. Also fold in host imports (WASI needs them) + the deferred 0.5.x validation arms.
     Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant

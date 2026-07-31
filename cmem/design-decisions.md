@@ -87,8 +87,13 @@ Choices made while porting; consistent with "boundary-faithful behavior, idiomat
   and **T5 interp** land core-first with the exotic proposal arms deferred to `.x` patch releases, because
   each is a trustworthiness promise and most of their tests need the WAT assembler (T6). Deferred ops
   **reject loudly**, never silent-accept. See [known-issues.md](known-issues.md).
-- **Interpreter internals** (T5): untyped `u64` value slots; `Instance` **owns** its `Module`; the
-  immutable `module`/`func_bodies` are threaded separately from `&mut globals` so a recursive `call`
+- **Interpreter internals** (T5): untyped value slots — `u64` through v0.6.4, **widened to `u128` at the
+  SIMD slice (v0.6.5)** so a `v128` occupies ONE slot and the engine stays "one slot per value"
+  (select/drop/branch-arity/locals/call-marshaling never reason about slot width). wazmrt instead uses two
+  `u64` slots + width tables (`slotWidth`/`local_map`/`drop_select_w`); wasmrt's wider slot trades runtime
+  memory (16 B/slot) for eliminating the slot-desync hazard class — an idiomatic divergence, behavior
+  identical, scalars/refs in the low 64 so the sentinel invariants hold. `Instance` **owns** its `Module`;
+  the immutable `module`/`func_bodies` are threaded separately from `&mut Store` so a recursive `call`
   reborrows cleanly (no `RefCell`); control flow via a precomputed `end_of`/`else_of` table + a label
   stack. Float rounding is bit-manipulation (no_std); **`sqrt` is `std`-gated** (the one no_std float gap).
 - **Versioning = port-progress ladder**, per-task release to crates.io (see [releasing.md](releasing.md)).

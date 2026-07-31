@@ -1,7 +1,7 @@
 # Known Issues
 
 Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–5 done, v0.1.0–v0.6.4). This records the **inherited concerns** from the frozen wazmrt oracle, the
+1–6 done, v0.1.0–v0.6.5). This records the **inherited concerns** from the frozen wazmrt oracle, the
 **port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
 Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
@@ -15,15 +15,31 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
 - **Two slices were split core-first, exotic-later** because they're a correctness promise AND their
   exotic tests need the WAT assembler (T6): **T4 validate** (core language now; SIMD/atomics/GC-objects/EH
   typing → 0.5.x) and **T5 interp** (integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes
-  v0.6.3 → GC v0.6.4 → SIMD/threads/memory64/EH in later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
+  v0.6.3 → GC v0.6.4 → SIMD v0.6.5 → threads/memory64/EH in later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
   never silent-accept — so a verdict/result is always trustworthy.
+- **The interpreter value slot is 128-bit (`Value = u128`)** since the SIMD slice (`interp.rs`, T5 slice 6
+  / v0.6.5). wazmrt stores a `v128` as **two `u64` slots** and carries width tables (`slotWidth`,
+  `local_map`/`local_w`, `drop_select_w`, slot-counted arity) to size `drop`/`select` — an explicit
+  "stack-desync hazard if missed." wasmrt instead widens the slot so a `v128` is **one** slot: the whole
+  engine stays "one slot per value" (select/drop/arity/locals/call-marshaling never reason about width),
+  eliminating that hazard class. Cost: every slot is 16 bytes (runtime memory, not binary size — the
+  "small" ethos is about binary size). Scalars/refs live in the low 64 bits, so the `NULL_REF` (`u64::MAX`)
+  / `I31_TAG` (`1<<63`) sentinel invariants are unchanged. Observable behavior identical → parity holds.
+  A `const _: () = assert!(I31_TAG == 1u128 << 63)` guards the sentinel placement.
+- **SIMD is complete, incl. relaxed SIMD** (`interp.rs exec_simd`, v0.6.5) — the deferral is gone. Relaxed
+  ops each take **one fixed deterministic choice** (matching the frozen oracle): `relaxed_trunc` →
+  saturating (`trunc_sat`), `relaxed_madd`/`nmadd` → double-rounding (`a*b` then `±c`), `relaxed_laneselect`
+  → full bitselect, `relaxed_min`/`max` → the `@min`/`@max` (fmin/fmax) choice, `relaxed_dot` → signed with
+  saturation. Also **WasmGC `v128` fields now execute** (the 0.6.4 `field_is_v128` reject guard is removed —
+  a field is one `Value`), and `v128.const` is valid in constant expressions (`v128` globals).
 - **WasmGC executes over a `Store`-owned managed heap** (`interp.rs`, T5 slice 5 / v0.6.4):
   `gc_heap: Vec<HeapObject>` grown per allocation, bounded by a per-run object budget — no collector yet
   (objects live until the store drops; fine for the run-to-completion interpreter). The load-bearing
   **slot-encoding order is honored: `NULL_REF` (`u64::MAX`) is checked BEFORE `I31_TAG` (`1<<63`)** so a
-  null ref never reads as an `i31`. Two GC bits **reject loudly, deferred**: `v128` struct/array fields
-  (land with the SIMD slice) and GC allocation inside constant expressions (`struct.new`/`array.new`/
-  `ref.i31` in a global initializer) — both trap `UnsupportedInstruction` rather than silently mis-execute.
+  null ref never reads as an `i31`. `v128` struct/array fields were deferred here and **landed in v0.6.5**
+  (SIMD slice). Still **deferred, reject loudly**: GC allocation inside constant expressions
+  (`struct.new`/`array.new`/`ref.i31` in a global initializer) traps `UnsupportedInstruction` rather than
+  silently mis-execute. (Non-GC `v128.const` in const-exprs IS supported as of v0.6.5.)
 - **`sqrt` is `std`-gated** (`interp.rs`, T5 float): uses the platform math lib with the default `std`
   feature; a freestanding `no_std` build traps on `sqrt` alone. The one no_std float gap — revisit with a
   software sqrt (or `libm`, if the zero-dep stance relaxes) when the freestanding-wasm target is finished.
