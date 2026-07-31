@@ -11,8 +11,28 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next (0.6.x interpreter slices): GC, SIMD, threads, and exception handling — plus host imports (for
-WASI). Plus the deferred 0.5.x validation arms._
+_Next (0.6.x interpreter slices): SIMD, threads, memory64, and exception handling — plus host imports
+(for WASI). Plus the deferred 0.5.x validation arms._
+
+## [0.6.4] — Interpreter: WasmGC (stage T5, slice 5)
+
+### Added
+- Execution for the WasmGC reference-types proposal: unboxed `i31` (`ref.i31`, `i31.get_s`/`get_u`),
+  `ref.eq`, heap **structs** (`struct.new`/`struct.new_default`/`struct.get`/`get_s`/`get_u`/`struct.set`),
+  heap **arrays** (`array.new`/`new_default`/`new_fixed`/`get`/`get_s`/`get_u`/`set`/`array.len`), and the
+  casts `ref.test`/`ref.cast` + `br_on_cast`/`br_on_cast_fail`.
+- A managed GC heap on the `Store` (`Vec<HeapObject>`), with packed `i8`/`i16` struct/array field storage
+  (sign/zero-extended on `struct.get_s`/`get_u`), a per-run object budget, and the runtime subtype check
+  behind the casts.
+
+So `wasmrt run` now executes GC modules — allocate a struct/array, mutate a field, read it back, and
+test/cast references at runtime.
+
+### Notes
+- The load-bearing sentinel order holds: `null_ref` (`u64::MAX`) is checked **before** `i31_tag`
+  (`1<<63`), so a null reference never masquerades as an `i31`.
+- Deferred to later slices (reject loudly, never silent-accept): `v128` GC fields (land with SIMD), and
+  GC allocation inside constant expressions (e.g. `struct.new` in a global initializer).
 
 ## [0.6.3] — Interpreter: tables + reference types (stage T5, slice 4)
 

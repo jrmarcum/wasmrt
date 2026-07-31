@@ -1,7 +1,7 @@
 # Known Issues
 
 Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–4 done, v0.1.0–v0.6.3). This records the **inherited concerns** from the frozen wazmrt oracle, the
+1–5 done, v0.1.0–v0.6.4). This records the **inherited concerns** from the frozen wazmrt oracle, the
 **port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
 Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
@@ -15,8 +15,15 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
 - **Two slices were split core-first, exotic-later** because they're a correctness promise AND their
   exotic tests need the WAT assembler (T6): **T4 validate** (core language now; SIMD/atomics/GC-objects/EH
   typing → 0.5.x) and **T5 interp** (integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes
-  v0.6.3 → GC/SIMD/threads/EH in later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
+  v0.6.3 → GC v0.6.4 → SIMD/threads/memory64/EH in later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
   never silent-accept — so a verdict/result is always trustworthy.
+- **WasmGC executes over a `Store`-owned managed heap** (`interp.rs`, T5 slice 5 / v0.6.4):
+  `gc_heap: Vec<HeapObject>` grown per allocation, bounded by a per-run object budget — no collector yet
+  (objects live until the store drops; fine for the run-to-completion interpreter). The load-bearing
+  **slot-encoding order is honored: `NULL_REF` (`u64::MAX`) is checked BEFORE `I31_TAG` (`1<<63`)** so a
+  null ref never reads as an `i31`. Two GC bits **reject loudly, deferred**: `v128` struct/array fields
+  (land with the SIMD slice) and GC allocation inside constant expressions (`struct.new`/`array.new`/
+  `ref.i31` in a global initializer) — both trap `UnsupportedInstruction` rather than silently mis-execute.
 - **`sqrt` is `std`-gated** (`interp.rs`, T5 float): uses the platform math lib with the default `std`
   feature; a freestanding `no_std` build traps on `sqrt` alone. The one no_std float gap — revisit with a
   software sqrt (or `libm`, if the zero-dep stance relaxes) when the freestanding-wasm target is finished.

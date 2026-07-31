@@ -35,3 +35,13 @@ Detailed engineering reference (the wazmrt deep-read maps + `wasmrt.h` draft) is
 When asked to record/remember anything for the project, fold it into the matching `cmem/` file(s) and
 refresh the `cmem/INDEX.md` Files table (see the binding triggers in `cmem/INDEX.md`), then commit +
 push (`origin` = github.com/jrmarcum/wasmrt). `README.md` is public-facing docs, NOT project memory.
+
+## 🔒 Release-prep directive — docs BEFORE the publish handoff (owner, 2026-07-31)
+
+**When a release is finished, the project memory (`cmem/`) AND the roadmap SHALL be fully updated and
+committed BEFORE the owner is notified of the publish needs** — so the very commit that gets published
+already carries the updated docs. Do not defer the memory/roadmap sync to "after publish": that ships a
+release whose docs lag the code. Concretely, the release commit must land *all* of `cmem/` +
+`ROADMAP.md` + `CHANGELOG.md` + `README.md` + the version bump together, and only *then* hand over the
+`cargo publish` / `git tag` / `gh release` commands. The binding per-release checklist lives in
+[`cmem/releasing.md`](cmem/releasing.md).

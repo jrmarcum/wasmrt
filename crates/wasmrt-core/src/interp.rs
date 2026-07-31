@@ -17,10 +17,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::module::{FuncType, Module};
-use crate::opcode::{decode_body, BlockType, Imm, Instr, Op};
+use crate::module::{CompKind, CompType, FuncType, Module, StorageType};
+use crate::opcode::{decode_body, BlockType, HeapType, Imm, Instr, Op, RefType};
 use crate::reader::Reader;
-use crate::types::DecodeError;
+use crate::types::{DecodeError, RefHeap, ValType};
 
 /// A runtime value: a raw 64-bit slot reinterpreted per the (validated) type.
 pub type Value = u64;
@@ -77,9 +77,25 @@ const DEFAULT_MAX_TABLE_ELEMS: usize = 1 << 27;
 /// The null-reference sentinel — a value-stack `ref.null`, and an uninitialized table entry.
 /// A funcref value is a (small) function index, so it never collides.
 ///
-/// **Invariant (do not drift):** when GC lands, `null_ref` (all bits set) is checked *before*
-/// `i31_tag` (bit 63), so the two never confuse (`cmem/design-decisions.md`).
+/// **Invariant (do not drift):** `null_ref` (all bits set) is checked *before* [`I31_TAG`]
+/// (bit 63), so the two never confuse (`cmem/design-decisions.md`).
 pub const NULL_REF: Value = u64::MAX;
+
+/// Tag bit marking a value slot as an unboxed i31 (WasmGC). Set on `ref.i31` results so
+/// `ref.test`/`ref.cast` can tell an i31 from a heap-object index (bit 63 clear) within the
+/// `any` hierarchy. Checked *after* [`NULL_REF`] (all bits set), so the two never confuse.
+const I31_TAG: Value = 1 << 63;
+
+/// Cap on live GC objects per instance. There is no collector (a proposal-scope decision), so
+/// this backstop keeps a guest allocation loop from exhausting host memory.
+const MAX_GC_OBJECTS: usize = 1 << 24;
+
+/// A heap-allocated GC object: its declared type index (RTT) + its struct fields / array
+/// elements (`fieldIsV128` GC×SIMD fields are rejected, so one `Value` per field suffices).
+struct HeapObject {
+    type_index: u32,
+    fields: Vec<Value>,
+}
 
 /// Shared linear memory. `bytes` is `alloc_zeroed`-backed (demand-zero pages on mainstream
 /// OSes), so a large declared minimum costs address space, not resident memory.
@@ -109,6 +125,9 @@ struct Store {
     elem_values: Vec<Vec<Value>>,
     /// `elem_dropped[i]` marks a segment consumed (active/declarative at init, or `elem.drop`).
     elem_dropped: Vec<bool>,
+    /// GC heap: one entry per allocated struct/array; a GC reference value is its index here.
+    /// No collector — objects live for the instance's lifetime, bounded by `MAX_GC_OBJECTS`.
+    gc_heap: Vec<HeapObject>,
 }
 
 /// A runtime trap or an execution-setup error.
@@ -151,6 +170,12 @@ pub enum Trap {
     UndefinedElement,
     /// A null reference where a non-null one is required (`call_ref` / `ref.as_non_null`).
     NullReference,
+    /// A GC struct field / array element access outside the object's bounds.
+    GcOutOfBounds,
+    /// The instance allocated more than `MAX_GC_OBJECTS` GC objects (no collector).
+    GcHeapExhausted,
+    /// `ref.cast` to a type the value is not an instance of.
+    CastFailure,
     /// A constant expression used an opcode this slice doesn't evaluate.
     ConstantExpr,
     /// An opcode this interpreter slice does not execute yet (float/memory/tables/GC/SIMD/EH).
@@ -194,6 +219,9 @@ impl fmt::Display for Trap {
             Trap::UndefinedType => f.write_str("type index out of range"),
             Trap::UndefinedElement => f.write_str("element segment index out of range"),
             Trap::NullReference => f.write_str("null reference"),
+            Trap::GcOutOfBounds => f.write_str("out of bounds GC access"),
+            Trap::GcHeapExhausted => f.write_str("GC heap exhausted"),
+            Trap::CastFailure => f.write_str("cast failure"),
             Trap::ConstantExpr => f.write_str("unsupported constant expression"),
             Trap::UnsupportedInstruction => {
                 f.write_str("instruction not executed in this release (float/memory/tables/GC/SIMD/EH)")
@@ -359,6 +387,7 @@ impl Instance {
                 data_dropped,
                 elem_values,
                 elem_dropped,
+                gc_heap: Vec::new(),
             },
         })
     }
@@ -1012,6 +1041,243 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 pc += 1;
             }
 
+            // --- WasmGC: i31 (unboxed; i31_tag checked AFTER null_ref) ---
+            Op::RefI31 => {
+                let x = frame.pop_i32() as u32;
+                frame.push(I31_TAG | u64::from(x & 0x7fff_ffff)); // wrap to 31 bits, non-null
+                pc += 1;
+            }
+            Op::I31GetS => {
+                let r = frame.pop();
+                if r == NULL_REF {
+                    return Err(Trap::NullReference);
+                }
+                let n = r as u32;
+                frame.push_i32(((n << 1) as i32) >> 1); // sign-extend the 31-bit payload
+                pc += 1;
+            }
+            Op::I31GetU => {
+                let r = frame.pop();
+                if r == NULL_REF {
+                    return Err(Trap::NullReference);
+                }
+                frame.push_i32((r as u32 & 0x7fff_ffff) as i32);
+                pc += 1;
+            }
+            Op::RefEq => {
+                let b = frame.pop();
+                let a = frame.pop();
+                frame.push_i32(i32::from(a == b));
+                pc += 1;
+            }
+
+            // --- WasmGC: struct objects ---
+            Op::StructNew => {
+                let Imm::GcType(ti) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                if sf.iter().any(|f| field_is_v128(f.storage)) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let base = frame.stack_base(sf.len())?;
+                let obj: Vec<Value> = sf
+                    .iter()
+                    .enumerate()
+                    .map(|(k, f)| pack_field(f.storage, frame.vstack[base + k]))
+                    .collect();
+                frame.vstack.truncate(base);
+                let r = alloc_object(store, ti, obj)?;
+                frame.push(r);
+                pc += 1;
+            }
+            Op::StructNewDefault => {
+                let Imm::GcType(ti) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                if sf.iter().any(|f| field_is_v128(f.storage)) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let obj: Vec<Value> = sf.iter().map(|f| default_field(f.storage)).collect();
+                let r = alloc_object(store, ti, obj)?;
+                frame.push(r);
+                pc += 1;
+            }
+            Op::StructGet | Op::StructGetS | Op::StructGetU => {
+                let Imm::GcField { type_index, field } = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let idx = gc_object_index(store, frame.pop())?;
+                let storage = ctx
+                    .module
+                    .struct_fields(type_index)
+                    .ok_or(Trap::UndefinedType)?
+                    .get(field as usize)
+                    .ok_or(Trap::GcOutOfBounds)?
+                    .storage;
+                if field_is_v128(storage) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let v = *store.gc_heap[idx]
+                    .fields
+                    .get(field as usize)
+                    .ok_or(Trap::GcOutOfBounds)?;
+                frame.push(unpack_field(storage, v, instr.op == Op::StructGetS));
+                pc += 1;
+            }
+            Op::StructSet => {
+                let Imm::GcField { type_index, field } = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let v = frame.pop();
+                let idx = gc_object_index(store, frame.pop())?;
+                let storage = ctx
+                    .module
+                    .struct_fields(type_index)
+                    .ok_or(Trap::UndefinedType)?
+                    .get(field as usize)
+                    .ok_or(Trap::GcOutOfBounds)?
+                    .storage;
+                if field_is_v128(storage) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let slot = store.gc_heap[idx]
+                    .fields
+                    .get_mut(field as usize)
+                    .ok_or(Trap::GcOutOfBounds)?;
+                *slot = pack_field(storage, v);
+                pc += 1;
+            }
+
+            // --- WasmGC: array objects ---
+            Op::ArrayNew => {
+                let Imm::GcType(ti) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                if field_is_v128(f.storage) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let len = frame.pop_i32() as u32 as usize;
+                let init = pack_field(f.storage, frame.pop());
+                let r = alloc_object(store, ti, vec![init; len])?;
+                frame.push(r);
+                pc += 1;
+            }
+            Op::ArrayNewDefault => {
+                let Imm::GcType(ti) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                if field_is_v128(f.storage) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let len = frame.pop_i32() as u32 as usize;
+                let r = alloc_object(store, ti, vec![default_field(f.storage); len])?;
+                frame.push(r);
+                pc += 1;
+            }
+            Op::ArrayNewFixed => {
+                let Imm::GcTypeN { type_index, n } = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let f = ctx.module.array_field(type_index).ok_or(Trap::UndefinedType)?;
+                if field_is_v128(f.storage) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let base = frame.stack_base(n as usize)?;
+                let obj: Vec<Value> = (0..n as usize)
+                    .map(|k| pack_field(f.storage, frame.vstack[base + k]))
+                    .collect();
+                frame.vstack.truncate(base);
+                let r = alloc_object(store, type_index, obj)?;
+                frame.push(r);
+                pc += 1;
+            }
+            Op::ArrayGet | Op::ArrayGetS | Op::ArrayGetU => {
+                let Imm::GcType(ti) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                if field_is_v128(f.storage) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let index = frame.pop_i32() as u32 as usize;
+                let idx = gc_object_index(store, frame.pop())?;
+                let v = *store.gc_heap[idx]
+                    .fields
+                    .get(index)
+                    .ok_or(Trap::GcOutOfBounds)?;
+                frame.push(unpack_field(f.storage, v, instr.op == Op::ArrayGetS));
+                pc += 1;
+            }
+            Op::ArraySet => {
+                let Imm::GcType(ti) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                if field_is_v128(f.storage) {
+                    return Err(Trap::UnsupportedInstruction);
+                }
+                let v = frame.pop();
+                let index = frame.pop_i32() as u32 as usize;
+                let idx = gc_object_index(store, frame.pop())?;
+                let slot = store.gc_heap[idx]
+                    .fields
+                    .get_mut(index)
+                    .ok_or(Trap::GcOutOfBounds)?;
+                *slot = pack_field(f.storage, v);
+                pc += 1;
+            }
+            Op::ArrayLen => {
+                let idx = gc_object_index(store, frame.pop())?;
+                frame.push_i32(store.gc_heap[idx].fields.len() as i32);
+                pc += 1;
+            }
+
+            // --- WasmGC: casts ---
+            Op::RefTest => {
+                let Imm::RefCast(rt) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let v = frame.pop();
+                frame.push_i32(i32::from(ref_matches(ctx.module, store, v, rt)));
+                pc += 1;
+            }
+            Op::RefCastOp => {
+                let Imm::RefCast(rt) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?; // peek — value stays
+                if !ref_matches(ctx.module, store, v, rt) {
+                    return Err(Trap::CastFailure);
+                }
+                pc += 1;
+            }
+            Op::BrOnCast => {
+                let Imm::BrCast { label, dst, .. } = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
+                pc = if ref_matches(ctx.module, store, v, dst) {
+                    frame.branch(label)?
+                } else {
+                    pc + 1
+                };
+            }
+            Op::BrOnCastFail => {
+                let Imm::BrCast { label, dst, .. } = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
+                pc = if ref_matches(ctx.module, store, v, dst) {
+                    pc + 1
+                } else {
+                    frame.branch(label)?
+                };
+            }
+
             // Integer arithmetic / comparison / bitwise / conversion.
             _ => {
                 exec_numeric(frame, instr.op)?;
@@ -1323,6 +1589,120 @@ fn eval_const_offset(expr: &[u8], globals: &[Value], is64: bool) -> Result<u64> 
     } else {
         u64::from(as_i32(v) as u32)
     })
+}
+
+// --- WasmGC helpers ----------------------------------------------------------
+
+/// A `v128` field can't fit the one-`Value`-per-field object model; GC ops reject it.
+fn field_is_v128(storage: StorageType) -> bool {
+    storage.unpacked() == ValType::V128
+}
+
+/// Narrow a value to a field's storage width before storing (packed i8/i16 keep low bits).
+fn pack_field(storage: StorageType, v: Value) -> Value {
+    match storage {
+        StorageType::Val(_) => v,
+        StorageType::I8 => v & 0xff,
+        StorageType::I16 => v & 0xffff,
+    }
+}
+
+/// Widen a stored field value back to an i32 slot: `_s` sign-extends a packed field, `_u`
+/// zero-extends; an unpacked field is verbatim.
+fn unpack_field(storage: StorageType, v: Value, signed: bool) -> Value {
+    match storage {
+        StorageType::Val(_) => v,
+        StorageType::I8 if signed => i32_value(i32::from(v as u8 as i8)),
+        StorageType::I8 => i32_value(i32::from(v as u8)),
+        StorageType::I16 if signed => i32_value(i32::from(v as u16 as i16)),
+        StorageType::I16 => i32_value(i32::from(v as u16)),
+    }
+}
+
+/// The default slot for a field/element of `storage` at `*.new_default` (null for a ref, else 0).
+fn default_field(storage: StorageType) -> Value {
+    if storage.unpacked().is_ref() {
+        NULL_REF
+    } else {
+        0
+    }
+}
+
+/// Validate a non-null GC reference and return its heap index, or trap.
+fn gc_object_index(store: &Store, r: Value) -> Result<usize> {
+    if r == NULL_REF {
+        return Err(Trap::NullReference);
+    }
+    let idx = usize::try_from(r).map_err(|_| Trap::GcOutOfBounds)?;
+    if idx >= store.gc_heap.len() {
+        return Err(Trap::GcOutOfBounds);
+    }
+    Ok(idx)
+}
+
+/// Allocate a GC object, returning its reference value (its heap index).
+fn alloc_object(store: &mut Store, type_index: u32, fields: Vec<Value>) -> Result<Value> {
+    let idx = store.gc_heap.len();
+    if idx >= MAX_GC_OBJECTS {
+        return Err(Trap::GcHeapExhausted);
+    }
+    store.gc_heap.push(HeapObject { type_index, fields });
+    Ok(idx as Value)
+}
+
+/// The type index of a *defined* function (for a funcref `ref.cast` to a concrete func type);
+/// `None` for an imported function.
+fn defined_func_type(module: &Module, v: Value) -> Option<u32> {
+    let fi = u32::try_from(v).ok()?;
+    let imported = module.imported_func_count();
+    if fi < imported {
+        return None;
+    }
+    module.functions.get((fi - imported) as usize).copied()
+}
+
+/// Match a value's actual heap head against a target heap type — abstract targets use the
+/// hierarchy relation, concrete targets the declared subtype chain.
+fn head_matches(module: &Module, actual: RefHeap, actual_ti: Option<u32>, target: HeapType) -> bool {
+    match target {
+        HeapType::Concrete(t) => actual_ti.is_some_and(|ti| module.is_subtype(ti, t)),
+        // The uninhabited bottoms: only a null ref has these, already handled by `ref_matches`.
+        HeapType::NoFunc | HeapType::NoExtern => false,
+        _ => module
+            .ref_head(target)
+            .is_ok_and(|th| actual.is_subtype_of(th)),
+    }
+}
+
+/// Does GC reference value `v` match target reference type `rt` (`ref.test`/`ref.cast`)?
+fn ref_matches(module: &Module, store: &Store, v: Value, rt: RefType) -> bool {
+    if v == NULL_REF {
+        return rt.nullable;
+    }
+    let Ok(target_head) = module.ref_head(rt.heap) else {
+        return false;
+    };
+    match target_head.top() {
+        RefHeap::Any => {
+            if v & I31_TAG != 0 {
+                return head_matches(module, RefHeap::I31, None, rt.heap);
+            }
+            let Ok(idx) = usize::try_from(v) else {
+                return false;
+            };
+            let Some(obj) = store.gc_heap.get(idx) else {
+                return false;
+            };
+            let kind = match module.comp_types.get(obj.type_index as usize).map(CompType::kind) {
+                Some(CompKind::Struct) => RefHeap::Struct,
+                Some(CompKind::Array) => RefHeap::Array,
+                _ => RefHeap::Func,
+            };
+            head_matches(module, kind, Some(obj.type_index), rt.heap)
+        }
+        RefHeap::Func => head_matches(module, RefHeap::Func, defined_func_type(module, v), rt.heap),
+        _ => head_matches(module, RefHeap::Extern, None, rt.heap),
+    }
 }
 
 /// Integer arithmetic / comparison / bitwise / conversion opcodes. Anything else (float,
@@ -2379,6 +2759,95 @@ mod tests {
             (10, code1(&entry)),
         ]);
         assert_eq!(run1(&m, "o", &[]), Err(Trap::MemoryOutOfBounds));
+    }
+
+    #[test]
+    fn gc_struct_new_set_get() {
+        // type 0 = ()->i32 ; type 1 = (struct (field (mut i32)))
+        // new_default, set field0=42, get field0 -> 42
+        let entry = [
+            0x01, 0x01, 0x63, 0x01, // 1 local: (ref null 1)
+            0xfb, 0x01, 0x01, // struct.new_default 1
+            0x21, 0x00, // local.set 0
+            0x20, 0x00, 0x41, 0x2a, 0xfb, 0x05, 0x01, 0x00, // struct.set 1 0 = 42
+            0x20, 0x00, 0xfb, 0x02, 0x01, 0x00, // struct.get 1 0
+            0x0b,
+        ];
+        let m = asm(&[
+            (
+                1,
+                vec![
+                    0x02, // 2 types
+                    0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+                    0x5f, 0x01, 0x7f, 0x01, // type 1: struct { (mut i32) }
+                ],
+            ),
+            (3, vec![0x01, 0x00]),
+            (7, vec![0x01, 0x02, b's', b'm', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "sm", &[]).unwrap()[0]), 42);
+    }
+
+    #[test]
+    fn gc_array_new_set_get_len() {
+        // type 0 = ()->i32 ; type 1 = (array (mut i32))
+        // new 7×3, a[1]=50, a[1]+len -> 53
+        let entry = [
+            0x01, 0x01, 0x63, 0x01, // 1 local: (ref null 1)
+            0x41, 0x07, 0x41, 0x03, 0xfb, 0x06, 0x01, // array.new 1 (init 7, len 3)
+            0x21, 0x00, // local.set 0
+            0x20, 0x00, 0x41, 0x01, 0x41, 0x32, 0xfb, 0x0e, 0x01, // array.set 1 (idx 1) = 50
+            0x20, 0x00, 0x41, 0x01, 0xfb, 0x0b, 0x01, // array.get 1 (idx 1)
+            0x20, 0x00, 0xfb, 0x0f, // array.len
+            0x6a, 0x0b, // i32.add
+        ];
+        let m = asm(&[
+            (
+                1,
+                vec![
+                    0x02, // 2 types
+                    0x60, 0x00, 0x01, 0x7f, // type 0: ()->i32
+                    0x5e, 0x7f, 0x01, // type 1: array (mut i32)
+                ],
+            ),
+            (3, vec![0x01, 0x00]),
+            (7, vec![0x01, 0x02, b'a', b'x', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "ax", &[]).unwrap()[0]), 53);
+    }
+
+    #[test]
+    fn gc_i31() {
+        // i31.get_s(ref.i31(-5)) -> -5
+        let s = single_func(
+            &[],
+            &[0x7f],
+            &[0x00, 0x41, 0x7b, 0xfb, 0x1c, 0xfb, 0x1d, 0x0b],
+            "i",
+        );
+        assert_eq!(as_i32(run1(&s, "i", &[]).unwrap()[0]), -5);
+        // i31.get_u(ref.i31(5)) -> 5
+        let u = single_func(
+            &[],
+            &[0x7f],
+            &[0x00, 0x41, 0x05, 0xfb, 0x1c, 0xfb, 0x1e, 0x0b],
+            "u",
+        );
+        assert_eq!(as_i32(run1(&u, "u", &[]).unwrap()[0]), 5);
+    }
+
+    #[test]
+    fn gc_ref_test_i31() {
+        // ref.test (ref i31) (ref.i31 1) -> 1
+        let t = single_func(
+            &[],
+            &[0x7f],
+            &[0x00, 0x41, 0x01, 0xfb, 0x1c, 0xfb, 0x14, 0x6c, 0x0b],
+            "t",
+        );
+        assert_eq!(as_i32(run1(&t, "t", &[]).unwrap()[0]), 1);
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {

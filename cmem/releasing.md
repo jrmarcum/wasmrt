@@ -43,20 +43,38 @@ Release on **each completed, parity-gated task**. Automate later (a tag-triggere
 
 ## Per-release checklist (binding — do all, in order)
 
+**Steps 1–6 happen BEFORE the owner is notified of the publish needs** (the 🔒 rule below): the commit
+that gets published must already carry every doc + memory update. The agent does 1–6 and commits; the
+owner does 7–9.
+
 1. **Task is DONE**: its parity/conformance gate passes, `cargo test`/`clippy` green on all surfaces,
    no regressions vs the frozen oracle.
 2. **Update the public trackers:**
    - `ROADMAP.md` — flip the stage row to ✅ and check off every use-case the release makes real.
    - `CHANGELOG.md` — move `Unreleased` items into a new `[x.y.z]` section (Keep a Changelog format).
-3. **Update `cmem/roadmap.md`** — mark the task DONE (internal memory).
+   - `README.md` — refresh the status line to what the release now runs.
+3. **Sync ALL project memory (`cmem/`), not just the roadmap** — this is the step that used to lag a
+   turn behind and ship stale. Fold the release into **every** affected file, then update
+   `cmem/INDEX.md`'s Files table:
+   - `cmem/roadmap.md` — mark the task/slice DONE with its per-slice record.
+   - `cmem/architecture.md` — advance the "realized so far" snapshot to the new version.
+   - `cmem/testing.md` — bump the unit-test count + note what the new slice's tests cover.
+   - `cmem/known-issues.md` — log any new intentional divergences / deferrals from the slice.
+   - `cmem/releasing.md` (this file) — advance the **Status** section to the new version.
+   - any other `cmem/` file the slice touched (overview/design-decisions/security-model/…).
 4. **Bump the version** — one place (`workspace.package.version`) plus the internal dep version in the
    root `[workspace.dependencies] wasmrt-core = { version = "x.y.z" }` (they MUST match or publish fails).
    `cargo-release` does both automatically; if bumping by hand, don't forget the dep pin.
-5. **Publish in dependency order** (crates.io requires deps published first):
+5. **Re-verify green** after the doc/version edits: `cargo test --workspace` + `clippy` still pass (a
+   version bump or doctest can break the build).
+6. **Commit** the code + version + trackers + full `cmem/` sync as ONE release commit, and **notify the
+   owner** it's ready to publish, handing over the exact commands for steps 7–9. *(This is the publish
+   handoff — everything above is already committed, so the published artifact captures it.)*
+7. **(Owner) Publish in dependency order** (crates.io requires deps published first):
    `cargo publish -p wasmrt-core` → `-p wasmrt-capi` → `-p wasmrt`. (`cargo release` orders this.)
-6. **Tag + GitHub release**: `git tag vX.Y.Z`; `gh release create vX.Y.Z` with the CHANGELOG section as
-   notes.
-7. **Commit + push** the version/tracker changes to `origin`.
+8. **(Owner) Tag + GitHub release**: `git tag vX.Y.Z`; `gh release create vX.Y.Z` with the CHANGELOG
+   section as notes.
+9. **(Owner) Push** `origin main` + the tag.
 
 ## Tooling
 
@@ -65,28 +83,34 @@ Release on **each completed, parity-gated task**. Automate later (a tag-triggere
   for an interp slice). Not yet installed as of 2026-07-27.
 - Alternative: the manual steps above. `release-plz` if/when full CI automation is wanted.
 
-## The "reflect a shipped stage" trigger (binding on every agent)
+## 🔒 The "reflect a shipped stage" trigger (binding on every agent)
 
-When a task/stage completes and is released, the public `ROADMAP.md` use-case matrix and `CHANGELOG.md`
-are **part of the definition of done** — not optional docs. A release that advances the code without
-advancing the matrix misreports progress to the people following along. Keep them in lockstep with the
-version.
+When a task/stage completes and is released, the public `ROADMAP.md` use-case matrix, `CHANGELOG.md`,
+`README.md`, **and the full `cmem/` project memory** are **part of the definition of done** — not
+optional docs, and **not a follow-up after publish**. A release that advances the code without advancing
+them misreports progress to the people following along. **The owner's 2026-07-31 directive:** memory +
+roadmap SHALL be updated and committed *before* the agent notifies the owner of the publish needs, so
+the published commit already carries them. Keep them in lockstep with the version — in the *same* commit.
 
 ## Who runs the publish
 
-The **owner** runs `cargo publish` + `git tag` + `gh release` for each version (needs the crates.io
-token). The agent implements the task, prepares the release (version bump + tracker updates + commit),
-and hands over the publish commands. Established rhythm since v0.1.0.
+The **owner** runs `cargo publish` + `git tag` + `gh release` + push for each version (needs the
+crates.io token). The agent implements the task and does the **entire** release prep first — version
+bump + public trackers + **full `cmem/` sync** + release commit (checklist steps 1–6) — and only then
+hands over the publish commands. Established rhythm since v0.1.0; the pre-publish doc-sync gate added
+2026-07-31 (v0.6.4) after earlier releases shipped with docs lagging a turn behind.
 
-## Status (2026-07-28)
+## Status (2026-07-31)
 
-- **Published through v0.6.3** — `wasmrt`, `wasmrt-core`, `wasmrt-capi` are all live on crates.io at each
-  released version (T0 v0.1.0 → T3 v0.4.0 → T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear
-  memory v0.6.2 → tables/reftypes v0.6.3). The owner runs each publish; the rhythm (implement → prep →
-  owner publishes) has held for ten releases.
+- **Published through v0.6.3; v0.6.4 (T5 slice 5, WasmGC) is prepped and awaiting the owner's publish.**
+  `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io at each released version (T0 v0.1.0 →
+  T3 v0.4.0 → T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes
+  v0.6.3). The owner runs each publish; the rhythm (implement → **full-doc prep** → owner publishes) has
+  held for eleven releases. v0.6.4 is the first release under the pre-publish doc-sync gate.
 - **Still worth doing (nice-to-have, not blocking):** per-crate crates.io **listing metadata** —
   `keywords` (webassembly/wasm/runtime/interpreter/wasi), `categories` (`wasm`, `development-tools`,
   `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
   rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
   the published crates and add them on a future release if not.
-- **Next release: v0.6.4 (T5 slice 5, WasmGC).** Per-release checklist above.
+- **Next release after v0.6.4: v0.6.5 (T5 slice 6, SIMD).** Per-release checklist above — full doc sync
+  before the publish handoff.

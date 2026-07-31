@@ -32,7 +32,7 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | **0.3.0** | Opcode IR | the shared pre-decoded instruction table | ✅ |
 | **0.4.0** | Decode | full module decoding | ✅ |
 | **0.5.0** | Validate | the spec type-checker (core language; SIMD/atomics/GC/EH in 0.5.x) | ✅ |
-| 0.6.x | Interpret | execution, landing one feature slice at a time (integer compute done) | 🚧 |
+| 0.6.x | Interpret | execution, landing one feature slice at a time (compute + memory + tables/reftypes + WasmGC done) | 🚧 |
 | 0.7.0 | Text toolchain | `.wat` assembler + `.wast` spec-script runner | ⬜ |
 | 0.8.0 | WASI + CLI | run real compiled programs | ⬜ |
 | 0.9.0 | C ABI | the `wasmrt.h` embedding surface | ⬜ |
@@ -51,8 +51,8 @@ Checked off as each capability lands and passes its gate.
 | Run a pure-compute export (e.g. `fib`, `factorial`) | ✅ | 0.6 |
 | Linear memory + globals | ✅ | 0.6 |
 | `call_indirect`, multi-table, reference types | ✅ | 0.6 |
-| Bulk memory/table ops | ⬜ | 0.6 |
-| WasmGC (structs/arrays/i31, casts) | ⬜ | 0.6 |
+| Bulk memory/table ops | ✅ | 0.6 |
+| WasmGC (structs/arrays/i31, casts) | ✅ | 0.6 |
 | SIMD (full `v128`, incl. relaxed) | ⬜ | 0.6 |
 | Multi-memory | ⬜ | 0.6 |
 | Threads / atomics | ⬜ | 0.6 |

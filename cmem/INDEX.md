@@ -22,14 +22,15 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-**Progress (2026-07-28): T0–T3 + T4-core + T5 slices 1–4 DONE, released v0.1.0 → v0.6.3.** `wasmrt-core`
-has `types` + `reader` + `opcode` (shared IR + `decode_body`) + `module` (decode) + `validate` (spec §3
-type-checker, core language; SIMD/atomics/GC/EH typing deferred to 0.5.x) + `interp` (switch interpreter;
-integer + float compute + linear memory + tables/`call_indirect`/reference types). **`wasmrt <file>`
-summarizes + validates; `wasmrt run <file> <fn> [args]` runs compute + memory + indirect-call functions**
-(incl. recursion). 72 core tests green, clippy clean, all four build surfaces. **Next: 0.6.x slice 5 —
-WasmGC.** Each
-task ships a crates.io release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix.
+**Progress (2026-07-31): T0–T3 + T4-core + T5 slices 1–5 DONE, released v0.1.0 → v0.6.4 (v0.6.4 prepped,
+awaiting owner publish).** `wasmrt-core` has `types` + `reader` + `opcode` (shared IR + `decode_body`) +
+`module` (decode) + `validate` (spec §3 type-checker, core language; SIMD/atomics/GC/EH typing deferred to
+0.5.x) + `interp` (switch interpreter; integer + float compute + linear memory + tables/`call_indirect`/
+reference types + WasmGC structs/arrays/`i31`/casts). **`wasmrt <file>` summarizes + validates; `wasmrt run
+<file> <fn> [args]` runs compute + memory + indirect-call + GC functions** (incl. recursion). 76 core tests
+green, clippy clean, all four build surfaces. **Next: 0.6.x slice 6 — SIMD.** Each task ships a crates.io
+release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix — with the full `cmem/`
+sync committed **before** the publish handoff (owner directive, 2026-07-31; see `releasing.md`).
 
 ## Policy (durable — mirrors the wazmrt owner policy, adopted 2026-07-17)
 
@@ -89,7 +90,7 @@ and **keep the suite green — diff the OUTPUT (N passed / N failed), not exit c
 | [reference-projects.md](reference-projects.md) | The runtimes evaluated (same set as wazmrt) + **wasmtime is the feature-parity target** ("run what it runs") and the thing being replaced under the loaders. 100% original |
 | [roadmap.md](roadmap.md) | Current status (**PORT phase; gate OPEN, oracle frozen @dadc727**) + the **conversion task list** T0–T9 (scaffold → types/reader → opcode → decode → validate → interp slices → text → wasi → C-ABI → licensing/size), parity-gated, with the 4 decision-gates inlined. Loader phases 1–4 |
 | [known-issues.md](known-issues.md) | Issue tracker — the wazmrt residuals relevant to the port (#17/#18/#23 Zig-std-specific → Rust does the clean version), the **collapsed scope gap (only tail-calls lack a wazmrt oracle)**, and the open decisions (now task-list gates) |
-| [releasing.md](releasing.md) | **Versioning + publishing.** Port-progress ladder (`0.x` → `1.0` = full oracle parity); the 3 crates share one version, CLI is published as `wasmrt`; per-task manual releases; the per-release checklist + the binding "update the public ROADMAP/CHANGELOG matrix on every release" trigger; crates.io names reserved |
+| [releasing.md](releasing.md) | **Versioning + publishing.** Port-progress ladder (`0.x` → `1.0` = full oracle parity); the 3 crates share one version, CLI is published as `wasmrt`; per-task manual releases; the per-release checklist + the 🔒 binding **pre-publish doc-sync gate** (full `cmem/` + ROADMAP/CHANGELOG/README committed BEFORE the owner is notified to publish — owner directive 2026-07-31); crates.io names reserved |
 
 ## Related files outside cmem
 
