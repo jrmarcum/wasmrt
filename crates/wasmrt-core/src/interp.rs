@@ -3793,6 +3793,67 @@ mod tests {
         assert_eq!(as_i32(run1(&m, "v", &[]).unwrap()[0]), 7);
     }
 
+    // --- multi-memory ---
+
+    #[test]
+    fn multimem_distinct_routing() {
+        // 2 memories; store 7->mem0[0], 9->mem1[0]; (load mem0)*10 + (load mem1) = 79
+        let entry = [
+            0x00, //
+            0x41, 0x00, 0x41, 0x07, 0x36, 0x00, 0x00, // i32.store mem0[0] = 7
+            0x41, 0x00, 0x41, 0x09, 0x36, 0x40, 0x01, 0x00, // i32.store mem1[0] = 9 (memidx flag)
+            0x41, 0x00, 0x28, 0x00, 0x00, // i32.load mem0[0] -> 7
+            0x41, 0x0a, 0x6c, // * 10 -> 70
+            0x41, 0x00, 0x28, 0x40, 0x01, 0x00, // i32.load mem1[0] -> 9
+            0x6a, // + -> 79
+            0x0b,
+        ];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x02, 0x00, 0x01, 0x00, 0x01]), // 2 memories, each min 1
+            (7, vec![0x01, 0x01, b'm', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "m", &[]).unwrap()[0]), 79);
+    }
+
+    #[test]
+    fn multimem_active_data_to_mem1() {
+        // active data segment (flag 2) targets memory 1; load mem1[0] -> 42
+        let entry = [0x00, 0x41, 0x00, 0x28, 0x40, 0x01, 0x00, 0x0b]; // i32.load8-less: i32.load mem1[0]
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x02, 0x00, 0x01, 0x00, 0x01]),
+            (7, vec![0x01, 0x01, b'm', 0x00, 0x00]),
+            (10, code1(&entry)),
+            // data: 1 segment, flag 2 (active + explicit memidx), memidx 1, (i32.const 0), bytes [42,0,0,0]
+            (11, vec![0x01, 0x02, 0x01, 0x41, 0x00, 0x0b, 0x04, 0x2a, 0x00, 0x00, 0x00]),
+        ]);
+        assert_eq!(as_i32(run1(&m, "m", &[]).unwrap()[0]), 42);
+    }
+
+    #[test]
+    fn multimem_cross_copy() {
+        // store 55 -> mem0[0]; memory.copy dst=mem1 src=mem0 (4 bytes); load mem1[0] -> 55
+        let entry = [
+            0x00, //
+            0x41, 0x00, 0x41, 0x37, 0x36, 0x00, 0x00, // i32.store mem0[0] = 55
+            0x41, 0x00, 0x41, 0x00, 0x41, 0x04, 0xfc, 0x0a, 0x01, 0x00, // memory.copy dst=1 src=0
+            0x41, 0x00, 0x28, 0x40, 0x01, 0x00, // i32.load mem1[0]
+            0x0b,
+        ];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x02, 0x00, 0x01, 0x00, 0x01]),
+            (7, vec![0x01, 0x01, b'm', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "m", &[]).unwrap()[0]), 55);
+    }
+
     #[test]
     fn simd_v128_global() {
         // (global v128 (v128.const i32x4 9 0 0 0)); extract_lane 0 (global.get 0) -> 9

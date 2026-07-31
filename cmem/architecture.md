@@ -4,11 +4,12 @@ The Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate
 pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
 `00-synthesis.md`, `02-decode-core.md`, `03-validate-interp.md`, `06-build-docs-licensing.md`).
 
-**Realized so far (through T5 slice 6 / v0.6.5):** the workspace + all three crates exist; `wasmrt-core`
+**Realized so far (through T5 slice 7 / v0.6.6):** the workspace + all three crates exist; `wasmrt-core`
 has `types`, `reader`, `opcode`, `module` (decode), `validate` (core-language type-checker), and `interp`
-(switch interpreter — integer + float compute + linear memory + tables/`call_indirect`/reference types +
-**WasmGC** structs/arrays/`i31`/casts over a `Store`-owned GC heap + **SIMD** the full `v128` fixed-width
-+ relaxed set) implemented and parity-tested; `text` / `wasi` / `pin` are still stubs, filled in bottom-up
+(switch interpreter — integer + float compute + linear memory incl. **multi-memory** + tables/
+`call_indirect`/reference types + **WasmGC** structs/arrays/`i31`/casts over a `Store`-owned GC heap +
+**SIMD** the full `v128` fixed-width + relaxed set) implemented and parity-tested; `text` / `wasi` / `pin`
+are still stubs, filled in bottom-up
 per `roadmap.md`. The CLI does summarize + validate + `run`. Three idiomatic divergences worth noting:
 owned `Vec`/`String` data (frees on drop, no arena/`deinit`); the interpreter's
 immutable-`module`/`func_bodies` vs `&mut Store` (globals + memories + tables + dropped-data + `gc_heap`)

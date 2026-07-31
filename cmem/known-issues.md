@@ -1,7 +1,7 @@
 # Known Issues
 
 Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–6 done, v0.1.0–v0.6.5). This records the **inherited concerns** from the frozen wazmrt oracle, the
+1–7 done, v0.1.0–v0.6.6). This records the **inherited concerns** from the frozen wazmrt oracle, the
 **port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
 Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
@@ -26,6 +26,11 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
   "small" ethos is about binary size). Scalars/refs live in the low 64 bits, so the `NULL_REF` (`u64::MAX`)
   / `I31_TAG` (`1<<63`) sentinel invariants are unchanged. Observable behavior identical → parity holds.
   A `const _: () = assert!(I31_TAG == 1u128 << 63)` guards the sentinel placement.
+- **Multi-memory needed no new engine code** (v0.6.6). The memory-index plumbing was built generically in
+  the linear-memory slice (0.6.2) — `Vec<Memory>`, `memarg` memory index, `require_memory` in validate,
+  cross-memory `memory.copy`, flag-`0x02` data segments, per-memory instantiation. v0.6.6's deliverable is
+  the conformance vectors that prove it (distinct routing, active data → mem1, cross-mem copy) + the flipped
+  use-case cell — an honest "already worked, now tested" release, not new implementation.
 - **SIMD is complete, incl. relaxed SIMD** (`interp.rs exec_simd`, v0.6.5) — the deferral is gone. Relaxed
   ops each take **one fixed deterministic choice** (matching the frozen oracle): `relaxed_trunc` →
   saturating (`trunc_sat`), `relaxed_madd`/`nmadd` → double-rounding (`a*b` then `±c`), `relaxed_laneselect`

@@ -110,16 +110,17 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-07-31)
 
-- **Published through v0.6.4; v0.6.5 (T5 slice 6, SIMD) is prepped and awaiting the owner's publish.**
-  `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io at each released version (T0 v0.1.0 →
+- **Published through v0.6.4; v0.6.5 (SIMD) and v0.6.6 (multi-memory) are prepped and awaiting the owner's
+  publish.** `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io through v0.6.4 (T0 v0.1.0 →
   T3 v0.4.0 → T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes
   v0.6.3 → WasmGC v0.6.4). The owner runs each publish; the rhythm (implement → **full-doc prep** → owner
-  publishes) has held for twelve releases. v0.6.4 onward run under the pre-publish doc-sync gate, and
-  v0.6.4's GitHub release was created by `.github/workflows/release.yml` (the tag-triggered workflow).
+  publishes) holds. **Two releases are queued locally** — publish v0.6.5 before v0.6.6 (crates.io requires
+  versions in order); tag each at its own release commit so `release.yml` fires per tag. v0.6.4 onward run
+  under the pre-publish doc-sync gate; v0.6.4's GitHub release was created by the tag-triggered workflow.
 - **Still worth doing (nice-to-have, not blocking):** per-crate crates.io **listing metadata** —
   `keywords` (webassembly/wasm/runtime/interpreter/wasi), `categories` (`wasm`, `development-tools`,
   `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
   rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
   the published crates and add them on a future release if not.
-- **Next release after v0.6.5: v0.6.6 (T5 slice 7, multi-memory).** Per-release checklist above — full
+- **Next release after v0.6.6: v0.6.7 (T5 slice 8, threads/atomics).** Per-release checklist above — full
   doc sync before the publish handoff.

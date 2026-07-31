@@ -14,6 +14,21 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 _Next (0.6.x interpreter slices): threads/atomics, memory64, and exception handling — plus host imports
 (for WASI). Plus the deferred 0.5.x validation arms._
 
+## [0.6.6] — Interpreter: multi-memory (stage T5, slice 7)
+
+### Added
+- **Multi-memory** — running a module with more than one linear memory is now conformance-tested and
+  supported end to end: a load/store's `memarg` selects its memory (the alignment-flag `0x40` + memory
+  index), `memory.copy` can move bytes **between two different memories**, `memory.size`/`grow`/`fill`/
+  `init` act on their memory index, and an active data segment can target any memory (the flag-`0x02`
+  explicit-`memidx` form). Instantiation creates every declared memory and applies each active data
+  segment to its own memory.
+
+The memory-index infrastructure itself shipped with linear memory in **0.6.2** (indices were threaded
+through decode, validate, and every memory op from the start); this release adds the multi-memory
+conformance vectors — distinct-memory routing, an active data segment initializing memory 1, and a
+cross-memory `memory.copy` — and lifts the use-case matrix cell.
+
 ## [0.6.5] — Interpreter: SIMD (stage T5, slice 6)
 
 ### Added
