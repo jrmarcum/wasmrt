@@ -50,7 +50,7 @@ Checked off as each capability lands and passes its gate.
 | Validate a module (reject malformed/invalid) | 🚧 | 0.5 |
 | Run a pure-compute export (e.g. `fib`, `factorial`) | ✅ | 0.6 |
 | Linear memory + globals | ✅ | 0.6 |
-| `call_indirect`, multi-table, reference types | ⬜ | 0.6 |
+| `call_indirect`, multi-table, reference types | ✅ | 0.6 |
 | Bulk memory/table ops | ⬜ | 0.6 |
 | WasmGC (structs/arrays/i31, casts) | ⬜ | 0.6 |
 | SIMD (full `v128`, incl. relaxed) | ⬜ | 0.6 |

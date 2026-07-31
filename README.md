@@ -9,7 +9,8 @@ parity testing at every step.
 
 > **Status: early — `0.6.0`.** wasmrt can now **decode**, **type-check**, and **run** a WebAssembly
 > module — `wasmrt run fac.wasm fac 10` → `3628800`. Execution currently covers integer + floating-point
-> compute and linear memory; tables, GC, SIMD, and the rest land slice by slice. See **[ROADMAP.md](ROADMAP.md)** for the live use-case
+> compute, linear memory, and tables / `call_indirect` / reference types; GC, SIMD, and the rest land slice
+> by slice. See **[ROADMAP.md](ROADMAP.md)** for the live use-case
 > matrix (what actually works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
 
 ## Goals

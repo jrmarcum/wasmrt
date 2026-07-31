@@ -69,6 +69,18 @@ pub const PAGE_SIZE: usize = 64 * 1024;
 /// hostile input. 1 GiB is far above any realistic guest.
 const DEFAULT_MAX_MEMORY_BYTES: usize = 1 << 30;
 
+/// Default ceiling on total defined-table entries per instance. Each entry is an eagerly
+/// allocated `Value`, so a tiny module's unvalidated `min` (up to 2^32-1) could otherwise
+/// demand tens of GiB. 2^27 (~1 GiB of slots) is far above any realistic guest.
+const DEFAULT_MAX_TABLE_ELEMS: usize = 1 << 27;
+
+/// The null-reference sentinel — a value-stack `ref.null`, and an uninitialized table entry.
+/// A funcref value is a (small) function index, so it never collides.
+///
+/// **Invariant (do not drift):** when GC lands, `null_ref` (all bits set) is checked *before*
+/// `i31_tag` (bit 63), so the two never confuse (`cmem/design-decisions.md`).
+pub const NULL_REF: Value = u64::MAX;
+
 /// Shared linear memory. `bytes` is `alloc_zeroed`-backed (demand-zero pages on mainstream
 /// OSes), so a large declared minimum costs address space, not resident memory.
 pub struct Memory {
@@ -77,14 +89,26 @@ pub struct Memory {
     pub is64: bool,
 }
 
+/// A reference table: `Value` slots (`NULL_REF` = uninitialized; a funcref is its function
+/// index) so funcref and externref tables share one representation.
+pub struct Table {
+    pub entries: Vec<Value>,
+    pub max: Option<u32>,
+}
+
 /// The mutable runtime state of an instance, threaded as `&mut` through execution so a
 /// recursive `call` reborrows it cleanly.
 struct Store {
     globals: Vec<Value>,
     memories: Vec<Memory>,
+    tables: Vec<Table>,
     /// `data_dropped[i]` marks a data segment consumed — active segments are dropped once
     /// instantiation copies them in (§4.5.4); `data.drop` marks a passive one.
     data_dropped: Vec<bool>,
+    /// Evaluated reference values of each element segment (for `table.init`).
+    elem_values: Vec<Vec<Value>>,
+    /// `elem_dropped[i]` marks a segment consumed (active/declarative at init, or `elem.drop`).
+    elem_dropped: Vec<bool>,
 }
 
 /// A runtime trap or an execution-setup error.
@@ -111,6 +135,22 @@ pub enum Trap {
     MemoryLimitExceeded,
     /// A `memory.init` / `data.drop` data-segment index out of range.
     UndefinedData,
+    /// `call_indirect` in a module with no table (or a bad table index).
+    NoTable,
+    /// A table access (or element-segment init) outside the table bounds.
+    TableOutOfBounds,
+    /// The declared/grown table exceeds this instance's budget.
+    TableLimitExceeded,
+    /// `call_indirect` hit an uninitialized (null) table element.
+    UninitializedElement,
+    /// `call_indirect`'s declared type did not match the callee's signature.
+    IndirectTypeMismatch,
+    /// A type index out of range.
+    UndefinedType,
+    /// A `table.init` / `elem.drop` element-segment index out of range.
+    UndefinedElement,
+    /// A null reference where a non-null one is required (`call_ref` / `ref.as_non_null`).
+    NullReference,
     /// A constant expression used an opcode this slice doesn't evaluate.
     ConstantExpr,
     /// An opcode this interpreter slice does not execute yet (float/memory/tables/GC/SIMD/EH).
@@ -146,6 +186,14 @@ impl fmt::Display for Trap {
             Trap::MemoryOutOfBounds => f.write_str("out of bounds memory access"),
             Trap::MemoryLimitExceeded => f.write_str("memory exceeds the instance budget"),
             Trap::UndefinedData => f.write_str("data segment index out of range"),
+            Trap::NoTable => f.write_str("no table"),
+            Trap::TableOutOfBounds => f.write_str("out of bounds table access"),
+            Trap::TableLimitExceeded => f.write_str("table exceeds the instance budget"),
+            Trap::UninitializedElement => f.write_str("uninitialized table element"),
+            Trap::IndirectTypeMismatch => f.write_str("indirect call type mismatch"),
+            Trap::UndefinedType => f.write_str("type index out of range"),
+            Trap::UndefinedElement => f.write_str("element segment index out of range"),
+            Trap::NullReference => f.write_str("null reference"),
             Trap::ConstantExpr => f.write_str("unsupported constant expression"),
             Trap::UnsupportedInstruction => {
                 f.write_str("instruction not executed in this release (float/memory/tables/GC/SIMD/EH)")
@@ -243,6 +291,48 @@ impl Instance {
         }
         let data_dropped: Vec<bool> = module.data.iter().map(|s| s.active).collect();
 
+        // Tables: allocate each defined table sized to its minimum, filled with `NULL_REF`,
+        // bounded by the per-instance entry budget.
+        let mut tables: Vec<Table> = Vec::with_capacity(module.tables.len());
+        let mut total_elems: usize = 0;
+        for tt in &module.tables {
+            let min = usize::try_from(tt.limits.min).map_err(|_| Trap::TableLimitExceeded)?;
+            total_elems = total_elems
+                .checked_add(min)
+                .filter(|&t| t <= DEFAULT_MAX_TABLE_ELEMS)
+                .ok_or(Trap::TableLimitExceeded)?;
+            tables.push(Table {
+                entries: vec![NULL_REF; min],
+                max: tt.limits.max.and_then(|m| u32::try_from(m).ok()),
+            });
+        }
+
+        // Evaluate element segments to reference values; apply the active ones to their table
+        // (then drop them and the declarative ones; passive stay for `table.init`).
+        let mut elem_values: Vec<Vec<Value>> = Vec::with_capacity(module.elements.len());
+        let mut elem_dropped: Vec<bool> = Vec::with_capacity(module.elements.len());
+        for elem in &module.elements {
+            let mut vals: Vec<Value> = Vec::with_capacity(elem.funcs.len() + elem.exprs.len());
+            vals.extend(elem.funcs.iter().map(|&f| Value::from(f)));
+            for ex in &elem.exprs {
+                vals.push(eval_const_expr(ex, &globals)?);
+            }
+            if elem.mode == crate::module::ElementMode::Active {
+                let tbl = tables
+                    .get_mut(elem.table_index as usize)
+                    .ok_or(Trap::NoTable)?;
+                let offset = eval_const_offset(&elem.offset_expr, &globals, false)?; // tables are 32-bit
+                let start = usize::try_from(offset).map_err(|_| Trap::TableOutOfBounds)?;
+                let end = start
+                    .checked_add(vals.len())
+                    .filter(|&e| e <= tbl.entries.len())
+                    .ok_or(Trap::TableOutOfBounds)?;
+                tbl.entries[start..end].copy_from_slice(&vals);
+            }
+            elem_dropped.push(elem.mode != crate::module::ElementMode::Passive);
+            elem_values.push(vals);
+        }
+
         // Prepare each defined function: decode its body + precompute control flow.
         let mut func_bodies = Vec::with_capacity(module.functions.len());
         for (&type_index, code) in module.functions.iter().zip(&module.code) {
@@ -265,7 +355,10 @@ impl Instance {
             store: Store {
                 globals,
                 memories,
+                tables,
                 data_dropped,
+                elem_values,
+                elem_dropped,
             },
         })
     }
@@ -703,6 +796,222 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 pc += 1;
             }
 
+            // --- Reference types --- (funcref = function index; NULL_REF = null)
+            Op::RefNull => {
+                frame.push(NULL_REF);
+                pc += 1;
+            }
+            Op::RefIsNull => {
+                let r = frame.pop();
+                frame.push_i32(i32::from(r == NULL_REF));
+                pc += 1;
+            }
+            Op::RefFunc => {
+                let Imm::Func(f) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                frame.push(Value::from(f));
+                pc += 1;
+            }
+            Op::RefAsNonNull => {
+                let r = frame.pop();
+                if r == NULL_REF {
+                    return Err(Trap::NullReference);
+                }
+                frame.push(r);
+                pc += 1;
+            }
+            Op::BrOnNull => {
+                let r = frame.pop();
+                if r == NULL_REF {
+                    pc = frame.branch(label_imm(instr)?)?; // null → branch (ref dropped)
+                } else {
+                    frame.push(r); // non-null → keep the ref, fall through
+                    pc += 1;
+                }
+            }
+            Op::BrOnNonNull => {
+                let r = frame.pop();
+                if r == NULL_REF {
+                    pc += 1; // null → ref consumed, fall through
+                } else {
+                    frame.push(r); // non-null → keep the ref for the label
+                    pc = frame.branch(label_imm(instr)?)?;
+                }
+            }
+            Op::CallRef | Op::ReturnCallRef => {
+                let f_ref = frame.pop();
+                if f_ref == NULL_REF {
+                    return Err(Trap::NullReference);
+                }
+                let f = f_ref as u32;
+                let ft = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
+                let base = frame.stack_base(ft.params.len())?;
+                let args = frame.vstack[base..].to_vec();
+                let results = call_function(ctx, store, f, &args, depth + 1)?;
+                frame.vstack.truncate(base);
+                frame.vstack.extend_from_slice(&results);
+                pc = if instr.op == Op::ReturnCallRef {
+                    ir.len()
+                } else {
+                    pc + 1
+                };
+            }
+
+            // --- call_indirect: table lookup + runtime type check ---
+            Op::CallIndirect => {
+                let Imm::CallIndirect(ci) = &instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let slot = frame.pop_i32() as u32 as usize;
+                let entry = *store
+                    .tables
+                    .get(ci.table as usize)
+                    .ok_or(Trap::NoTable)?
+                    .entries
+                    .get(slot)
+                    .ok_or(Trap::TableOutOfBounds)?;
+                if entry == NULL_REF {
+                    return Err(Trap::UninitializedElement);
+                }
+                let f = entry as u32;
+                let want = ctx.module.func_sig(ci.type_index).ok_or(Trap::UndefinedType)?;
+                let got = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
+                if want.params != got.params || want.results != got.results {
+                    return Err(Trap::IndirectTypeMismatch);
+                }
+                let base = frame.stack_base(got.params.len())?;
+                let args = frame.vstack[base..].to_vec();
+                let results = call_function(ctx, store, f, &args, depth + 1)?;
+                frame.vstack.truncate(base);
+                frame.vstack.extend_from_slice(&results);
+                pc += 1;
+            }
+
+            // --- Table access ---
+            Op::TableGet => {
+                let ti = table_imm(instr)? as usize;
+                let i = frame.pop_i32() as u32 as usize;
+                let v = *store
+                    .tables
+                    .get(ti)
+                    .ok_or(Trap::NoTable)?
+                    .entries
+                    .get(i)
+                    .ok_or(Trap::TableOutOfBounds)?;
+                frame.push(v);
+                pc += 1;
+            }
+            Op::TableSet => {
+                let ti = table_imm(instr)? as usize;
+                let v = frame.pop();
+                let i = frame.pop_i32() as u32 as usize;
+                let slot = store
+                    .tables
+                    .get_mut(ti)
+                    .ok_or(Trap::NoTable)?
+                    .entries
+                    .get_mut(i)
+                    .ok_or(Trap::TableOutOfBounds)?;
+                *slot = v;
+                pc += 1;
+            }
+            Op::TableSize => {
+                let ti = table_imm(instr)? as usize;
+                let len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
+                frame.push_i32(len as i32);
+                pc += 1;
+            }
+            Op::TableGrow => {
+                let ti = table_imm(instr)? as usize;
+                let delta = frame.pop_i32() as u32 as usize;
+                let init = frame.pop();
+                let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
+                let old = table.entries.len();
+                let limit = table
+                    .max
+                    .map_or(DEFAULT_MAX_TABLE_ELEMS, |m| m as usize)
+                    .min(DEFAULT_MAX_TABLE_ELEMS);
+                match old.checked_add(delta).filter(|&n| n <= limit) {
+                    Some(new_len) => {
+                        table.entries.resize(new_len, init);
+                        frame.push_i32(old as i32);
+                    }
+                    None => frame.push_i32(-1), // growth refused
+                }
+                pc += 1;
+            }
+            Op::TableFill => {
+                let ti = table_imm(instr)? as usize;
+                let n = frame.pop_i32() as u32 as usize;
+                let val = frame.pop();
+                let dst = frame.pop_i32() as u32 as usize;
+                let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
+                let end = dst.checked_add(n).filter(|&e| e <= table.entries.len());
+                let end = end.ok_or(Trap::TableOutOfBounds)?;
+                table.entries[dst..end].fill(val);
+                pc += 1;
+            }
+            Op::TableInit => {
+                let Imm::TableInit { elem, table } = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let (ei, ti) = (elem as usize, table as usize);
+                let dropped = *store.elem_dropped.get(ei).ok_or(Trap::UndefinedElement)?;
+                let n = frame.pop_i32() as u32 as usize;
+                let src = frame.pop_i32() as u32 as usize;
+                let dst = frame.pop_i32() as u32 as usize;
+                let seg_len = if dropped { 0 } else { store.elem_values[ei].len() };
+                let tbl_len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
+                if src.checked_add(n).is_none_or(|e| e > seg_len)
+                    || dst.checked_add(n).is_none_or(|e| e > tbl_len)
+                {
+                    return Err(Trap::TableOutOfBounds);
+                }
+                for k in 0..n {
+                    let v = if dropped {
+                        NULL_REF
+                    } else {
+                        store.elem_values[ei][src + k]
+                    };
+                    store.tables[ti].entries[dst + k] = v;
+                }
+                pc += 1;
+            }
+            Op::ElemDrop => {
+                let Imm::Elem(e) = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                *store
+                    .elem_dropped
+                    .get_mut(e as usize)
+                    .ok_or(Trap::UndefinedElement)? = true;
+                pc += 1;
+            }
+            Op::TableCopy => {
+                let Imm::TableCopy { dst, src } = instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let (di, si) = (dst as usize, src as usize);
+                let n = frame.pop_i32() as u32 as usize;
+                let s = frame.pop_i32() as u32 as usize;
+                let d = frame.pop_i32() as u32 as usize;
+                let src_len = store.tables.get(si).ok_or(Trap::NoTable)?.entries.len();
+                let dst_len = store.tables.get(di).ok_or(Trap::NoTable)?.entries.len();
+                if s.checked_add(n).is_none_or(|e| e > src_len)
+                    || d.checked_add(n).is_none_or(|e| e > dst_len)
+                {
+                    return Err(Trap::TableOutOfBounds);
+                }
+                if di == si {
+                    store.tables[di].entries.copy_within(s..s + n, d);
+                } else {
+                    let tmp = store.tables[si].entries[s..s + n].to_vec();
+                    store.tables[di].entries[d..d + n].copy_from_slice(&tmp);
+                }
+                pc += 1;
+            }
+
             // Integer arithmetic / comparison / bitwise / conversion.
             _ => {
                 exec_numeric(frame, instr.op)?;
@@ -730,6 +1039,13 @@ fn label_imm(instr: &Instr) -> Result<u32> {
 fn block_type(instr: &Instr) -> Result<BlockType> {
     if let Imm::BlockType(bt) = instr.imm {
         Ok(bt)
+    } else {
+        Err(Trap::UnsupportedInstruction)
+    }
+}
+fn table_imm(instr: &Instr) -> Result<u32> {
+    if let Imm::Table(t) = instr.imm {
+        Ok(t)
     } else {
         Err(Trap::UnsupportedInstruction)
     }
@@ -1707,6 +2023,15 @@ fn eval_const_expr(expr: &[u8], globals: &[Value]) -> Result<Value> {
                 let gi = r.read_var_u32()? as usize;
                 stack.push(*globals.get(gi).ok_or(Trap::UndefinedGlobal)?);
             }
+            0xd0 => {
+                // ref.null <heaptype> — the heap type is consumed; the value is the sentinel.
+                crate::opcode::read_heap_type(&mut r).map_err(|_| Trap::ConstantExpr)?;
+                stack.push(NULL_REF);
+            }
+            0xd2 => {
+                // ref.func x — a funcref value is its function index.
+                stack.push(Value::from(r.read_var_u32()?));
+            }
             byte @ 0x6a..=0x6c => {
                 let b = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?);
                 let a = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?);
@@ -1925,10 +2250,74 @@ mod tests {
     }
     /// Wrap a code body (locals-vec + instrs incl. `end`) as a 1-entry code section content.
     fn code1(entry: &[u8]) -> Vec<u8> {
-        let mut c = vec![0x01u8];
-        write_uleb(&mut c, entry.len() as u32);
-        c.extend_from_slice(entry);
+        code_n(&[entry])
+    }
+    /// Wrap N code bodies as a code section content.
+    fn code_n(entries: &[&[u8]]) -> Vec<u8> {
+        let mut c = vec![entries.len() as u8];
+        for e in entries {
+            write_uleb(&mut c, e.len() as u32);
+            c.extend_from_slice(e);
+        }
         c
+    }
+
+    #[test]
+    fn call_indirect_dispatch() {
+        // table [add, sub]; dispatch(op, a, b) = table[op](a, b).
+        let add = [0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b];
+        let sub = [0x00, 0x20, 0x00, 0x20, 0x01, 0x6b, 0x0b];
+        let disp = [0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x00, 0x11, 0x00, 0x00, 0x0b];
+        let m = asm(&[
+            // type 0: (i32,i32)->i32 ; type 1: (i32,i32,i32)->i32
+            (1, vec![
+                0x02, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f,
+            ]),
+            (3, vec![0x03, 0x00, 0x00, 0x01]), // funcs of type 0, 0, 1
+            (4, vec![0x01, 0x70, 0x00, 0x02]), // table: funcref, min 2
+            (7, {
+                let mut e = vec![0x01, 0x08];
+                e.extend_from_slice(b"dispatch");
+                e.extend_from_slice(&[0x00, 0x02]); // func index 2
+                e
+            }),
+            (9, vec![0x01, 0x00, 0x41, 0x00, 0x0b, 0x02, 0x00, 0x01]), // active elem @0: [func 0, func 1]
+            (10, code_n(&[&add, &sub, &disp])),
+        ]);
+        let d = |op, a, b| as_i32(run1(&m, "dispatch", &[i32_value(op), i32_value(a), i32_value(b)]).unwrap()[0]);
+        assert_eq!(d(0, 40, 2), 42); // add
+        assert_eq!(d(1, 40, 2), 38); // sub
+        assert_eq!(
+            run1(&m, "dispatch", &[i32_value(9), i32_value(1), i32_value(1)]),
+            Err(Trap::TableOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn ref_null_is_null() {
+        // (func (result i32) ref.null func; ref.is_null)  -> 1
+        let entry = [0x00, 0xd0, 0x70, 0xd1, 0x0b];
+        let m = single_func(&[], &[0x7f], &entry, "n");
+        assert_eq!(as_i32(run1(&m, "n", &[]).unwrap()[0]), 1);
+    }
+
+    #[test]
+    fn table_set_get_ref_func() {
+        // funcs: $g (empty) ; test: table.set[1]=ref.func $g ; ref.is_null(table.get[1]) -> 0
+        let g = [0x00, 0x0b];
+        let test = [
+            0x00, 0x41, 0x01, 0xd2, 0x00, 0x26, 0x00, // (slot 1) (ref.func 0) table.set table 0
+            0x41, 0x01, 0x25, 0x00, // (slot 1) table.get table 0
+            0xd1, 0x0b, // ref.is_null
+        ];
+        let m = asm(&[
+            (1, vec![0x02, 0x60, 0x00, 0x00, 0x60, 0x00, 0x01, 0x7f]), // ()->() ; ()->(i32)
+            (3, vec![0x02, 0x00, 0x01]),
+            (4, vec![0x01, 0x70, 0x00, 0x03]), // table funcref min 3
+            (7, vec![0x01, 0x01, b't', 0x00, 0x01]),
+            (10, code_n(&[&g, &test])),
+        ]);
+        assert_eq!(as_i32(run1(&m, "t", &[]).unwrap()[0]), 0); // slot 1 is non-null after set
     }
 
     #[test]

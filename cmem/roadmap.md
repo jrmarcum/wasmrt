@@ -7,9 +7,9 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–3 (v0.6.0 integer,
-v0.6.1 float, v0.6.2 linear memory) DONE. Next: 0.6.x — tables/reftypes → GC → SIMD → threads → EH +
-host imports; + the deferred 0.5.x validation arms.**
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–4 (v0.6.0 integer,
+v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types) DONE. Next: 0.6.x — GC → SIMD →
+threads → EH + host imports; + the deferred 0.5.x validation arms.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -92,9 +92,15 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     typing; 1 GiB per-instance budget; `alloc_zeroed`-backed (demand-zero). **Refactor:** the mutable
     runtime state (globals/memories/data_dropped) is now a `Store` threaded as `&mut` (recursive `call`
     reborrows cleanly). 69 core tests; store/load round-trips via CLI. `wasm_mod`-class guests now run.
-  - **0.6.x remaining slices (per the roadmap order below):** tables/reftypes → GC → SIMD → multi-memory →
-    threads → memory64 → EH. Also fold in host imports (WASI needs them) + the deferred 0.5.x validation
-    arms. Original T5 detail:
+  - **Slice 4 — tables + reference types. ✅ DONE 2026-07-28 (v0.6.3).** `Table { entries: Vec<Value>,
+    max }` in the `Store`; `call_indirect` (table lookup + runtime signature check), `table.get`/`set`/
+    `size`/`grow`/`fill`/`init`/`copy`, `elem.drop`; `ref.null`/`is_null`/`func`/`as_non_null`/`br_on_null`/
+    `br_on_non_null`/`call_ref`/`return_call_ref`; element-segment init at instantiation; `ref.null`/
+    `ref.func` in const-exprs. **Slot-encoding invariant in place:** `NULL_REF = u64::MAX` (funcref = small
+    function index; i31_tag checked after it, at GC). Per-instance table-entry budget. 72 core tests.
+  - **0.6.x remaining slices (per the roadmap order below):** GC → SIMD → multi-memory → threads →
+    memory64 → EH. Also fold in host imports (WASI needs them) + the deferred 0.5.x validation arms.
+    Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant
   (`null_ref` before `i31_tag`); `#[cold]`/`#[inline(never)]` trap path with lazy byte-offset resolve;
   shared `Memory`/`Table` (`Rc<RefCell>`, `Cell<u32>` refcount — single-thread ABI); `Instance` retains
