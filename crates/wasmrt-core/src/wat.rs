@@ -245,6 +245,260 @@ fn parse_i64_str(s: &str) -> Result<i64> {
     }
 }
 
+// --- Float literals -----------------------------------------------------------
+//
+// Shared with the `.wast` runner: ONE authority for what a float literal means, so an
+// expectation and the module it checks can never disagree.
+
+/// IEEE-754 shape of a target float, so one parser serves `f32` and `f64`.
+#[derive(Clone, Copy)]
+struct FloatFmt {
+    /// Stored mantissa bits (23 / 52).
+    mant_bits: i32,
+    /// Minimum normal exponent (−126 / −1022).
+    exp_min: i32,
+    /// Exponent bias (127 / 1023).
+    bias: i32,
+    /// Maximum biased exponent (0xff / 0x7ff).
+    max_biased: i32,
+}
+
+const F32_FMT: FloatFmt = FloatFmt {
+    mant_bits: 23,
+    exp_min: -126,
+    bias: 127,
+    max_biased: 0xff,
+};
+const F64_FMT: FloatFmt = FloatFmt {
+    mant_bits: 52,
+    exp_min: -1022,
+    bias: 1023,
+    max_biased: 0x7ff,
+};
+
+/// Bit position of the sign: mantissa bits + exponent bits.
+const fn sign_shift(f: FloatFmt) -> i32 {
+    f.mant_bits + (f.max_biased + 1).trailing_zeros() as i32
+}
+
+/// Assemble an IEEE bit pattern from a rounded significand `q` and the binary exponent of
+/// its least-significant bit. `q` is already rounded to at most `mant_bits + 1` significant
+/// bits, so nothing here rounds again.
+fn compose_float_bits(mut q: u128, mut ulp_exp: i32, neg: bool, f: FloatFmt) -> u64 {
+    let sign = if neg { 1u64 << sign_shift(f) } else { 0 };
+    if q == 0 {
+        return sign;
+    }
+    let prec = f.mant_bits + 1;
+    // A round-up may have carried into the next binade (q == 2^prec); halving is exact.
+    let msb = 128 - q.leading_zeros() as i32;
+    if msb > prec {
+        q >>= 1;
+        ulp_exp += 1;
+    }
+    let msb = 128 - q.leading_zeros() as i32;
+    let e = ulp_exp + msb - 1; // unbiased exponent of the value
+    if e < f.exp_min {
+        // Subnormal: `ulp_exp` is the smallest subnormal's, so `q` IS the stored mantissa.
+        return sign | (q as u64);
+    }
+    let biased = e + f.bias;
+    if biased >= f.max_biased {
+        return sign | ((f.max_biased as u64) << f.mant_bits); // overflow → infinity
+    }
+    let implicit = 1u128 << (prec - 1);
+    let mantissa = (q - implicit) as u64;
+    sign | ((biased as u64) << f.mant_bits) | mantissa
+}
+
+/// Parse a WAT float literal to its bit pattern, **correctly rounded**.
+///
+/// Decimal literals go through Rust's `from_str` (which is correctly rounded). Hexadecimal
+/// ones (`0x1.abcp+3`, and the exponent-less `0xABC` form the text format also allows) are
+/// parsed here — Rust has no hex-float parsing at all, and a naive implementation that
+/// truncates a long hex mantissa instead of rounding it emits a constant one ULP low. That
+/// is a *wrong value*, not a rejected one: the same number written in decimal and in hex
+/// would compile to different modules. The oracle hit exactly this on the spec suite's
+/// `simd_f64x2_rounding.wast`, whose literals are long enough to cross the threshold.
+///
+/// Returns `None` on a malformed literal.
+fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
+    // The wasm-specific NaN spellings: `nan:canonical`, `nan:arithmetic`, `nan:0x<payload>`.
+    if let Some(colon) = lit.find(':') {
+        let canonical: u64 = 1u64 << (f.mant_bits - 1);
+        let exp_all = (f.max_biased as u64) << f.mant_bits;
+        let mant_mask = (1u64 << f.mant_bits) - 1;
+        let tail = &lit[colon + 1..];
+        let mut bits = exp_all | canonical;
+        if tail != "canonical" && tail != "arithmetic" {
+            let payload = parse_u64_str(tail).ok()?;
+            bits = exp_all | (payload & mant_mask);
+        }
+        if lit.starts_with('-') {
+            bits |= 1u64 << sign_shift(f);
+        }
+        return Some(bits);
+    }
+
+    let mut s = lit;
+    let mut neg = false;
+    if let Some(rest) = s.strip_prefix('-') {
+        neg = true;
+        s = rest;
+    } else if let Some(rest) = s.strip_prefix('+') {
+        s = rest;
+    }
+
+    // Not hex → decimal (and `inf` / `nan`), which Rust rounds correctly.
+    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"));
+    let Some(body) = hex else {
+        let cleaned = strip_seps(s);
+        let v: f64 = if f.mant_bits == 23 {
+            f64::from(cleaned.parse::<f32>().ok()?)
+        } else {
+            cleaned.parse::<f64>().ok()?
+        };
+        let bits = if f.mant_bits == 23 {
+            u64::from((v as f32).to_bits())
+        } else {
+            v.to_bits()
+        };
+        return Some(if neg { bits | (1u64 << sign_shift(f)) } else { bits });
+    };
+
+    // Accumulate the hex significand into a u128. Digits past its capacity cannot change
+    // the rounded result except through the sticky bit, so they are folded in rather than
+    // dropped silently.
+    let mut mant: u128 = 0;
+    let mut sticky = false;
+    let mut exp: i32 = 0; // binary exponent contributed by digit placement
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'.' {
+            if seen_dot {
+                return None;
+            }
+            seen_dot = true;
+            i += 1;
+            continue;
+        }
+        if c == b'p' || c == b'P' {
+            break;
+        }
+        if c == b'_' {
+            i += 1;
+            continue; // the text format permits digit separators
+        }
+        let d: u128 = match c {
+            b'0'..=b'9' => u128::from(c - b'0'),
+            b'a'..=b'f' => u128::from(c - b'a' + 10),
+            b'A'..=b'F' => u128::from(c - b'A' + 10),
+            _ => return None,
+        };
+        seen_digit = true;
+        if mant >> 124 != 0 {
+            if d != 0 {
+                sticky = true;
+            }
+            if !seen_dot {
+                exp += 4; // a dropped integer digit still scales the value
+            }
+        } else {
+            mant = (mant << 4) | d;
+            if seen_dot {
+                exp -= 4;
+            }
+        }
+        i += 1;
+    }
+    if !seen_digit {
+        return None;
+    }
+    if i < bytes.len() {
+        // A `p` exponent.
+        i += 1;
+        let mut pneg = false;
+        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+            pneg = bytes[i] == b'-';
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None;
+        }
+        let mut pexp: i64 = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'_' {
+                i += 1;
+                continue;
+            }
+            if !bytes[i].is_ascii_digit() {
+                return None;
+            }
+            pexp = pexp * 10 + i64::from(bytes[i] - b'0');
+            if pexp > 1 << 30 {
+                pexp = 1 << 30; // saturate — it over/underflows either way
+            }
+            i += 1;
+        }
+        exp += i32::try_from(if pneg { -pexp } else { pexp }).ok()?;
+    }
+    if mant == 0 {
+        return Some(if neg { 1u64 << sign_shift(f) } else { 0 });
+    }
+
+    // value = mant × 2^exp. Round it in ONE step to a multiple of the target's ULP, so the
+    // reconstruction below only scales an exact integer and never rounds again.
+    //
+    // The ULP exponent is the coarser of the normalised one (`e - prec + 1`) and the
+    // smallest subnormal's. Taking the max makes normal, subnormal, and
+    // below-the-smallest-subnormal one path. Rounding in two stages instead — clamping the
+    // kept-bit count and scaling afterwards — throws away the sticky bit, so a value just
+    // ABOVE half the smallest subnormal flushes to zero instead of rounding up to it.
+    let prec = f.mant_bits + 1;
+    let msb = 128 - mant.leading_zeros() as i32;
+    let e = exp + msb - 1;
+    let ulp_exp = core::cmp::max(f.exp_min - prec + 1, e - prec + 1);
+
+    let k = ulp_exp - exp;
+    let q: u128 = if k > 0 {
+        // Round to nearest, ties to even. `k` can exceed the width of `mant` for a value
+        // far below the smallest subnormal, and a u128 shift is only defined for 0..=127,
+        // so the shifted-out-entirely case is handled separately.
+        if k > 128 {
+            0
+        } else {
+            let sh = (k - 1) as u32; // 0..=127 here
+            let guard = (mant >> sh) & 1;
+            if mant & ((1u128 << sh) - 1) != 0 {
+                sticky = true;
+            }
+            let mut q = if k == 128 { 0 } else { mant >> k };
+            if guard != 0 && (sticky || (q & 1) != 0) {
+                q += 1;
+            }
+            q
+        }
+    } else {
+        mant << (-k) as u32
+    };
+
+    Some(compose_float_bits(q, ulp_exp, neg, f))
+}
+
+/// Parse a WAT `f32` literal to its bit pattern.
+pub(crate) fn parse_f32_bits(lit: &str) -> Option<u32> {
+    parse_float_bits(lit, F32_FMT).map(|b| b as u32)
+}
+
+/// Parse a WAT `f64` literal to its bit pattern.
+pub(crate) fn parse_f64_bits(lit: &str) -> Option<u64> {
+    parse_float_bits(lit, F64_FMT)
+}
+
 fn parse_index(s: &Sexpr) -> Result<u32> {
     let a = want_atom(s)?;
     u32::try_from(parse_u64_str(a)?).map_err(|_| Error::BadImmediate)
@@ -626,7 +880,51 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         func_sigs.push(ti);
     }
 
-    emit_module(&b, &func_sigs)
+    // Encode every body and const-expr BEFORE any section is written: a multi-value block
+    // type or an inline `call_indirect` signature interns into the type table as it is
+    // encoded, so the type section is only complete once the last body is done.
+    let funcs = core::mem::take(&mut b.funcs);
+    let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(funcs.len());
+    for f in &funcs {
+        bodies.push(encode_body(f, &mut b)?);
+    }
+    let globals = core::mem::take(&mut b.globals);
+    let mut global_inits: Vec<Vec<u8>> = Vec::with_capacity(globals.len());
+    for g in &globals {
+        let mut out = Vec::new();
+        emit_const_expr(&mut out, &g.init, &mut b)?;
+        global_inits.push(out);
+    }
+    let elems = core::mem::take(&mut b.elems);
+    let mut elem_bytes: Vec<Vec<u8>> = Vec::with_capacity(elems.len());
+    for e in &elems {
+        let mut out = Vec::new();
+        emit_elem_segment(&mut out, e, &mut b)?;
+        elem_bytes.push(out);
+    }
+    let datas = core::mem::take(&mut b.datas);
+    let mut data_offsets: Vec<Option<Vec<u8>>> = Vec::with_capacity(datas.len());
+    for d in &datas {
+        match &d.offset {
+            Some(off) => {
+                let mut out = Vec::new();
+                emit_const_expr(&mut out, off, &mut b)?;
+                data_offsets.push(Some(out));
+            }
+            None => data_offsets.push(None),
+        }
+    }
+
+    emit_module(
+        &b,
+        &func_sigs,
+        &bodies,
+        &globals,
+        &global_inits,
+        &elem_bytes,
+        &datas,
+        &data_offsets,
+    )
 }
 
 /// The `$name` of a `(type $n …)` definition, if any.
@@ -1254,10 +1552,40 @@ fn parse_data_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 
 /// Emit the whole module: the header, then each section in its canonical order.
 ///
-/// `func_sigs` holds each defined function's type index, resolved by the caller *before*
-/// this runs — interning an inline signature can append to the type table, and the type
-/// section must be complete by the time it is written.
-fn emit_module(b: &ModuleBuild, func_sigs: &[u32]) -> Result<Vec<u8>> {
+/// Everything the caller pre-encoded, because encoding it can grow the type table.
+struct Encoded<'a> {
+    func_sigs: &'a [u32],
+    bodies: &'a [Vec<u8>],
+    globals: &'a [GlobalDef],
+    global_inits: &'a [Vec<u8>],
+    elems: &'a [Vec<u8>],
+    datas: &'a [DataSeg],
+    data_offsets: &'a [Option<Vec<u8>>],
+}
+
+/// `func_sigs` and the pre-encoded bodies/const-exprs are produced by the caller *before*
+/// this runs — a multi-value block type or an inline `call_indirect` signature interns into
+/// the type table while a body is encoded, so the type section is only complete afterwards.
+#[allow(clippy::too_many_arguments)]
+fn emit_module(
+    b: &ModuleBuild,
+    func_sigs: &[u32],
+    bodies: &[Vec<u8>],
+    globals: &[GlobalDef],
+    global_inits: &[Vec<u8>],
+    elems: &[Vec<u8>],
+    datas: &[DataSeg],
+    data_offsets: &[Option<Vec<u8>>],
+) -> Result<Vec<u8>> {
+    let e = Encoded {
+        func_sigs,
+        bodies,
+        globals,
+        global_inits,
+        elems,
+        datas,
+        data_offsets,
+    };
     let mut out = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
     // 1 — types.
@@ -1273,7 +1601,7 @@ fn emit_module(b: &ModuleBuild, func_sigs: &[u32]) -> Result<Vec<u8>> {
     }
 
     emit_imports(&mut out, b)?;
-    emit_rest(&mut out, b, func_sigs)?;
+    emit_rest(&mut out, b, &e)?;
     Ok(out)
 }
 
@@ -1338,13 +1666,13 @@ fn emit_imports(out: &mut Vec<u8>, b: &ModuleBuild) -> Result<()> {
     Ok(())
 }
 
-/// Emit sections 3 onward (the parts that do not feed back into the type table).
-fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, func_sigs: &[u32]) -> Result<()> {
+/// Emit sections 3 onward, from the pre-encoded pieces.
+fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, e: &Encoded) -> Result<()> {
     // 3 — function type indices.
-    if !b.funcs.is_empty() {
+    if !e.func_sigs.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.funcs.len() as u64);
-        for &ti in func_sigs {
+        uleb(&mut c, e.func_sigs.len() as u64);
+        for &ti in e.func_sigs {
             uleb(&mut c, u64::from(ti));
         }
         push_section(out, 3, &c);
@@ -1383,13 +1711,13 @@ fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, func_sigs: &[u32]) -> Result<()
     }
 
     // 6 — globals.
-    if !b.globals.is_empty() {
+    if !e.globals.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.globals.len() as u64);
-        for g in &b.globals {
+        uleb(&mut c, e.globals.len() as u64);
+        for (g, init) in e.globals.iter().zip(e.global_inits) {
             emit_val_type(&mut c, g.valtype)?;
             c.push(u8::from(g.mutable));
-            emit_const_expr(&mut c, &g.init, b)?;
+            c.extend_from_slice(init);
         }
         push_section(out, 6, &c);
     }
@@ -1414,48 +1742,47 @@ fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, func_sigs: &[u32]) -> Result<()
     }
 
     // 9 — element segments.
-    if !b.elems.is_empty() {
+    if !e.elems.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.elems.len() as u64);
-        for e in &b.elems {
-            emit_elem_segment(&mut c, e, b)?;
+        uleb(&mut c, e.elems.len() as u64);
+        for seg in e.elems {
+            c.extend_from_slice(seg);
         }
         push_section(out, 9, &c);
     }
 
     // 12 — data count (required whenever `memory.init`/`data.drop` can appear).
-    if !b.datas.is_empty() {
+    if !e.datas.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.datas.len() as u64);
+        uleb(&mut c, e.datas.len() as u64);
         push_section(out, 12, &c);
     }
 
     // 10 — code.
-    if !b.funcs.is_empty() {
+    if !e.bodies.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.funcs.len() as u64);
-        for f in &b.funcs {
-            let body = encode_body(f, b)?;
+        uleb(&mut c, e.bodies.len() as u64);
+        for body in e.bodies {
             uleb(&mut c, body.len() as u64);
-            c.extend_from_slice(&body);
+            c.extend_from_slice(body);
         }
         push_section(out, 10, &c);
     }
 
     // 11 — data segments.
-    if !b.datas.is_empty() {
+    if !e.datas.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.datas.len() as u64);
-        for d in &b.datas {
-            match &d.offset {
-                Some(off) => {
+        uleb(&mut c, e.datas.len() as u64);
+        for (d, off) in e.datas.iter().zip(e.data_offsets) {
+            match off {
+                Some(bytes) => {
                     if d.mem_index == 0 {
                         uleb(&mut c, 0);
                     } else {
                         uleb(&mut c, 2);
                         uleb(&mut c, u64::from(d.mem_index));
                     }
-                    emit_const_expr(&mut c, off, b)?;
+                    c.extend_from_slice(bytes);
                 }
                 None => uleb(&mut c, 1), // passive
             }
@@ -1474,9 +1801,22 @@ fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, func_sigs: &[u32]) -> Result<()
 const MAX_CTRL_DEPTH: usize = 1024;
 
 /// Everything an instruction needs to resolve a name to an index.
+///
+/// The name tables are borrowed field-by-field rather than through the whole
+/// [`ModuleBuild`], because `sigs` must be **mutable** here: a multi-value block type
+/// interns its signature into the type table while a body is being encoded. Disjoint field
+/// borrows make that safe, and it is why bodies are encoded before any section is written.
 struct Ctx<'a> {
     out: Vec<u8>,
-    b: &'a ModuleBuild,
+    sigs: &'a mut Vec<Sig>,
+    type_names: &'a [Option<String>],
+    func_names: &'a [Option<String>],
+    global_names: &'a [Option<String>],
+    table_names: &'a [Option<String>],
+    elem_names: &'a [Option<String>],
+    data_names: &'a [Option<String>],
+    mem_names: &'a [Option<String>],
+    tag_names: &'a [Option<String>],
     local_names: &'a [Option<String>],
     /// Control-label stack, innermost last, for resolving `br $name` to a relative depth.
     labels: Vec<Option<String>>,
@@ -1502,9 +1842,31 @@ impl Ctx<'_> {
     }
 }
 
+/// Borrow every name table out of a [`ModuleBuild`] alongside a mutable `sigs`, so a body
+/// can intern a block-type signature while still resolving names. The disjoint field
+/// borrows are what make this sound.
+macro_rules! ctx_for {
+    ($b:expr, $locals:expr, $out:expr) => {
+        Ctx {
+            out: $out,
+            sigs: &mut $b.sigs,
+            type_names: &$b.type_names,
+            func_names: &$b.func_names,
+            global_names: &$b.global_names,
+            table_names: &$b.table_names,
+            elem_names: &$b.elem_names,
+            data_names: &$b.data_names,
+            mem_names: &$b.mem_names,
+            tag_names: &$b.tag_names,
+            local_names: $locals,
+            labels: Vec::new(),
+        }
+    };
+}
+
 /// Encode one function body: the locals vector, the instruction sequence, then the
 /// implicit `end`.
-fn encode_body(f: &Func, b: &ModuleBuild) -> Result<Vec<u8>> {
+fn encode_body(f: &Func, b: &mut ModuleBuild) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     // One (count = 1, type) group per declared local — simple and always correct.
     uleb(&mut out, f.locals.len() as u64);
@@ -1512,12 +1874,8 @@ fn encode_body(f: &Func, b: &ModuleBuild) -> Result<Vec<u8>> {
         uleb(&mut out, 1);
         emit_val_type(&mut out, t)?;
     }
-    let mut ctx = Ctx {
-        out,
-        b,
-        local_names: &f.local_names,
-        labels: Vec::new(),
-    };
+    let locals = f.local_names.clone();
+    let mut ctx = ctx_for!(b, &locals, out);
     emit_seq(&mut ctx, &f.body)?;
     ctx.out.push(0x0b); // implicit function end
     Ok(ctx.out)
@@ -1525,15 +1883,11 @@ fn encode_body(f: &Func, b: &ModuleBuild) -> Result<Vec<u8>> {
 
 /// Emit a constant expression (a global initializer, or a data/element offset), terminated
 /// by `end`.
-fn emit_const_expr(out: &mut Vec<u8>, exprs: &[Sexpr], b: &ModuleBuild) -> Result<()> {
-    let mut ctx = Ctx {
-        out: Vec::new(),
-        b,
-        local_names: &[],
-        labels: Vec::new(),
-    };
+fn emit_const_expr(out: &mut Vec<u8>, exprs: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
+    let mut ctx = ctx_for!(b, &[], Vec::new());
     emit_seq(&mut ctx, exprs)?;
-    out.extend_from_slice(&ctx.out);
+    let bytes = ctx.out;
+    out.extend_from_slice(&bytes);
     out.push(0x0b);
     Ok(())
 }
@@ -1616,7 +1970,7 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool) ->
     let mut table = 0u32;
     if let Some(s) = l.get(j) {
         if s.as_atom().is_some_and(is_index_or_id) {
-            table = resolve_by_name(&ctx.b.table_names, s)?;
+            table = resolve_by_name(ctx.table_names, s)?;
             j += 1;
         }
     }
@@ -1626,11 +1980,11 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool) ->
     while let Some(s) = l.get(j) {
         match s.keyword() {
             Some("type") => {
-                type_ref = Some(resolve_by_name(&ctx.b.type_names, nth(want_list(s)?, 1)?)?);
+                type_ref = Some(resolve_by_name(ctx.type_names, nth(want_list(s)?, 1)?)?);
                 j += 1;
             }
             Some("param" | "result") => {
-                let one = parse_sig(core::slice::from_ref(s), &ctx.b.type_names, None)?;
+                let one = parse_sig(core::slice::from_ref(s), ctx.type_names, None)?;
                 sig.params.extend(one.params);
                 sig.results.extend(one.results);
                 j += 1;
@@ -1638,20 +1992,9 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool) ->
             _ => break,
         }
     }
-    let ti = match type_ref {
-        Some(ti) => ti,
-        // An inline signature must already exist in the type table — the type section is
-        // written before any body, so a body cannot append to it.
-        None => ctx
-            .b
-            .sigs
-            .iter()
-            .position(|s| *s == sig)
-            .map(|i| i as u32)
-            .ok_or(Error::Unsupported(
-                "call_indirect inline signature with no matching (type $t)",
-            ))?,
-    };
+    // An inline signature interns into the shared type table — bodies are encoded before
+    // any section is written, so appending here is safe.
+    let ti = type_ref.unwrap_or_else(|| intern_sig(ctx.sigs, sig));
     if folded {
         for k in j..l.len() {
             emit_one(ctx, l, k)?;
@@ -1857,7 +2200,14 @@ fn emit_op_with_immediates(
             sleb(&mut ctx.out, i64::from(v as i32));
         }
         O::I64Const => sleb(&mut ctx.out, parse_i64_str(want_atom(imm(0)?)?)?),
-        O::F32Const | O::F64Const => return Err(Error::Unsupported("float literals")),
+        O::F32Const => {
+            let bits = parse_f32_bits(want_atom(imm(0)?)?).ok_or(Error::BadNumber)?;
+            ctx.out.extend_from_slice(&bits.to_le_bytes());
+        }
+        O::F64Const => {
+            let bits = parse_f64_bits(want_atom(imm(0)?)?).ok_or(Error::BadNumber)?;
+            ctx.out.extend_from_slice(&bits.to_le_bytes());
+        }
         O::LocalGet | O::LocalSet | O::LocalTee => {
             // Resolve before the `&mut ctx.out` borrow — `resolve_local` reads `ctx`.
             let idx = ctx.resolve_local(imm(0)?)?;
@@ -1866,13 +2216,13 @@ fn emit_op_with_immediates(
         O::GlobalGet | O::GlobalSet => {
             uleb(
                 &mut ctx.out,
-                u64::from(resolve_by_name(&ctx.b.global_names, imm(0)?)?),
+                u64::from(resolve_by_name(ctx.global_names, imm(0)?)?),
             );
         }
         O::Call | O::RefFunc => {
             uleb(
                 &mut ctx.out,
-                u64::from(resolve_by_name(&ctx.b.func_names, imm(0)?)?),
+                u64::from(resolve_by_name(ctx.func_names, imm(0)?)?),
             );
         }
         O::Br | O::BrIf | O::Rethrow => {
@@ -1882,12 +2232,12 @@ fn emit_op_with_immediates(
         O::Throw => {
             uleb(
                 &mut ctx.out,
-                u64::from(resolve_by_name(&ctx.b.tag_names, imm(0)?)?),
+                u64::from(resolve_by_name(ctx.tag_names, imm(0)?)?),
             );
         }
         O::TableGet | O::TableSet | O::TableSize | O::TableGrow | O::TableFill => {
             let idx = match items.get(start) {
-                Some(s) => resolve_by_name(&ctx.b.table_names, s)?,
+                Some(s) => resolve_by_name(ctx.table_names, s)?,
                 None => 0,
             };
             uleb(&mut ctx.out, u64::from(idx));
@@ -1895,33 +2245,33 @@ fn emit_op_with_immediates(
         O::ElemDrop => {
             uleb(
                 &mut ctx.out,
-                u64::from(resolve_by_name(&ctx.b.elem_names, imm(0)?)?),
+                u64::from(resolve_by_name(ctx.elem_names, imm(0)?)?),
             );
         }
         O::DataDrop => {
             uleb(
                 &mut ctx.out,
-                u64::from(resolve_by_name(&ctx.b.data_names, imm(0)?)?),
+                u64::from(resolve_by_name(ctx.data_names, imm(0)?)?),
             );
         }
         O::TableInit => {
             // `table.init $table $elem` — the binary order is elem then table.
-            let a = resolve_by_name(&ctx.b.table_names, imm(0)?)?;
-            let e = resolve_by_name(&ctx.b.elem_names, imm(1)?)?;
+            let a = resolve_by_name(ctx.table_names, imm(0)?)?;
+            let e = resolve_by_name(ctx.elem_names, imm(1)?)?;
             uleb(&mut ctx.out, u64::from(e));
             uleb(&mut ctx.out, u64::from(a));
         }
         O::TableCopy => {
-            let d = resolve_by_name(&ctx.b.table_names, imm(0)?)?;
-            let s = resolve_by_name(&ctx.b.table_names, imm(1)?)?;
+            let d = resolve_by_name(ctx.table_names, imm(0)?)?;
+            let s = resolve_by_name(ctx.table_names, imm(1)?)?;
             uleb(&mut ctx.out, u64::from(d));
             uleb(&mut ctx.out, u64::from(s));
         }
         O::MemoryInit => {
-            let d = resolve_by_name(&ctx.b.data_names, imm(0)?)?;
+            let d = resolve_by_name(ctx.data_names, imm(0)?)?;
             uleb(&mut ctx.out, u64::from(d));
             let m = match items.get(start + 1) {
-                Some(s) => resolve_by_name(&ctx.b.mem_names, s)?,
+                Some(s) => resolve_by_name(ctx.mem_names, s)?,
                 None => 0,
             };
             uleb(&mut ctx.out, u64::from(m));
@@ -1929,17 +2279,17 @@ fn emit_op_with_immediates(
         O::MemoryCopy => {
             let d = items
                 .get(start)
-                .map_or(Ok(0), |s| resolve_by_name(&ctx.b.mem_names, s))?;
+                .map_or(Ok(0), |s| resolve_by_name(ctx.mem_names, s))?;
             let s = items
                 .get(start + 1)
-                .map_or(Ok(0), |s| resolve_by_name(&ctx.b.mem_names, s))?;
+                .map_or(Ok(0), |s| resolve_by_name(ctx.mem_names, s))?;
             uleb(&mut ctx.out, u64::from(d));
             uleb(&mut ctx.out, u64::from(s));
         }
         O::MemoryFill | O::MemorySize | O::MemoryGrow => {
             let m = items
                 .get(start)
-                .map_or(Ok(0), |s| resolve_by_name(&ctx.b.mem_names, s))?;
+                .map_or(Ok(0), |s| resolve_by_name(ctx.mem_names, s))?;
             uleb(&mut ctx.out, u64::from(m));
         }
         O::RefNull => {
@@ -1970,7 +2320,7 @@ fn emit_op_with_immediates(
         // An optional leading memory index (multi-memory).
         if let Some(a) = items.get(k).and_then(Sexpr::as_atom) {
             if !a.starts_with("offset=") && !a.starts_with("align=") {
-                mem = resolve_by_name(&ctx.b.mem_names, &items[k])?;
+                mem = resolve_by_name(ctx.mem_names, &items[k])?;
                 k += 1;
             }
         }
@@ -2015,11 +2365,11 @@ fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<Blo
     while let Some(s) = items.get(*j) {
         match s.keyword() {
             Some("type") => {
-                type_ref = Some(resolve_by_name(&ctx.b.type_names, nth(want_list(s)?, 1)?)?);
+                type_ref = Some(resolve_by_name(ctx.type_names, nth(want_list(s)?, 1)?)?);
                 *j += 1;
             }
             Some("param" | "result") => {
-                let one = parse_sig(core::slice::from_ref(s), &ctx.b.type_names, None)?;
+                let one = parse_sig(core::slice::from_ref(s), ctx.type_names, None)?;
                 sig.params.extend(one.params);
                 sig.results.extend(one.results);
                 *j += 1;
@@ -2030,22 +2380,17 @@ fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<Blo
     if let Some(ti) = type_ref {
         return Ok(BlockTy::TypeIndex(ti));
     }
+    // The shorthand forms: no params and at most one result.
     if sig.params.is_empty() {
-        return Ok(match sig.results.len() {
-            0 => BlockTy::Empty,
-            1 => BlockTy::Val(sig.results[0]),
-            // A multi-result block needs a type index, which must already exist — the
-            // type section is written before any body.
-            _ => {
-                return Err(Error::Unsupported(
-                    "multi-value block type without an explicit (type $t)",
-                ))
-            }
-        });
+        match sig.results.len() {
+            0 => return Ok(BlockTy::Empty),
+            1 => return Ok(BlockTy::Val(sig.results[0])),
+            _ => {}
+        }
     }
-    Err(Error::Unsupported(
-        "block type with parameters without an explicit (type $t)",
-    ))
+    // Anything richer (params, or multiple results) needs a real type index. Interning is
+    // safe because bodies are encoded before the type section is written.
+    Ok(BlockTy::TypeIndex(intern_sig(ctx.sigs, sig)))
 }
 
 fn emit_block_type(ctx: &mut Ctx, bt: BlockTy) -> Result<()> {
@@ -2057,7 +2402,7 @@ fn emit_block_type(ctx: &mut Ctx, bt: BlockTy) -> Result<()> {
     Ok(())
 }
 
-fn emit_elem_segment(c: &mut Vec<u8>, e: &ElemDef, b: &ModuleBuild) -> Result<()> {
+fn emit_elem_segment(c: &mut Vec<u8>, e: &ElemDef, b: &mut ModuleBuild) -> Result<()> {
     let uses_exprs = e.elem_type != V::FUNCREF;
     match (&e.offset, e.declarative) {
         (Some(off), _) => {
@@ -2339,5 +2684,140 @@ mod tests {
     fn rejects_an_unknown_instruction() {
         let src = r#"(module (func (i32.frobnicate)))"#;
         assert_eq!(asm(src), Err(Error::UnknownInstr));
+    }
+
+    // --- float literals ---
+
+    #[test]
+    fn hex_float_literals_are_rounded_not_truncated() {
+        // The exact case from the spec suite's `simd_f64x2_rounding.wast`. A parser that
+        // truncates a long hex mantissa yields ...cde — one ULP low, a WRONG value rather
+        // than a rejected one, so the same number in decimal and in hex would compile to
+        // different modules.
+        assert_eq!(
+            parse_f64_bits("0x0123456789ABCDEFabcdef").unwrap(),
+            0x44f2_3456_789a_bcdf
+        );
+        assert_eq!(
+            parse_f64_bits("0x0123456789ABCDEFa").unwrap(),
+            0x43b2_3456_789a_bcdf
+        );
+        assert_eq!(
+            parse_f64_bits("0x1.23456789abcdep+81").unwrap(),
+            0x4502_3456_789a_bcde
+        );
+    }
+
+    #[test]
+    fn parses_ordinary_float_literals() {
+        assert_eq!(parse_f64_bits("1.5").unwrap(), 1.5f64.to_bits());
+        assert_eq!(parse_f64_bits("-0.0").unwrap(), (-0.0f64).to_bits());
+        assert_eq!(parse_f64_bits("0").unwrap(), 0.0f64.to_bits());
+        assert_eq!(parse_f32_bits("1.5").unwrap(), 1.5f32.to_bits());
+        assert_eq!(parse_f32_bits("-2.5e3").unwrap(), (-2500.0f32).to_bits());
+        assert_eq!(parse_f64_bits("inf").unwrap(), f64::INFINITY.to_bits());
+        assert_eq!(
+            parse_f64_bits("-inf").unwrap(),
+            f64::NEG_INFINITY.to_bits()
+        );
+        // The exponent-less hex form the text format also allows.
+        assert_eq!(parse_f64_bits("0x10").unwrap(), 16.0f64.to_bits());
+        assert_eq!(parse_f64_bits("0x1.8p+1").unwrap(), 3.0f64.to_bits());
+        assert!(parse_f64_bits("0x").is_none());
+        assert!(parse_f64_bits("1.2.3").is_none());
+    }
+
+    #[test]
+    fn parses_the_wasm_nan_spellings() {
+        let canonical = parse_f64_bits("nan:canonical").unwrap();
+        assert!(f64::from_bits(canonical).is_nan());
+        assert_eq!(canonical, f64::NAN.to_bits() & !(1u64 << 63));
+        let arith = parse_f64_bits("nan:arithmetic").unwrap();
+        assert!(f64::from_bits(arith).is_nan());
+        // An explicit payload lands in the mantissa.
+        let payload = parse_f64_bits("nan:0x4000000000000").unwrap();
+        assert_eq!(payload & 0xf_ffff_ffff_ffff, 0x4000000000000);
+        assert!(f64::from_bits(payload).is_nan());
+        // The sign is honoured.
+        assert_ne!(parse_f64_bits("-nan:canonical").unwrap() >> 63, 0);
+        assert!(f32::from_bits(parse_f32_bits("nan").unwrap()).is_nan());
+    }
+
+    #[test]
+    fn subnormal_hex_floats_round_rather_than_flush() {
+        // 0.75 ULP — just ABOVE half the smallest f64 subnormal — must round up to it
+        // rather than flush to zero. This is the case a two-stage rounding (clamp the
+        // kept-bit count, then scale) gets wrong by discarding the sticky bit.
+        assert_eq!(parse_f64_bits("0x1.8p-1075").unwrap(), 1);
+        // Exactly half ties to even → zero.
+        assert_eq!(parse_f64_bits("0x1p-1075").unwrap(), 0);
+        // The smallest subnormal itself.
+        assert_eq!(parse_f64_bits("0x1p-1074").unwrap(), 1);
+        // Exactly halfway BETWEEN subnormals 1 and 2 ties to even → 2.
+        assert_eq!(parse_f64_bits("0x1.8p-1074").unwrap(), 2);
+        // Rounding up out of the subnormal range lands on the smallest normal.
+        assert_eq!(
+            parse_f64_bits("0x1.fffffffffffffp-1023").unwrap(),
+            f64::MIN_POSITIVE.to_bits()
+        );
+    }
+
+    #[test]
+    fn runs_float_arithmetic_from_text() {
+        let src = r#"(module
+            (func (export "add") (result f64)
+              (f64.add (f64.const 1.5) (f64.const 2.25))))"#;
+        let r = run(src, "add", &[]);
+        assert!((crate::interp::as_f64(r[0]) - 3.75).abs() < 1e-12);
+    }
+
+    #[test]
+    fn multi_value_block_type_interns_a_new_type() {
+        // A block returning two values needs a real type index. No `(type $t)` is written,
+        // so the assembler must intern one — which is only possible because bodies are
+        // encoded before the type section is emitted.
+        let src = r#"(module
+            (func (export "f") (result i32)
+              (block (result i32 i32)
+                (i32.const 20)
+                (i32.const 22))
+              i32.add))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn block_type_with_params_interns_a_new_type() {
+        // A block that consumes operands likewise needs a type index.
+        let src = r#"(module
+            (func (export "f") (result i32)
+              (i32.const 30)
+              (block (param i32) (result i32)
+                (i32.const 12)
+                i32.add)))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn call_indirect_interns_an_inline_signature() {
+        // No `(type $t)` on the call_indirect — the inline signature must intern.
+        let src = r#"(module
+            (table 1 funcref)
+            (elem (i32.const 0) $double)
+            (func $double (param i32) (result i32)
+              (i32.mul (local.get 0) (i32.const 2)))
+            (func (export "go") (result i32)
+              (call_indirect (param i32) (result i32) (i32.const 21) (i32.const 0))))"#;
+        let r = run(src, "go", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn runs_a_hex_float_constant() {
+        let src = r#"(module
+            (func (export "f") (result f32) (f32.const 0x1.8p+1)))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_f32(r[0]), 3.0);
     }
 }
