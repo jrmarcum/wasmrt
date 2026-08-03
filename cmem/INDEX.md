@@ -22,16 +22,19 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-**Progress (2026-08-03): T0–T3 + T4-core + T5 slices 1–9 DONE, released + published v0.1.0 → v0.6.8.** `wasmrt-core` has `types` + `reader` + `opcode` (shared IR +
+**Progress (2026-08-03): T0–T3 + T4-core + T5 slices 1–10 DONE, published v0.1.0 → v0.6.8 (v0.6.9 prepped,
+awaiting owner publish).** `wasmrt-core` has `types` + `reader` + `opcode` (shared IR +
 `decode_body`) + `module` (decode) + `validate` (spec §3 type-checker, core language; SIMD/atomics/GC/EH
 typing deferred to 0.5.x) + `interp` (switch interpreter; integer + float compute + linear memory incl.
 multi-memory and memory64 + tables/`call_indirect`/reference types + WasmGC structs/arrays/`i31`/casts +
-the full `v128` SIMD set incl. relaxed + threads/atomics `0xFE` family single-threaded). **`wasmrt <file>`
+the full `v128` SIMD set incl. relaxed + threads/atomics `0xFE` family single-threaded + **exception
+handling in both encodings**). **`wasmrt <file>`
 summarizes + validates; `wasmrt run <file> <fn> [args]` runs compute + multi-memory + memory64 +
-indirect-call + GC + SIMD + atomics functions** (incl. recursion). The interp value slot is 128-bit
+indirect-call + GC + SIMD + atomics + EH functions** (incl. recursion). The interp value slot is 128-bit
 (`Value = u128`) so a `v128` is one slot; a memory carries its own index type (`i64` addresses on a 64-bit
-memory) while **tables stay 32-bit**. 112 core tests green, clippy clean, all four build surfaces.
-**Next: 0.6.x slice 10 — exception handling.** Each task ships a crates.io
+memory) while **tables stay 32-bit**; `delegate` is rejected (oracle-faithful). 123 core tests green,
+clippy clean, all four build surfaces. **The interpreter's proposal coverage is COMPLETE — next: host
+imports + the deferred 0.5.x validation arms, then T6.** Each task ships a crates.io
 release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix — with the full `cmem/`
 sync committed **before** the publish handoff (owner directive, 2026-07-31; see `releasing.md`).
 

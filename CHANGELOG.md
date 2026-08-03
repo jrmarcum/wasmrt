@@ -11,8 +11,34 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next (0.6.x interpreter slices): exception handling — plus host imports (for WASI). Plus the deferred
-0.5.x validation arms._
+_Next: host imports (for WASI) + the deferred 0.5.x validation arms, then T6 (the text toolchain)._
+
+## [0.6.9] — Interpreter: exception handling (stage T5, slice 10)
+
+### Added
+- **Exception handling in both encodings.** The modern **exnref** encoding — `try_table` with all four
+  clause kinds (`catch`, `catch_ref`, `catch_all`, `catch_all_ref`), `throw`, and `throw_ref` — and the
+  **legacy** encoding — `try`/`catch`/`catch_all`/`rethrow`. Tags are resolved from the tag section, a
+  thrown exception carries its tag's parameters as its payload, and `catch_ref`/`catch_all_ref`
+  materialize an `exnref` that `throw_ref` can re-raise later.
+- **Exceptions unwind across call frames**: an exception thrown in a callee is offered to each caller's
+  handlers as it unwinds, and reaching the top of an invocation with no match surfaces as an
+  uncaught-exception trap. A real trap (or an exception no handler matches) keeps unwinding untouched.
+- Two new traps: **uncaught exception** and **too many live exception references** (the `exnref` box
+  budget — there is no collector, matching the GC heap's treatment).
+
+### Notes
+- **`delegate` is rejected, matching the frozen wazmrt oracle.** `delegate l` re-raises "at label `l`",
+  routing that can skip handlers an ordinary outward unwind would run; the oracle does not implement it
+  and its validator refuses it outright. wasmrt matches: reaching a delegating `try` while unwinding
+  traps loudly rather than silently mis-routing. Every other legacy construct is fully supported.
+- The two encodings unwind differently, and the difference is load-bearing: a `try_table` clause branches
+  **out of** the try_table to its target label, while a legacy `catch` runs **inside** the try, whose
+  label stays live so `rethrow` can still name it. A `throw` from inside a legacy handler propagates
+  outward rather than re-matching the handler it is already in.
+- EH **typing** remains part of the deferred 0.5.x validator work — the validator reports EH bodies as
+  unchecked rather than guessing, and `wasmrt <file>` prints `validation SKIPPED` for them. Execution is
+  unaffected.
 
 ## [0.6.8] — Interpreter: memory64 (stage T5, slice 9)
 

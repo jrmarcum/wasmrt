@@ -18,9 +18,15 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Current test state (2026-08-03, through T5 slice 9 / v0.6.8)
+## Current test state (2026-08-03, through T5 slice 10 / v0.6.9)
 
-**112 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+**123 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+EH slice added 11 — a `try_table` catch, an uncaught throw, `catch_all` binding nothing (a local records
+which path ran, since a catch_all target label must be void), an exception unwinding **across a call**, a
+`catch_ref` → `throw_ref` round-trip through the exnref box, legacy `try`/`catch`, legacy `catch_all`,
+legacy `rethrow` propagating outward, a throw from inside a handler escaping its own try (the idiom that
+loops forever without the `caught` guard), `delegate` trapping while unwinding, and no EH state leaking
+between invocations. The
 memory64 slice added 18 — 12 execution vectors (i64-address store/load round-trip, `memory.size`/`grow`
 as i64, grow-past-max → −1, an i64 active data-segment offset, **an address of 2^32 trapping instead of
 wrapping** — the case that distinguishes a real 64-bit address from a truncated one — a `memarg` offset

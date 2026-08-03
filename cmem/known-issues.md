@@ -1,7 +1,7 @@
 # Known Issues
 
 Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–9 done, v0.1.0–v0.6.8). This records the **inherited concerns** from the frozen wazmrt oracle, the
+1–10 done, v0.1.0–v0.6.9). This records the **inherited concerns** from the frozen wazmrt oracle, the
 **port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
 Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
@@ -34,6 +34,25 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
   add two stricter-than-normal traps: `UnalignedAtomic` (the effective address must be naturally aligned
   to the access width) and `ExpectedSharedMemory` (`wait*` requires a `shared` memory). The `shared` flag
   is decoded (limits bit 1) and now threaded onto the runtime `Memory`.
+- **`delegate` is rejected, inherited from the oracle** (`interp.rs throw_exception`, v0.6.9). `delegate l`
+  re-raises an exception "at label `l`", routing that can SKIP handlers an ordinary outward unwind would
+  run. wazmrt does not implement that label arithmetic (no reference impl remained to verify it against)
+  and its **validator rejects `delegate` outright**; its interpreter traps loudly as the defense for the
+  unvalidated run path. wasmrt matches exactly: reaching a delegating `try` while unwinding yields
+  `UnsupportedInstruction` rather than silently mis-routing. Every other legacy construct
+  (`try`/`catch`/`catch_all`/`rethrow`) is fully supported. **When the deferred 0.5.x EH validation arm
+  lands it must also reject `delegate`**, so the text and binary paths agree as they do in the oracle.
+- **EH has two structurally different unwind paths, and conflating them is the bug to avoid** (v0.6.9).
+  A `try_table` clause branches **out of** the try_table to its target label (label popped); a legacy
+  `catch` runs **inside** the try, whose label stays live so `rethrow` can name it. Two consequences are
+  load-bearing: (1) a `throw` from inside a legacy handler must propagate OUTWARD — the `caught.is_some()`
+  skip in `throw_exception` — or the idiom `catch (e) { throw e; }` re-matches its own handler forever;
+  (2) `rethrow` pops its try BEFORE re-raising, so the same handler cannot catch it again.
+- **Exceptions are not garbage-collected.** `catch_ref`/`catch_all_ref` box an exception into
+  `Store.exn_store` so it can be an `exnref` value; the box lives until the invocation ends, bounded by
+  `MAX_EXN_BOXES` (`ExnStoreExhausted` past that) — the same no-collector treatment as the GC heap. An
+  ordinary `throw`/`catch` round-trip never boxes, so a throwing loop does not grow the store. EH state
+  (`pending_exn` + `exn_store`) resets per invocation, so nothing leaks between calls.
 - **memory64 needed no new engine code either** (v0.6.8) — the second "already worked, now proven" slice.
   The 64-bit plumbing was built generically in the linear-memory slice (0.6.2): the `is64` limits flag,
   `u64` `memarg` offsets, `mem_addr_ty` per-memory address typing in the validator, and the interpreter's

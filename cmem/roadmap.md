@@ -9,8 +9,9 @@ covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
 is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–9 (v0.6.0 integer,
 v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC, v0.6.5 SIMD,
-v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64) DONE. Next: 0.6.x — EH + host imports;
-+ the deferred 0.5.x validation arms.**
+v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64, v0.6.9 exception handling) DONE — the
+interpreter's wasm-proposal coverage is COMPLETE. Next: host imports (WASI needs them) + the deferred
+0.5.x validation arms, then T6.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -152,8 +153,34 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     (wazmrt `read_table_type` rejects it), so wasmrt rejects it identically. Verified end-to-end through
     the CLI on a real memory64 module (`validation OK` → correct i64 result). No new engine code;
     112 core tests, clippy clean, native + wasm32 no_std. `[✅]`
-  - **0.6.x remaining slices (per the roadmap order below):** EH. Also fold in host imports
-    (WASI needs them) + the deferred 0.5.x validation arms.
+  - **Slice 10 — exception handling. ✅ DONE 2026-08-03 (v0.6.9).** **Real new engine code** (unlike
+    slices 7 and 9): the whole EH runtime, ported from wazmrt `interp.zig` `throwException`/`onCallError`.
+    **Both encodings.** *exnref:* `try_table` with all four clause kinds (`catch`/`catch_ref`/`catch_all`/
+    `catch_all_ref`), `throw`, `throw_ref`. *Legacy:* `try`/`catch`/`catch_all`/`rethrow`. New data model:
+    `Exception { tag, values }`; `Store.exn_store` (boxed exceptions — an `exnref` value is an index,
+    bounded by `MAX_EXN_BOXES`) + `Store.pending_exn` (an exception in flight across frames); `FuncBody
+    .try_info` (each legacy `try`'s handlers, collected by `precompute_control_flow` on the same opener
+    stack that matches `end`s); `Label` gained `try_table_pc`/`legacy_pc`/`caught`. Two new traps —
+    `UncaughtException`, `ExnStoreExhausted` — plus `UndefinedTag`.
+    **The load-bearing asymmetry:** a `try_table` clause branches **out of** the try_table to its target
+    label (so the label is popped), while a legacy `catch` runs **inside** the try, whose label stays live
+    for `rethrow`. Two guards fall out of that: a `throw` from inside a legacy handler must propagate
+    outward, not re-match its own handler (else the `catch (e) { throw e; }` idiom loops forever — the
+    `caught.is_some()` skip), and `rethrow` pops the try *before* re-raising.
+    **`delegate` is rejected — oracle-faithful.** `delegate l` re-raises "at label l", routing wazmrt does
+    not implement and its validator refuses; reaching a delegating try while unwinding traps
+    `UnsupportedInstruction` rather than silently mis-routing. **Idiomatic divergences:** exceptions are
+    owned `Vec<Value>` (no arena); `Label` identifies its construct by **pc** rather than borrowing the
+    immediate, so it stays cheap and free of a second body borrow; EH state resets per invocation.
+    **Rust note:** `Label` lost `Copy` (it owns `caught`), so `branch` reads its scalars out first.
+    11 EH vectors: try_table catch, uncaught throw, catch_all binds nothing, unwind across a call,
+    catch_ref→throw_ref round-trip, legacy try/catch, legacy catch_all, legacy rethrow, throw-from-handler
+    escapes, delegate traps, no state leak between invocations. Verified end-to-end via the CLI.
+    123 core tests, clippy clean, native + wasm32 no_std. **EH *typing* stays deferred to the 0.5.x
+    validator arm** (per-slice precedent: SIMD/atomics/GC also landed exec-first); `wasmrt <file>` prints
+    `validation SKIPPED` for an EH body. `[✅]`
+  - **0.6.x remaining work:** host imports (WASI needs them) + the deferred 0.5.x validation arms —
+    **including EH typing, where the validator must also reject `delegate`** (the oracle does).
     Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant
   (`null_ref` before `i31_tag`); `#[cold]`/`#[inline(never)]` trap path with lazy byte-offset resolve;

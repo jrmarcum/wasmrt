@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::module::{CompKind, CompType, FuncType, Module, StorageType};
-use crate::opcode::{decode_body, BlockType, HeapType, Imm, Instr, Op, RefType};
+use crate::opcode::{decode_body, BlockType, Catch, CatchKind, HeapType, Imm, Instr, Op, RefType};
 use crate::reader::Reader;
 use crate::types::{DecodeError, RefHeap};
 
@@ -98,11 +98,40 @@ const _: () = assert!(I31_TAG == (1u128 << 63)); // i31 tag lives in the low 64 
 /// this backstop keeps a guest allocation loop from exhausting host memory.
 const MAX_GC_OBJECTS: usize = 1 << 24;
 
+/// Cap on live boxed exceptions per instance. `catch_ref`/`catch_all_ref` box an exception so
+/// it can become an `exnref` value; like the GC heap there is no collector, so this backstop
+/// keeps a guest catch loop from exhausting host memory.
+const MAX_EXN_BOXES: usize = 1 << 20;
+
 /// A heap-allocated GC object: its declared type index (RTT) + its struct fields / array
 /// elements. One `Value` (128-bit) per field — enough for every field type incl. `v128`.
 struct HeapObject {
     type_index: u32,
     fields: Vec<Value>,
+}
+
+/// A thrown exception in flight: the tag it carries and its value payload. Owned (a `Vec`
+/// per exception) rather than arena-allocated — it frees when the last holder drops.
+#[derive(Clone, PartialEq, Eq)]
+struct Exception {
+    tag: u32,
+    values: Vec<Value>,
+}
+
+/// One inline handler of a legacy `try`. `tag == None` is `catch_all`; `handler_pc` is the
+/// first instruction after the `catch`.
+#[derive(Clone, Copy)]
+struct LegacyCatch {
+    tag: Option<u32>,
+    handler_pc: usize,
+}
+
+/// The catch handlers (and optional `delegate` label) of a legacy `try`, precomputed per
+/// `try` instruction so unwinding can find them without rescanning the body.
+#[derive(Clone, Default)]
+struct LegacyTry {
+    handlers: Vec<LegacyCatch>,
+    delegate: Option<u32>,
 }
 
 /// Shared linear memory. `bytes` is `alloc_zeroed`-backed (demand-zero pages on mainstream
@@ -138,6 +167,15 @@ struct Store {
     /// GC heap: one entry per allocated struct/array; a GC reference value is its index here.
     /// No collector — objects live for the instance's lifetime, bounded by `MAX_GC_OBJECTS`.
     gc_heap: Vec<HeapObject>,
+    /// Exceptions boxed so they can be `exnref` values (`catch_ref`/`catch_all_ref` push one,
+    /// `throw_ref` consumes one) — an `exnref` value is an index here. Only the `_ref` forms
+    /// box; an ordinary `throw`/`catch` round-trip never touches this, so a throwing loop
+    /// does not grow it. Bounded by `MAX_EXN_BOXES`.
+    exn_store: Vec<Exception>,
+    /// An exception unwinding across call frames: set when it leaves a frame uncaught, so the
+    /// caller's `call` site can try to catch it. Cleared once caught or once it escapes the
+    /// invocation.
+    pending_exn: Option<Exception>,
 }
 
 /// A runtime trap or an execution-setup error.
@@ -190,6 +228,13 @@ pub enum Trap {
     GcHeapExhausted,
     /// `ref.cast` to a type the value is not an instance of.
     CastFailure,
+    /// A `throw` / catch tag index out of range (EH).
+    UndefinedTag,
+    /// A thrown exception reached the top of the invocation with no matching handler (EH).
+    /// Not a bug in the guest's sense — it is how an escaping wasm exception surfaces.
+    UncaughtException,
+    /// More than `MAX_EXN_BOXES` exceptions were boxed as `exnref` values (no collector).
+    ExnStoreExhausted,
     /// A constant expression used an opcode this slice doesn't evaluate.
     ConstantExpr,
     /// An opcode this interpreter slice does not execute yet (float/memory/tables/GC/SIMD/EH).
@@ -221,6 +266,9 @@ impl fmt::Display for Trap {
             Trap::UndefinedLabel => f.write_str("branch label out of range"),
             Trap::StackUnderflow => f.write_str("operand stack underflow"),
             Trap::UnbalancedControl => f.write_str("unbalanced control instruction"),
+            Trap::UndefinedTag => f.write_str("tag index out of range"),
+            Trap::UncaughtException => f.write_str("uncaught exception"),
+            Trap::ExnStoreExhausted => f.write_str("too many live exception references"),
             Trap::NoMemory => f.write_str("no linear memory"),
             Trap::MemoryOutOfBounds => f.write_str("out of bounds memory access"),
             Trap::MemoryLimitExceeded => f.write_str("memory exceeds the instance budget"),
@@ -263,6 +311,9 @@ struct FuncBody {
     end_of: Vec<usize>,
     /// For each `if` index: the `else` index, or `ir.len()` if none.
     else_of: Vec<usize>,
+    /// For each legacy `try` index: its inline catch handlers + optional `delegate` label;
+    /// `None` elsewhere (EH, legacy encoding).
+    try_info: Vec<Option<LegacyTry>>,
 }
 
 /// An instantiated module ready to run. Owns its `Module` (so it outlives the input and the
@@ -384,13 +435,14 @@ impl Instance {
             let ty = module.func_sig(type_index).ok_or(Trap::UndefinedFunc)?;
             let num_locals = ty.params.len() + code.local_count() as usize;
             let ir = decode_body(&code.body)?;
-            let (end_of, else_of) = precompute_control_flow(&ir)?;
+            let cf = precompute_control_flow(&ir)?;
             func_bodies.push(FuncBody {
                 ty,
                 num_locals,
                 ir,
-                end_of,
-                else_of,
+                end_of: cf.end_of,
+                else_of: cf.else_of,
+                try_info: cf.try_info,
             });
         }
 
@@ -405,6 +457,8 @@ impl Instance {
                 elem_values,
                 elem_dropped,
                 gc_heap: Vec::new(),
+                exn_store: Vec::new(),
+                pending_exn: None,
             },
         })
     }
@@ -437,33 +491,101 @@ impl Instance {
         if args.len() != ft.params.len() {
             return Err(Trap::BadArgCount);
         }
+        // The EH state is per-invocation: an exception that escaped a previous call must not
+        // be visible to this one, and the exnrefs it boxed are unreachable once it returns.
+        self.store.pending_exn = None;
+        self.store.exn_store.clear();
         let ctx = Ctx {
             module: &self.module,
             func_bodies: &self.func_bodies,
         };
-        call_function(&ctx, &mut self.store, func_index, args, 1)
+        let r = call_function(&ctx, &mut self.store, func_index, args, 1);
+        // Drop an escaping exception's payload rather than pinning it until the next invoke.
+        if r.is_err() {
+            self.store.pending_exn = None;
+        }
+        r
     }
 }
 
-/// Match every `block`/`loop`/`if` with its `end`, and every `if` with its `else`.
-fn precompute_control_flow(ir: &[Instr]) -> Result<(Vec<usize>, Vec<usize>)> {
+/// The per-body control-flow tables computed once at instantiation (see
+/// [`precompute_control_flow`]), each indexed by instruction pc.
+struct ControlFlow {
+    end_of: Vec<usize>,
+    else_of: Vec<usize>,
+    try_info: Vec<Option<LegacyTry>>,
+}
+
+/// Match every `block`/`loop`/`if`/`try`/`try_table` with its `end`, every `if` with its
+/// `else`, and collect each legacy `try`'s inline `catch`/`catch_all` handlers.
+///
+/// The handler collection rides the same opener stack: when a `catch` is reached, the top
+/// opener is always its enclosing `try` (the body's nested blocks are balanced before the
+/// first `catch`). At the `try`'s `end` we also point `end_of` at that `end` for every one of
+/// its `catch` instructions, so a body — or a handler — that completes normally skips the
+/// remaining handlers instead of falling into them.
+fn precompute_control_flow(ir: &[Instr]) -> Result<ControlFlow> {
     let mut end_of = vec![0usize; ir.len()];
     let mut else_of = vec![ir.len(); ir.len()]; // sentinel = "no else"
+    let mut try_info: Vec<Option<LegacyTry>> = vec![None; ir.len()];
     let mut stack: Vec<usize> = Vec::new();
+    // Parallel to `stack`: the handlers collected so far, and the pcs of their `catch`
+    // instructions (so `end_of` can be back-filled at the `end`).
+    let mut handlers: Vec<Vec<LegacyCatch>> = Vec::new();
+    let mut catch_pcs: Vec<Vec<usize>> = Vec::new();
     for (i, instr) in ir.iter().enumerate() {
         match instr.op {
-            // try/try_table also open a block-shaped construct; push so nesting stays balanced
-            // even though their handlers aren't executed in this slice.
-            Op::Block | Op::Loop | Op::If | Op::TryTable | Op::TryLegacy => stack.push(i),
+            Op::Block | Op::Loop | Op::If | Op::TryTable | Op::TryLegacy => {
+                stack.push(i);
+                handlers.push(Vec::new());
+                catch_pcs.push(Vec::new());
+            }
             Op::Else => {
                 let &opener = stack.last().ok_or(Trap::UnbalancedControl)?;
                 else_of[opener] = i;
             }
+            Op::CatchLegacy | Op::CatchAll => {
+                let top = handlers.last_mut().ok_or(Trap::UnbalancedControl)?; // bare catch
+                top.push(LegacyCatch {
+                    tag: if instr.op == Op::CatchLegacy {
+                        Some(tag_imm(instr)?)
+                    } else {
+                        None
+                    },
+                    handler_pc: i + 1,
+                });
+                catch_pcs
+                    .last_mut()
+                    .ok_or(Trap::UnbalancedControl)?
+                    .push(i);
+            }
+            Op::Delegate => {
+                // `delegate` terminates its `try` in place of an `end`.
+                let opener = stack.pop().ok_or(Trap::UnbalancedControl)?; // bare delegate
+                handlers.pop();
+                catch_pcs.pop();
+                end_of[opener] = i;
+                try_info[opener] = Some(LegacyTry {
+                    handlers: Vec::new(),
+                    delegate: Some(label_imm(instr)?),
+                });
+            }
             Op::End => {
                 if let Some(opener) = stack.pop() {
+                    let hs = handlers.pop().unwrap_or_default();
+                    let cps = catch_pcs.pop().unwrap_or_default();
                     end_of[opener] = i;
                     if else_of[opener] != ir.len() {
                         end_of[else_of[opener]] = i;
+                    }
+                    if ir[opener].op == Op::TryLegacy {
+                        for cp in cps {
+                            end_of[cp] = i; // a catch reached by normal flow skips to the end
+                        }
+                        try_info[opener] = Some(LegacyTry {
+                            handlers: hs,
+                            delegate: None,
+                        });
                     }
                 }
                 // else: the function's implicit final `end`.
@@ -471,11 +593,20 @@ fn precompute_control_flow(ir: &[Instr]) -> Result<(Vec<usize>, Vec<usize>)> {
             _ => {}
         }
     }
-    Ok((end_of, else_of))
+    Ok(ControlFlow {
+        end_of,
+        else_of,
+        try_info,
+    })
 }
 
 /// A control label on a frame's label stack.
-#[derive(Clone, Copy)]
+///
+/// The EH fields identify the construct by its **pc** rather than borrowing its immediate:
+/// the catch clauses live in `body.ir[try_pc]` and the legacy handlers in
+/// `body.try_info[try_pc]`, both immutable for the frame's lifetime, so the label stays cheap
+/// to push and free of a second borrow of the body.
+#[derive(Clone)]
 struct Label {
     is_loop: bool,
     /// Slots carried on a branch (results for block/if, params for loop).
@@ -484,6 +615,27 @@ struct Label {
     target: usize,
     /// Value-stack height below this construct's operands.
     stack_base: usize,
+    /// `Some(pc)` only for a `try_table` label — its catch clauses are `body.ir[pc]`'s,
+    /// consulted when an exception unwinds through this frame.
+    try_table_pc: Option<usize>,
+    /// `Some(pc)` only for a legacy `try` label — its handlers are `body.try_info[pc]`'s.
+    legacy_pc: Option<usize>,
+    /// The exception currently being handled in this legacy try's catch block, kept so
+    /// `rethrow` can re-raise it. Set when a handler is entered.
+    caught: Option<Exception>,
+}
+
+/// A plain (non-EH) label — the common case for `block`/`loop`/`if`.
+fn plain_label(is_loop: bool, arity: u32, target: usize, stack_base: usize) -> Label {
+    Label {
+        is_loop,
+        arity,
+        target,
+        stack_base,
+        try_table_pc: None,
+        legacy_pc: None,
+        caught: None,
+    }
 }
 
 struct Frame<'a> {
@@ -543,22 +695,163 @@ impl Frame<'_> {
         if n as usize >= self.labels.len() {
             return Err(Trap::UndefinedLabel);
         }
-        let label = self.labels[self.labels.len() - 1 - n as usize];
-        let arity = label.arity as usize;
+        // Read the scalars out first — `Label` owns a `caught` exception, so it is not `Copy`.
+        let (is_loop, arity, target, label_base) = {
+            let l = &self.labels[self.labels.len() - 1 - n as usize];
+            (l.is_loop, l.arity as usize, l.target, l.stack_base)
+        };
         let from = self.stack_base(arity)?;
-        if from < label.stack_base {
+        if from < label_base {
             return Err(Trap::StackUnderflow);
         }
-        self.vstack.copy_within(from..from + arity, label.stack_base);
-        self.vstack.truncate(label.stack_base + arity);
+        self.vstack.copy_within(from..from + arity, label_base);
+        self.vstack.truncate(label_base + arity);
         // A loop-continue keeps the loop's own label; a forward exit pops it too.
-        let keep = if label.is_loop {
+        let keep = if is_loop {
             self.labels.len() - n as usize
         } else {
             self.labels.len() - (n as usize + 1)
         };
         self.labels.truncate(keep);
-        Ok(label.target)
+        Ok(target)
+    }
+
+    /// Try to catch `exn` in this frame: search the label stack innermost-out for a handler
+    /// that matches. Returns the resumption pc on a match, or `None` if nothing in this frame
+    /// handles it (the caller then propagates [`Trap::UncaughtException`]).
+    ///
+    /// The two encodings unwind differently, and the difference is load-bearing:
+    /// - a `try_table` clause branches **out of** the try_table to the clause's label;
+    /// - a legacy `catch` runs **inside** the try, whose label stays on the stack so
+    ///   `rethrow` can still name it.
+    fn throw_exception(&mut self, store: &mut Store, exn: &Exception) -> Result<Option<usize>> {
+        let body = self.body;
+        for d in 0..self.labels.len() {
+            let idx = self.labels.len() - 1 - d;
+
+            // --- try_table (exnref encoding) ---
+            if let Some(tpc) = self.labels[idx].try_table_pc {
+                let catches: &[Catch] = match &body.ir[tpc].imm {
+                    Imm::TryTable(tt) => &tt.catches,
+                    _ => &[],
+                };
+                for c in catches {
+                    let matches = match c.kind {
+                        CatchKind::Catch | CatchKind::CatchRef => c.tag == exn.tag,
+                        CatchKind::CatchAll | CatchKind::CatchAllRef => true,
+                    };
+                    if !matches {
+                        continue;
+                    }
+                    // Discard everything the try_table body pushed (including any call
+                    // arguments in flight), back to its entry height. An unvalidated body may
+                    // have popped BELOW that base; truncating upward would resurrect stale
+                    // slots, so trap instead.
+                    let base = self.labels[idx].stack_base;
+                    if base > self.vstack.len() {
+                        return Err(Trap::StackUnderflow);
+                    }
+                    self.vstack.truncate(base);
+                    match c.kind {
+                        CatchKind::Catch | CatchKind::CatchRef => {
+                            self.vstack.extend_from_slice(&exn.values);
+                        }
+                        CatchKind::CatchAll | CatchKind::CatchAllRef => {}
+                    }
+                    if matches!(c.kind, CatchKind::CatchRef | CatchKind::CatchAllRef) {
+                        let ei = store.exn_store.len();
+                        if ei >= MAX_EXN_BOXES {
+                            return Err(Trap::ExnStoreExhausted);
+                        }
+                        store.exn_store.push(exn.clone());
+                        self.push(ei as Value);
+                    }
+                    // The clause's label is relative to the try_table (label 0 = the
+                    // try_table block itself), which sits `d` deep — so branch to
+                    // `d + c.label`. `c.label` is an unvalidated `u32`, so widen before
+                    // adding and reject an over-`u32` total rather than wrapping.
+                    let target = d as u64 + u64::from(c.label);
+                    let target = u32::try_from(target).map_err(|_| Trap::UndefinedLabel)?;
+                    return self.branch(target).map(Some);
+                }
+            }
+
+            // --- legacy try/catch ---
+            let Some(lpc) = self.labels[idx].legacy_pc else {
+                continue;
+            };
+            let Some(lt) = body.try_info.get(lpc).and_then(Option::as_ref) else {
+                continue;
+            };
+            // `delegate l` re-raises "at label l", which can skip handlers this ordinary
+            // outward unwind would run. The frozen oracle does not implement that routing and
+            // its validator rejects `delegate` outright; we match it, and trap loudly here so
+            // a hand-crafted binary that reaches a delegating try while unwinding fails
+            // visibly instead of silently mis-routing.
+            if lt.delegate.is_some() {
+                return Err(Trap::UnsupportedInstruction);
+            }
+            // A throw from WITHIN this try's own handler must propagate OUTWARD rather than
+            // re-match the same handler: once a handler is entered (`caught` set) we are past
+            // the `catch` clause, outside the protected region. Without this guard the legacy
+            // re-throw idiom `catch (e) { … throw e; }` loops forever. (`rethrow` sidesteps it
+            // by popping the try before re-raising.)
+            if self.labels[idx].caught.is_some() {
+                continue;
+            }
+            for h in &lt.handlers {
+                if h.tag.is_some_and(|t| t != exn.tag) {
+                    continue;
+                }
+                let base = self.labels[idx].stack_base;
+                if base > self.vstack.len() {
+                    return Err(Trap::StackUnderflow);
+                }
+                self.vstack.truncate(base);
+                if h.tag.is_some() {
+                    self.vstack.extend_from_slice(&exn.values); // catch binds the payload
+                }
+                // Drop the body's nested labels but KEEP this try, and record the caught
+                // exception so a `rethrow` naming this label can re-raise it.
+                self.labels.truncate(idx + 1);
+                self.labels[idx].caught = Some(exn.clone());
+                return Ok(Some(h.handler_pc));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Raise `exn` from this frame: resume at the catching handler, or park it as the
+    /// instance's pending exception and unwind to the caller.
+    fn raise(&mut self, store: &mut Store, exn: Exception) -> Result<usize> {
+        match self.throw_exception(store, &exn)? {
+            Some(target) => Ok(target),
+            None => {
+                store.pending_exn = Some(exn);
+                Err(Trap::UncaughtException)
+            }
+        }
+    }
+
+    /// Handle an error propagating out of a `call`. If it is an unwinding exception this frame
+    /// catches, return the resumption pc; otherwise re-raise, so a real trap — or an exception
+    /// no handler here matches — keeps unwinding.
+    fn on_call_error(&mut self, store: &mut Store, e: Trap) -> Result<usize> {
+        if e != Trap::UncaughtException {
+            return Err(e);
+        }
+        // Nothing here can catch an exception it never received (a `pending_exn` of `None`
+        // means the unwind did not originate from a throw on this store), so re-raise.
+        let Some(exn) = store.pending_exn.take() else {
+            return Err(e);
+        };
+        match self.throw_exception(store, &exn)? {
+            Some(target) => Ok(target),
+            None => {
+                store.pending_exn = Some(exn); // keep unwinding outward
+                Err(e)
+            }
+        }
     }
 }
 
@@ -599,12 +892,7 @@ fn call_function(
         body,
         locals,
         vstack: Vec::new(),
-        labels: vec![Label {
-            is_loop: false,
-            arity: body.ty.results.len() as u32,
-            target: body.ir.len(),
-            stack_base: 0,
-        }],
+        labels: vec![plain_label(false, body.ty.results.len() as u32, body.ir.len(), 0)],
     };
     run(&mut frame, ctx, store, depth)?;
 
@@ -706,24 +994,18 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let params = block_arity(ctx, bt, true);
                 let arity = block_arity(ctx, bt, false);
                 let stack_base = frame.stack_base(params as usize)?;
-                frame.labels.push(Label {
-                    is_loop: false,
-                    arity,
-                    target: body.end_of[pc] + 1,
-                    stack_base,
-                });
+                frame
+                    .labels
+                    .push(plain_label(false, arity, body.end_of[pc] + 1, stack_base));
                 pc += 1;
             }
             Op::Loop => {
                 let bt = block_type(instr)?;
                 let params = block_arity(ctx, bt, true);
                 let stack_base = frame.stack_base(params as usize)?;
-                frame.labels.push(Label {
-                    is_loop: true,
-                    arity: params,
-                    target: pc + 1,
-                    stack_base,
-                });
+                frame
+                    .labels
+                    .push(plain_label(true, params, pc + 1, stack_base));
                 pc += 1;
             }
             Op::If => {
@@ -732,12 +1014,9 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let params = block_arity(ctx, bt, true);
                 let arity = block_arity(ctx, bt, false);
                 let stack_base = frame.stack_base(params as usize)?;
-                frame.labels.push(Label {
-                    is_loop: false,
-                    arity,
-                    target: body.end_of[pc] + 1,
-                    stack_base,
-                });
+                frame
+                    .labels
+                    .push(plain_label(false, arity, body.end_of[pc] + 1, stack_base));
                 if c != 0 {
                     pc += 1;
                 } else {
@@ -753,6 +1032,94 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
             Op::End => {
                 frame.labels.pop();
                 pc += 1;
+            }
+
+            // --- Exception handling: try_table (exnref encoding) ---
+            Op::TryTable => {
+                let Imm::TryTable(tt) = &instr.imm else {
+                    return Err(Trap::UnsupportedInstruction);
+                };
+                let params = block_arity(ctx, tt.block_type, true);
+                let arity = block_arity(ctx, tt.block_type, false);
+                let stack_base = frame.stack_base(params as usize)?;
+                frame.labels.push(Label {
+                    is_loop: false,
+                    arity,
+                    target: body.end_of[pc] + 1,
+                    stack_base,
+                    try_table_pc: Some(pc),
+                    legacy_pc: None,
+                    caught: None,
+                });
+                pc += 1;
+            }
+            Op::Throw => {
+                let tag = tag_imm(instr)?;
+                let ft = ctx.module.tag_type(tag).ok_or(Trap::UndefinedTag)?;
+                let base = frame.stack_base(ft.params.len())?;
+                let values = frame.vstack[base..].to_vec();
+                frame.vstack.truncate(base);
+                pc = frame.raise(store, Exception { tag, values })?;
+            }
+            Op::ThrowRef => {
+                let r = frame.pop();
+                if r == NULL_REF {
+                    return Err(Trap::NullReference);
+                }
+                let ei = usize::try_from(r).map_err(|_| Trap::NullReference)?;
+                // An out-of-range exnref is only reachable from an unvalidated module.
+                let exn = store
+                    .exn_store
+                    .get(ei)
+                    .ok_or(Trap::NullReference)?
+                    .clone();
+                pc = frame.raise(store, exn)?;
+            }
+
+            // --- Exception handling: the legacy try/catch encoding ---
+            Op::TryLegacy => {
+                let bt = block_type(instr)?;
+                let params = block_arity(ctx, bt, true);
+                let arity = block_arity(ctx, bt, false);
+                let stack_base = frame.stack_base(params as usize)?;
+                frame.labels.push(Label {
+                    is_loop: false,
+                    arity,
+                    target: body.end_of[pc] + 1,
+                    stack_base,
+                    try_table_pc: None,
+                    legacy_pc: Some(pc),
+                    caught: None,
+                });
+                pc += 1;
+            }
+            // Reached only by normal control flow (the body, or a prior handler, completed):
+            // skip the remaining handlers to the `end`.
+            Op::CatchLegacy | Op::CatchAll => pc = body.end_of[pc],
+            // `delegate` reached by normal flow just ends its try, like `end`.
+            Op::Delegate => {
+                frame.labels.pop();
+                pc += 1;
+            }
+            Op::Rethrow => {
+                // Re-raise the exception caught by the try `n` levels out, propagating from
+                // OUTSIDE that try — it already had its turn at this exception.
+                let n = label_imm(instr)? as usize;
+                if n >= frame.labels.len() {
+                    return Err(Trap::UndefinedLabel);
+                }
+                let idx = frame.labels.len() - 1 - n;
+                let exn = frame.labels[idx]
+                    .caught
+                    .clone()
+                    .ok_or(Trap::UncaughtException)?;
+                let base = frame.labels[idx].stack_base;
+                frame.labels.truncate(idx);
+                if base > frame.vstack.len() {
+                    return Err(Trap::StackUnderflow);
+                }
+                frame.vstack.truncate(base);
+                pc = frame.raise(store, exn)?;
             }
             Op::Br => pc = frame.branch(label_imm(instr)?)?,
             Op::BrIf => {
@@ -784,7 +1151,14 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let np = ft.params.len();
                 let base = frame.stack_base(np)?;
                 let args = frame.vstack[base..].to_vec();
-                let results = call_function(ctx, store, f, &args, depth + 1)?;
+                let results = match call_function(ctx, store, f, &args, depth + 1) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // An exception unwinding out of the callee may be caught here.
+                        pc = frame.on_call_error(store, e)?;
+                        continue;
+                    }
+                };
                 frame.vstack.truncate(base);
                 frame.vstack.extend_from_slice(&results);
                 pc += 1;
@@ -894,7 +1268,13 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let ft = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
                 let base = frame.stack_base(ft.params.len())?;
                 let args = frame.vstack[base..].to_vec();
-                let results = call_function(ctx, store, f, &args, depth + 1)?;
+                let results = match call_function(ctx, store, f, &args, depth + 1) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        pc = frame.on_call_error(store, e)?;
+                        continue;
+                    }
+                };
                 frame.vstack.truncate(base);
                 frame.vstack.extend_from_slice(&results);
                 pc = if instr.op == Op::ReturnCallRef {
@@ -928,7 +1308,13 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 }
                 let base = frame.stack_base(got.params.len())?;
                 let args = frame.vstack[base..].to_vec();
-                let results = call_function(ctx, store, f, &args, depth + 1)?;
+                let results = match call_function(ctx, store, f, &args, depth + 1) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        pc = frame.on_call_error(store, e)?;
+                        continue;
+                    }
+                };
                 frame.vstack.truncate(base);
                 frame.vstack.extend_from_slice(&results);
                 pc += 1;
@@ -1313,6 +1699,13 @@ fn label_imm(instr: &Instr) -> Result<u32> {
 fn block_type(instr: &Instr) -> Result<BlockType> {
     if let Imm::BlockType(bt) = instr.imm {
         Ok(bt)
+    } else {
+        Err(Trap::UnsupportedInstruction)
+    }
+}
+fn tag_imm(instr: &Instr) -> Result<u32> {
+    if let Imm::Tag(t) = instr.imm {
+        Ok(t)
     } else {
         Err(Trap::UnsupportedInstruction)
     }
@@ -4372,6 +4765,253 @@ mod tests {
         ];
         let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
         assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 7);
+    }
+
+    // --- exception handling ---
+
+    /// An EH module: type 0 = `() -> results`, type 1 = `(i32) -> ()` (the tag's type),
+    /// one tag of type 1, one exported function `e` with `entry` as its body.
+    fn eh_func(entry: &[u8], results: &[u8]) -> Vec<u8> {
+        let mut ty = vec![0x02u8, 0x60, 0x00];
+        ty.push(results.len() as u8);
+        ty.extend_from_slice(results);
+        ty.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]); // type 1: (i32) -> ()
+        asm(&[
+            (1, ty),
+            (3, vec![0x01, 0x00]),
+            (13, vec![0x01, 0x00, 0x01]), // tag section: 1 tag, attribute 0, type 1
+            (7, vec![0x01, 0x01, b'e', 0x00, 0x00]),
+            (10, code1(entry)),
+        ])
+    }
+
+    #[test]
+    fn eh_try_table_catches_throw() {
+        // (block (result i32)
+        //   (try_table (result i32) (catch $e 1)   ;; label 1 = the enclosing block
+        //     i32.const 42 ; throw $e))            ;; the payload lands in the block
+        let entry = [
+            0x00, //
+            0x02, 0x7f, // block (result i32)
+            0x1f, 0x7f, 0x01, 0x00, 0x00, 0x01, // try_table (result i32) [catch tag 0 -> label 1]
+            0x41, 0x2a, // i32.const 42
+            0x08, 0x00, // throw tag 0
+            0x0b, // end try_table
+            0x0b, // end block
+            0x0b, // end func
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 42);
+    }
+
+    #[test]
+    fn eh_uncaught_throw_traps() {
+        // A throw with no enclosing handler escapes the invocation.
+        let entry = [0x00, 0x41, 0x07, 0x08, 0x00, 0x0b];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(run1(&m, "e", &[]), Err(Trap::UncaughtException));
+    }
+
+    #[test]
+    fn eh_catch_all_binds_nothing() {
+        // `catch_all` matches any tag and binds NO payload, so its target label must be
+        // void — the value has to come from elsewhere. A local records which path ran:
+        // the handler branches straight out of the block, skipping the `99`.
+        let entry = [
+            0x01, 0x01, 0x7f, // one i32 local
+            0x41, 0x07, 0x21, 0x00, // local 0 = 7
+            0x02, 0x40, // block (void)
+            0x1f, 0x40, 0x01, 0x02, 0x01, // try_table (void) [catch_all -> label 1]
+            0x41, 0x05, // i32.const 5
+            0x08, 0x00, // throw tag 0
+            0x0b, // end try_table
+            0x41, 0x63, 0x21, 0x00, // local 0 = 99  (normal completion only)
+            0x0b, // end block
+            0x20, 0x00, // local.get 0
+            0x0b,
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 7);
+    }
+
+    #[test]
+    fn eh_exception_unwinds_across_a_call() {
+        // f0 catches what f1 throws — the exception crosses a call boundary.
+        // f1: i32.const 8 ; throw $e      (uncaught in f1)
+        // f0: block (result i32) (try_table (catch $e 1) (call 1)) end
+        let f0 = [
+            0x00, //
+            0x02, 0x7f, // block (result i32)
+            0x1f, 0x40, 0x01, 0x00, 0x00, 0x01, // try_table (void) [catch tag 0 -> label 1]
+            0x10, 0x01, // call 1
+            0x0b, // end try_table
+            0x41, 0x00, // i32.const 0 (normal path)
+            0x0b, // end block
+            0x0b,
+        ];
+        let f1 = [0x00, 0x41, 0x08, 0x08, 0x00, 0x0b]; // i32.const 8 ; throw $e
+        let m = asm(&[
+            (
+                1,
+                vec![
+                    0x03, // 3 types
+                    0x60, 0x00, 0x01, 0x7f, // type 0: () -> i32
+                    0x60, 0x01, 0x7f, 0x00, // type 1: (i32) -> ()   (the tag)
+                    0x60, 0x00, 0x00, // type 2: () -> ()
+                ],
+            ),
+            (3, vec![0x02, 0x00, 0x02]), // func 0: type 0, func 1: type 2
+            (13, vec![0x01, 0x00, 0x01]),
+            (7, vec![0x01, 0x01, b'e', 0x00, 0x00]),
+            (10, code_n(&[&f0, &f1])),
+        ]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 8);
+    }
+
+    #[test]
+    fn eh_catch_ref_and_throw_ref() {
+        // The inner try_table catches BY REFERENCE (kind 0x01): its target label receives the
+        // tag's payload *plus* an `exnref`. `throw_ref` then re-raises that boxed exception
+        // for the outer try_table to catch by value — proving the box round-trips its payload.
+        let entry = [
+            0x00, //
+            0x02, 0x7f, // block $outer (result i32)
+            0x1f, 0x40, 0x01, 0x00, 0x00, 0x01, // try_table (void) [catch tag0 -> $outer]
+            0x02, 0x02, // block $inner : type 2 = () -> (i32, exnref)
+            0x1f, 0x40, 0x01, 0x01, 0x00, 0x01, // try_table (void) [catch_ref tag0 -> $inner]
+            0x41, 0x11, // i32.const 17
+            0x08, 0x00, // throw tag 0
+            0x0b, // end inner try_table
+            0x00, // unreachable (the try_table's normal-completion path)
+            0x0b, // end $inner  -> stack: [17, exnref]
+            0x0a, // throw_ref   -> re-raise the boxed exception
+            0x0b, // end outer try_table
+            0x41, 0x00, // i32.const 0 (normal path)
+            0x0b, // end $outer
+            0x0b,
+        ];
+        let m = asm(&[
+            (
+                1,
+                vec![
+                    0x03, // 3 types
+                    0x60, 0x00, 0x01, 0x7f, // type 0: () -> i32
+                    0x60, 0x01, 0x7f, 0x00, // type 1: (i32) -> ()  (the tag)
+                    0x60, 0x00, 0x02, 0x7f, 0x69, // type 2: () -> (i32, exnref)
+                ],
+            ),
+            (3, vec![0x01, 0x00]),
+            (13, vec![0x01, 0x00, 0x01]),
+            (7, vec![0x01, 0x01, b'e', 0x00, 0x00]),
+            (10, code1(&entry)),
+        ]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 17);
+    }
+
+    #[test]
+    fn eh_legacy_try_catch() {
+        // The legacy encoding: (try (result i32) (i32.const 3) (throw $e) (catch $e))
+        // The handler runs INSIDE the try and binds the payload.
+        let entry = [
+            0x00, //
+            0x06, 0x7f, // try (result i32)
+            0x41, 0x03, // i32.const 3
+            0x08, 0x00, // throw tag 0
+            0x07, 0x00, // catch tag 0   -> handler binds the i32 payload
+            0x0b, // end try
+            0x0b,
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 3);
+    }
+
+    #[test]
+    fn eh_legacy_catch_all() {
+        // Legacy catch_all (0x19) binds nothing, so the handler supplies the result.
+        let entry = [
+            0x00, //
+            0x06, 0x7f, // try (result i32)
+            0x41, 0x01, // i32.const 1
+            0x08, 0x00, // throw tag 0
+            0x19, // catch_all
+            0x41, 0x37, // i32.const 55
+            0x0b, // end try
+            0x0b,
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 55);
+    }
+
+    #[test]
+    fn eh_legacy_rethrow_propagates_outward() {
+        // An inner legacy try catches, then `rethrow 0` re-raises the caught exception from
+        // OUTSIDE that try, so the outer try's handler is the one that finally binds it.
+        let entry = [
+            0x00, //
+            0x06, 0x7f, // try $outer (result i32)
+            0x06, 0x40, // try $inner (void)
+            0x41, 0x09, // i32.const 9
+            0x08, 0x00, // throw tag 0
+            0x19, // catch_all ($inner)
+            0x09, 0x00, // rethrow 0  -> re-raise from outside $inner
+            0x0b, // end $inner
+            0x41, 0x00, // i32.const 0 (normal path of $outer's body)
+            0x07, 0x00, // catch tag 0 ($outer) -> binds the payload 9
+            0x0b, // end $outer
+            0x0b,
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 9);
+    }
+
+    #[test]
+    fn eh_legacy_throw_from_handler_escapes_its_own_try() {
+        // The re-throw idiom `catch (e) { throw e; }` must propagate OUTWARD, not re-match
+        // the handler it is already inside (which would loop forever).
+        let entry = [
+            0x00, //
+            0x06, 0x40, // try (void)
+            0x41, 0x02, // i32.const 2
+            0x08, 0x00, // throw tag 0
+            0x07, 0x00, // catch tag 0 -> handler; payload on the stack
+            0x08, 0x00, // throw tag 0 again, from inside the handler
+            0x0b, // end try
+            0x41, 0x00, // (unreachable)
+            0x0b,
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(run1(&m, "e", &[]), Err(Trap::UncaughtException));
+    }
+
+    #[test]
+    fn eh_legacy_delegate_traps_while_unwinding() {
+        // `delegate` re-raises "at label l", routing the frozen oracle does not implement
+        // (and its validator rejects). Reaching one while unwinding must trap loudly rather
+        // than silently mis-route.
+        let entry = [
+            0x00, //
+            0x02, 0x40, // block
+            0x06, 0x40, // try
+            0x41, 0x04, // i32.const 4
+            0x08, 0x00, // throw tag 0
+            0x18, 0x00, // delegate 0  (terminates the try)
+            0x0b, // end block
+            0x41, 0x00, //
+            0x0b,
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(run1(&m, "e", &[]), Err(Trap::UnsupportedInstruction));
+    }
+
+    #[test]
+    fn eh_state_does_not_leak_between_invocations() {
+        // An escaping exception must not be visible to the next call on the same instance.
+        let entry = [0x00, 0x41, 0x07, 0x08, 0x00, 0x0b];
+        let m = eh_func(&entry, &[0x7f]);
+        let md = decode(&m).unwrap();
+        let mut inst = Instance::new(md).unwrap();
+        assert_eq!(inst.invoke("e", &[]), Err(Trap::UncaughtException));
+        assert_eq!(inst.invoke("e", &[]), Err(Trap::UncaughtException));
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {
