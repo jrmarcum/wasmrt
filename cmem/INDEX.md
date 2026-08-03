@@ -22,8 +22,7 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-**Progress (2026-08-03): T0–T3 + T4-core + T5 slices 1–9 DONE, released v0.1.0 → v0.6.8 (published through
-v0.6.7; v0.6.8 prepped, awaiting owner publish).** `wasmrt-core` has `types` + `reader` + `opcode` (shared IR +
+**Progress (2026-08-03): T0–T3 + T4-core + T5 slices 1–9 DONE, released + published v0.1.0 → v0.6.8.** `wasmrt-core` has `types` + `reader` + `opcode` (shared IR +
 `decode_body`) + `module` (decode) + `validate` (spec §3 type-checker, core language; SIMD/atomics/GC/EH
 typing deferred to 0.5.x) + `interp` (switch interpreter; integer + float compute + linear memory incl.
 multi-memory and memory64 + tables/`call_indirect`/reference types + WasmGC structs/arrays/`i31`/casts +
