@@ -117,8 +117,13 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-08-03)
 
-- **Published through v0.6.9; v0.7.0 (the validator completion) is prepped and awaiting the owner's
-  publish.** `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
+- **Published through v0.6.9. v0.7.0 is IN PROGRESS and deliberately HELD — do not hand it over yet.**
+  The owner decided (2026-08-03) that 0.7.0 ships the validator completion **and all of T6** (the text
+  toolchain) together, so the release commit + publish handoff wait until the `.wast` runner and the
+  conformance run are done. `Cargo.toml` is already bumped to 0.7.0 and the CHANGELOG has a `[0.7.0]`
+  section covering only the validator half — **its T6 half still needs writing** before the release
+  commit. See the "Resume here" block at the top of `roadmap.md` for the committed layers and next steps.
+  `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
   crates.io through v0.6.9 (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
   WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6 → threads/atomics v0.6.7 → memory64 v0.6.8 →

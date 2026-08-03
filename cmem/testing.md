@@ -18,9 +18,28 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Current test state (2026-08-03, through T5 slice 10 / v0.6.9)
+## Current test state (2026-08-03, mid-T6 / unreleased v0.7.0)
 
-**123 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+**176 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean.
+
+**The T6 layers added 53.** The **validator completion** added 12 (SIMD alignment + missing-memory +
+operand typing, exact atomic alignment vs. the scalar hint, GC field/mutability/packing, EH try_table
+clause-vs-label, throw tag checks, legacy catch framing, `delegate` rejected). **`sexpr`** added 10
+(comments, escapes, the lone-`;` hang regression, depth cap). **The opcode name table** added 3, incl. a
+round-trip over every single-byte op — that property is what keeps the assembler's reverse map from
+drifting off the decoder. **The assembler** added 28.
+
+**The assembler's tests are its real gate: they assemble → decode → validate → instantiate → invoke.**
+Byte-level assertions would only prove the assembler agrees with itself; running what it produced proves
+it agrees with the decoder, the type-checker and the interpreter. Both bugs found in the assembler core
+(folded memargs, `call_indirect`) surfaced as failed *executions*, not mismatched bytes. Coverage so far:
+flat + folded forms, recursion (`fac 10`), a named-label loop (`sum 100`), `call_indirect` dispatch,
+data + load, globals, explicit memargs, forward-referencing exports, multi-value and parameterised block
+types, and float arithmetic — all from text source. Plus the hex-float rounding vectors the oracle
+documents (a truncating parser is one ULP low — a *wrong value*, not a rejected one) and the subnormal
+round-vs-flush edge cases.
+
+The
 EH slice added 11 — a `try_table` catch, an uncaught throw, `catch_all` binding nothing (a local records
 which path ran, since a catch_all target label must be void), an exception unwinding **across a call**, a
 `catch_ref` → `throw_ref` round-trip through the exnref box, legacy `try`/`catch`, legacy `catch_all`,

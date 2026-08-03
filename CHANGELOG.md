@@ -11,8 +11,16 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: T6 — the text toolchain (`.wat` assembler + `.wast` spec-script runner), which brings the official
-spec testsuite online as a conformance gate. Host imports (for WASI) follow at T7._
+**0.7.0 is in progress and unreleased.** It ships the validator completion (below) *together with* stage
+T6, the text toolchain — the release is deliberately held until the whole toolchain lands.
+
+Landed so far toward it: the **`.wat` assembler** (module fields across every index space with
+forward-referencing name resolution, sections 1–13, flat and folded instruction forms, `call_indirect`,
+memargs, named labels, correctly-rounded float literals including hex, multi-value block types) and its
+**s-expression front-end**.
+
+Still to come before release: the SIMD / WasmGC / exception-handling text forms, the `.wast` script
+runner, and the spec-testsuite conformance run. Host imports (for WASI) follow at T7.
 
 ## [0.7.0] — Validator: the deferred typing arms (completes stage T4)
 

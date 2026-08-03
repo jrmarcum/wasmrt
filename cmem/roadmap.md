@@ -10,9 +10,40 @@ so the oracle split has collapsed to that one item (see `design-decisions.md`, `
 is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–9 (v0.6.0 integer,
 v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC, v0.6.5 SIMD,
 v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64, v0.6.9 exception handling) DONE — the
-interpreter's wasm-proposal coverage is COMPLETE — **and T4 finished too (v0.7.0: the deferred SIMD/
-atomic/GC/EH validation arms). Next: T6 (text toolchain), which brings the spec testsuite online as the
-real conformance gate; host imports land with T7/WASI.**
+interpreter's wasm-proposal coverage is COMPLETE — **and T4 finished too (the deferred SIMD/atomic/GC/EH
+validation arms). CURRENTLY MID-T6 (text toolchain), all of it landing in an unreleased v0.7.0 — see the
+resume block below and the T6 entry in the task list.**
+
+## ⏸️ Resume here (2026-08-03) — v0.7.0 is IN PROGRESS, not released
+
+`Cargo.toml` is already at **0.7.0** and `CHANGELOG.md` has a `## [0.7.0]` section covering the validator
+work. **Nothing is published past v0.6.9.** The owner's decision (2026-08-03) was to **hold 0.7.0 until
+ALL of T6 lands**, so the release commit + publish handoff happen only once the text toolchain is done.
+
+**Committed toward 0.7.0 so far** — all pushed, tree clean, **176 tests green**, clippy clean, native +
+`wasm32` no_std + release all building:
+
+| Commit | Layer |
+| --- | --- |
+| `8a37795` | T4 complete — the deferred SIMD/atomics/GC/EH validation arms |
+| `5e82d08` | T6a — `sexpr` front-end |
+| `5fd58bd` | T6b-1 — opcode text-name table + reverse map |
+| `523ad3d` | T6b-2/3 — assembler: module fields, index spaces, sections, core instructions |
+| `6d8d56c` | T6b-4 — float literals (correct hex rounding) + multi-value block types |
+
+**Next actions, in order:** T6b-5 (SIMD/GC/EH text forms) → T6c (`.wast` runner) → the conformance run →
+final doc sync + the v0.7.0 release commit. Before that release commit, the `## [0.7.0]` CHANGELOG section
+needs its **T6 half written** (it currently documents only the validator work), and README + `ROADMAP.md`
+need the text-toolchain rows flipped.
+
+**Version cadence (owner, 2026-08-03): the patch component stays a single digit** — the release after
+`0.y.9` is `0.(y+1).0`, never `0.y.10`. That is why v0.6.9 closed the 0.6 line and this one is 0.7.0; the
+stage→version map in `releasing.md` shifted by one from 0.8 onward.
+
+**How the assembler is tested (keep this discipline):** its tests **assemble → decode → validate →
+instantiate → invoke**. Byte-level assertions would only prove the assembler agrees with itself; running
+what it produced proves it agrees with the decoder, the type-checker and the interpreter. Both bugs found
+in the core layer surfaced as failed *executions*, not mismatched bytes.
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -204,9 +235,65 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   **SIMD (full 0xFD + relaxed)** → **multi-memory** → **threads/atomics (0xFE)** → **memory64** →
   **exception handling (exnref + legacy)**. Gate per slice: golden-vector parity Rust↔wazmrt + the
   relevant `.wast` files. `[ ]`
-- **T6 — Text toolchain (`sexpr` → `wat` → `wast`).** S-expr parser → WAT→binary assembler (reuse the
-  opcode table in reverse) → WAST script runner. Gate: run the official spec testsuite; match wazmrt's
-  ~60k-assertion pass profile (the assembler has no gaps in the oracle — hold that bar). `[ ]`
+- **T6 — Text toolchain (`sexpr` → `wat` → `wast`). 🚧 IN PROGRESS (2026-08-03).** S-expr parser →
+  WAT→binary assembler (reuse the opcode table in reverse) → WAST script runner. Gate: run the official
+  spec testsuite; match wazmrt's ~60k-assertion pass profile (the assembler has no gaps in the oracle —
+  hold that bar). **Scale note: the oracle's text toolchain is 6,465 lines** (`sexpr.zig` 276, **`wat.zig`
+  4,936**, `wast.zig` 1,253) — `wat.zig` rivals `interp.zig` (5,049), which shipped across ten releases.
+  Built in layers; each is committed separately. `[🚧]`
+  - **T6a — `sexpr`. ✅ DONE (commit `5e82d08`).** Lexer/parser over `.wat`/`.wast`: atoms (raw source
+    text), strings (escapes decoded to real bytes), lists; `;;` + nestable `(; … ;)` trivia. Hardened as
+    the oracle is: `MAX_DEPTH` paren-bomb cap, **a lone `;` is a hard error** (trivia consumes only `;;`
+    and `(;`, and atom scanning treats `;` as a terminator, so it would yield an EMPTY atom without
+    advancing — the wazmrt regression where `(module) ; x` hung the CLI at 10 GB RSS), and
+    **overflow-checked `\u{…}`** so `\u{100000041}` is rejected rather than truncated mod 2^32 to `'A'`.
+    Errors carry a byte offset. 10 tests.
+  - **T6b-1 — the opcode text-name table. ✅ DONE (commit `5fd58bd`; this was the deferred T2 reverse
+    map).** wazmrt gets name→op free from Zig's `stringToEnum` over snake_case variants; wasmrt's are
+    PascalCase, so the map is explicit. It lives **inside `define_ops!`** beside the byte
+    (`Unreachable = 0x00 => "unreachable"`), generating `Op::text_name()` + `Op::from_text_name()`, so the
+    binary and text spellings are one authority and cannot drift. Two details: **`SelectT` carries the
+    sentinel name `"select.t"`** (both select variants would otherwise claim `"select"` and make the
+    second match arm unreachable), and the `0xFD`/`0xFE` family tags carry `""` (their members are named
+    per sub-opcode) and are excluded from the reverse map. A round-trip test pins every single-byte op.
+  - **T6b-2/3 — the assembler core. ✅ DONE (commit `523ad3d`).** Multi-pass, because the text format lets
+    names point forward: pre-pass A collects every `(type …)` name (a concrete `(ref $t)` may name a type
+    declared later — a `(rec …)` group routinely does), pre-pass B parses the bodies, pass 1 walks
+    definitions filling the per-kind index spaces (imports must precede definitions §6.6.13), pass 2
+    resolves module-level `(export …)` forms (which may name something declared further down — exactly
+    what binaryen emits; resolving in-pass reports `UnknownIdentifier` on a good module). Covers all
+    module fields, inline import/export clauses, the `(memory (data …))` / `(table … (elem …))`
+    shorthands, memory64 + shared limits, sections 1–13, flat **and** folded instruction forms, named
+    labels, `br_table`, `call_indirect`, bulk-memory/table families, memargs, `ref.null` heap types.
+    **Key encoding rule: in a folded instruction the immediates are the leading ATOMS and the operands are
+    the parenthesized sub-expressions after them** — folded operands are always parenthesized, so the
+    atom/list split IS the immediate/operand split, covering fixed-arity immediates and the variable
+    `offset=`/`align=` memarg atoms through one rule. **Traps to remember: `table.init`'s text order is
+    `$table $elem` but its binary order is elem-then-table; `memory.init` likewise emits data-then-memory.**
+  - **T6b-4 — float literals + multi-value block types. ✅ DONE (commit `6d8d56c`).** **Rust parses no hex
+    floats at all**, so `0x1.abcp+3` (and the exponent-less `0xABC` form) is parsed here — with **correct
+    rounding**, because truncating a long hex mantissa emits a constant **one ULP low**: a *wrong value*,
+    not a rejected one, so the same number in decimal and hex would compile to different modules (the
+    oracle found this on `simd_f64x2_rounding.wast`; its vectors are tests here). The significand
+    accumulates into a `u128` with a sticky bit and rounds to the target ULP in **one step**, the ULP
+    exponent being the coarser of the normalised one and the smallest subnormal's — that single `max`
+    makes normal/subnormal/below-subnormal one path; rounding in two stages discards the sticky bit and
+    flushes `0x1.8p-1075` to zero instead of rounding up. Plus `nan:canonical`/`nan:arithmetic`/
+    `nan:0x<payload>`. The parser is `pub(crate)` so the `.wast` runner shares it — **one authority for
+    what a literal means**, so an expectation and the module it checks can never disagree.
+    Multi-value block types forced a **reordering: all bodies and const-exprs are now encoded BEFORE any
+    section is written**, since interning a block signature appends to the type table (the oracle's order
+    too). That also let `call_indirect` intern an inline signature. `Ctx` borrows the name tables
+    field-by-field alongside a mutable `sigs`; disjoint field borrows make interning-during-encoding sound.
+  - **T6b-5 — SIMD / GC / EH text forms. ⬜ NEXT.** The `0xFD` and `0xFE` name tables + their immediate
+    shapes; GC `(type (struct …))` / `(array …)` / `(sub …)` definitions with field names (currently a
+    loud `Error::Unsupported`), `struct.get $T $field` by name, `ref.test`/`ref.cast`/`br_on_cast` ref-type
+    targets; EH `try_table` catch clauses + the folded legacy `try`. `[ ]`
+  - **T6c — the `.wast` script runner. ⬜.** `assert_return` / `assert_trap` / `assert_invalid` /
+    `assert_malformed` / `register` / `invoke`, sharing the float parser. `[ ]`
+  - **T6 gate — the conformance run. ⬜.** Walk the vendored testsuite (see `testing.md` for the path);
+    expect the first full run to produce a **punch-list against the interpreter and validator too**, not
+    just the assembler — the suite is far broader than the hand-built vectors. `[ ]`
 - **T7 — WASI preview 1 + CLI.** Native host imports (stdio/args/environ/clocks/`poll_oneoff`/random/
   `proc_exit`) + the sandboxed filesystem. ⛔ *Decision-gates:* **`random_get`** (parity ≈ wazmrt's
   ChaCha CSPRNG) and **zero-dep vs `cap-std`/`openat2`** for the secure path resolver (`walkFull`
