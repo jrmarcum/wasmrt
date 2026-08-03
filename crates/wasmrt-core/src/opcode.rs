@@ -422,7 +422,8 @@ fn simd_lane_count(sub: u32) -> u8 {
 /// The natural alignment of a scalar memory access, **as a log2 exponent** (the form the
 /// memarg carries): 0 for 8-bit, 1 for 16-bit, 2 for 32-bit, 3 for 64-bit. The validator
 /// rejects a memarg whose alignment exceeds this (§6.5.8); the assembler defaults a missing
-/// `align=` to it. (SIMD/atomic natural-alignment tables land with their validation arms.)
+/// `align=` to it. See [`simd_natural_align_log2`] / [`atomic_natural_align_log2`] for the
+/// `0xFD` / `0xFE` families.
 #[must_use]
 pub fn natural_align_log2(op: Op) -> u32 {
     match op {
@@ -446,6 +447,60 @@ pub fn natural_align_log2(op: Op) -> u32 {
         | Op::I64Load32U
         | Op::I64Store32 => 2,
         Op::I64Load | Op::F64Load | Op::I64Store | Op::F64Store => 3,
+        _ => 0,
+    }
+}
+
+/// The natural alignment (log2 bytes) of a `0xFD` SIMD memory access. As with the scalar
+/// table this is a **maximum** the validator enforces (§6.5.8), and the assembler's default.
+#[must_use]
+pub fn simd_natural_align_log2(sub: u32) -> u32 {
+    match sub {
+        0x07 | 0x54 | 0x58 => 0, // 1-byte: load8_splat, load8_lane, store8_lane
+        0x08 | 0x55 | 0x59 => 1, // 2-byte
+        0x09 | 0x5c | 0x56 | 0x5a => 2, // 4-byte: load32_splat/zero/lane, store32_lane
+        0x01..=0x06 | 0x0a | 0x5d | 0x57 | 0x5b => 3, // 8-byte: loadMxN, load64_splat/zero/lane
+        _ => 4,                  // 16-byte: v128.load / v128.store
+    }
+}
+
+/// Does this `0xFD` sub-opcode carry a memarg (i.e. touch linear memory)? The `Simd`
+/// immediate always has a `mem` field (defaulted), so its presence cannot distinguish these.
+/// Kept beside `decode_simd`, whose match is the authority, so the two can't drift.
+#[must_use]
+pub fn simd_is_memory_op(sub: u32) -> bool {
+    matches!(sub, 0x00..=0x0b | 0x5c | 0x5d | 0x54..=0x5b)
+}
+
+/// The **required** alignment (log2 bytes) of a `0xFE` atomic op. Atomics must be naturally
+/// aligned, so unlike the scalar/SIMD tables this is the exact value the validator enforces
+/// — any other alignment is invalid, not merely over-aligned. The access width rides in the
+/// sub-opcode (`…8`→1 byte, `…16`→2, `…32`→4, else the full type width). `atomic.fence`
+/// (0x03) has no memarg and returns 0.
+#[must_use]
+pub fn atomic_natural_align_log2(sub: u32) -> u32 {
+    match sub {
+        0x00 | 0x01 => 2, // notify, wait32
+        0x02 => 3,        // wait64
+        0x03 => 0,        // fence (no memarg)
+        0x10 | 0x17 => 2, // i32.atomic.load / store
+        0x11 | 0x18 => 3, // i64.atomic.load / store
+        0x12 | 0x19 => 0, // i32 …8
+        0x13 | 0x1a => 1, // i32 …16
+        0x14 | 0x1b => 0, // i64 …8
+        0x15 | 0x1c => 1, // i64 …16
+        0x16 | 0x1d => 2, // i64 …32
+        // rmw + cmpxchg: groups of 7, laid out
+        // [i32.full, i64.full, i32.8, i32.16, i64.8, i64.16, i64.32] from 0x1e.
+        0x1e..=0x4e => match (sub - 0x1e) % 7 {
+            0 => 2, // i32 full (4 bytes)
+            1 => 3, // i64 full (8)
+            2 => 0, // i32.8    (1)
+            3 => 1, // i32.16   (2)
+            4 => 0, // i64.8    (1)
+            5 => 1, // i64.16   (2)
+            _ => 2, // i64.32   (4)
+        },
         _ => 0,
     }
 }

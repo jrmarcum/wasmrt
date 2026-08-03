@@ -2,15 +2,20 @@
 //! Algorithm": an abstract operand-value stack + a control-frame stack, with a bottom
 //! `unknown` type for stack-polymorphic / unreachable code).
 //!
-//! Ported from wazmrt `src/validate.zig` (T4). **Scope this release (v0.5.0):** the core
-//! language — control flow, calls, parametric/variable/reference ops, tables, bulk memory,
-//! i31 refs, loads/stores/numeric — plus module-level checks (const-exprs, elements, data,
-//! limits, tags, exports, start) and the `C.refs` (undeclared-function-reference) rule.
+//! Ported from wazmrt `src/validate.zig` (T4, completed in v0.7.0). **Coverage is now the
+//! whole language wasmrt executes:** control flow, calls, parametric/variable/reference ops,
+//! tables, bulk memory, loads/stores/numeric, **SIMD** (the `0xFD` family), **threads/atomics**
+//! (`0xFE`), **WasmGC** (struct/array objects, `i31`, casts, cast-branches), and **exception
+//! handling** (both the `try_table` and legacy encodings) — plus module-level checks
+//! (const-exprs, elements, data, limits, tags, exports, start) and the `C.refs`
+//! (undeclared-function-reference) rule.
 //!
-//! **Deferred to the next slice (v0.5.x, verified against the spec suite at T6):** the
-//! typing arms for SIMD, threads/atomics, GC struct/array objects + casts, and exception
-//! handling. Those ops **reject loudly** ([`ValidateError::UnsupportedValidation`]) — never
-//! silent-accept — so "the validator accepted it" stays a trustworthy promise.
+//! Two deliberate refusals remain, both matching the frozen oracle: `delegate` (its label
+//! routing is unimplementable against the interpreter — see the arm) and any atomic
+//! sub-opcode outside the defined set. Both reject loudly
+//! ([`ValidateError::UnsupportedValidation`]) — never silent-accept — so "the validator
+//! accepted it" stays a trustworthy promise. Full conformance (`assert_invalid` /
+//! `assert_malformed` across the spec suite) is the T6 gate.
 //!
 //! `validate` does not mutate the module; it decodes each body to IR and type-checks it.
 
@@ -57,6 +62,12 @@ pub enum ValidateError {
     UndefinedType,
     UndefinedTag,
     InvalidTag,
+    /// A legacy `catch`/`catch_all` whose enclosing opener is not a `try` (EH).
+    MismatchedCatch,
+    /// A GC struct/array field index out of range.
+    UndefinedField,
+    /// A `struct.set` / `array.set` on an immutable field.
+    ImmutableField,
     InvalidLimits,
     DuplicateExport,
     UndefinedTable,
@@ -380,6 +391,7 @@ fn validate_function(
         local_init,
         vals: Vec::new(),
         ctrls: Vec::new(),
+        body_len: instrs.len(),
     };
     // The whole body is an implicit block of type [] -> results.
     v.push_ctrl(FrameKind::Block, Vec::new(), ft.results.clone())?;
@@ -404,6 +416,13 @@ enum FrameKind {
     Loop,
     If,
     Else,
+    /// A `try_table` (EH, exnref encoding) — block-shaped; its catch clauses are checked
+    /// when the frame is pushed.
+    TryTable,
+    /// A legacy `try` — block-shaped until a `catch`/`catch_all` closes its body section.
+    TryLegacy,
+    /// A legacy `catch`/`catch_all` handler section.
+    CatchLegacy,
 }
 
 struct Frame {
@@ -423,6 +442,12 @@ struct FuncValidator<'a> {
     local_init: Vec<bool>,
     vals: Vec<StackType>,
     ctrls: Vec<Frame>,
+    /// Instruction count of the body being checked. Bounds `array.new_fixed`'s operand
+    /// count: `n` is an unvalidated `u32`, and in *unreachable* code `pop_expect` yields
+    /// `Unknown` instead of underflowing, so an unbounded loop would spin up to 2^32 times
+    /// on a tiny module. Every operand must be produced by at least one instruction, so a
+    /// valid `n` can never exceed this — bounding by it cannot reject a valid module.
+    body_len: usize,
 }
 
 impl<'a> FuncValidator<'a> {
@@ -563,6 +588,75 @@ impl<'a> FuncValidator<'a> {
     }
 
     /// (pop, push) types of a block signature (§5.3.6).
+    /// Look up a struct's field, bounds-checking the field index.
+    fn struct_field(&self, ti: u32, fi: u32) -> ValidateResult<crate::module::FieldType> {
+        let fields = self
+            .module
+            .struct_fields(ti)
+            .ok_or(ValidateError::UndefinedType)?;
+        fields
+            .get(fi as usize)
+            .copied()
+            .ok_or(ValidateError::UndefinedField)
+    }
+
+    /// Every `want[i]` must be a subtype of `got[i]` (same length) — used to check that a
+    /// catch handler's pushed values fit its target label.
+    fn match_types(&self, want: &[V], got: &[V]) -> ValidateResult<()> {
+        if want.len() != got.len() {
+            return Err(ValidateError::TypeMismatch);
+        }
+        for (&w, &g) in want.iter().zip(got) {
+            if !subtype_of(self.module, w, g) {
+                return Err(ValidateError::TypeMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    /// A `try_table` catch clause branches to `lt` (its target label's types) carrying the
+    /// tag's params (`catch`/`catch_ref`), plus an `exnref` for the `_ref` variants, and
+    /// nothing at all for `catch_all`. Check those against `lt`.
+    fn check_catch(&self, c: &opcode::Catch, lt: &[V]) -> ValidateResult<()> {
+        match c.kind {
+            opcode::CatchKind::Catch => {
+                let ft = self
+                    .module
+                    .tag_type(c.tag)
+                    .ok_or(ValidateError::UndefinedTag)?;
+                self.match_types(&ft.params, lt)
+            }
+            opcode::CatchKind::CatchRef => {
+                let ft = self
+                    .module
+                    .tag_type(c.tag)
+                    .ok_or(ValidateError::UndefinedTag)?;
+                if lt.len() != ft.params.len() + 1 {
+                    return Err(ValidateError::TypeMismatch);
+                }
+                self.match_types(&ft.params, &lt[..ft.params.len()])?;
+                if !subtype_of(self.module, V::EXNREF, lt[lt.len() - 1]) {
+                    return Err(ValidateError::TypeMismatch);
+                }
+                Ok(())
+            }
+            opcode::CatchKind::CatchAll => {
+                if lt.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ValidateError::TypeMismatch)
+                }
+            }
+            opcode::CatchKind::CatchAllRef => {
+                if lt.len() == 1 && subtype_of(self.module, V::EXNREF, lt[0]) {
+                    Ok(())
+                } else {
+                    Err(ValidateError::TypeMismatch)
+                }
+            }
+        }
+    }
+
     fn block_sig(&self, bt: opcode::BlockType) -> ValidateResult<(Vec<V>, Vec<V>)> {
         match bt {
             opcode::BlockType::Empty => Ok((Vec::new(), Vec::new())),
@@ -603,6 +697,90 @@ impl<'a> FuncValidator<'a> {
                 }
                 self.local_init.copy_from_slice(&frame.init_snapshot);
                 self.push_ctrl(FrameKind::Else, frame.start, frame.end)?;
+            }
+
+            // --- Exception handling: the exnref encoding ---
+            Op::TryTable => {
+                let Imm::TryTable(tt) = &instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let (pop, push) = self.block_sig(tt.block_type)?;
+                self.pop_vals(&pop)?;
+                // Clone the clauses before pushing: the frame push borrows `self` mutably,
+                // and the clauses live in the instruction's immediate.
+                let catches = tt.catches.clone();
+                self.push_ctrl(FrameKind::TryTable, pop, push)?;
+                // Each clause's target label must accept exactly what the handler pushes:
+                // the tag's params, plus an `exnref` for the `_ref` forms. Label indices
+                // resolve with the try_table frame already on top.
+                for c in &catches {
+                    let lt = self.label_types_at(c.label)?;
+                    self.check_catch(c, &lt)?;
+                }
+            }
+            Op::Throw => {
+                let ft = self
+                    .module
+                    .tag_type(expect_tag(&instr.imm)?)
+                    .ok_or(ValidateError::UndefinedTag)?;
+                if !ft.results.is_empty() {
+                    return Err(ValidateError::InvalidTag); // tags never produce results
+                }
+                self.pop_vals(&ft.params)?; // the exception's operands
+                self.set_unreachable(); // control transfers; the rest is dead
+            }
+            Op::ThrowRef => {
+                self.pop_expect(V::EXNREF)?;
+                self.set_unreachable();
+            }
+
+            // --- Exception handling: the legacy encoding ---
+            // A `try` opens a block-typed frame; each `catch`/`catch_all` closes the
+            // preceding section (which must produce the try's results) and opens a handler
+            // starting from the tag's params; `end` closes the construct.
+            Op::TryLegacy => {
+                let bt = expect_block_type(&instr.imm)?;
+                let (pop, push) = self.block_sig(bt)?;
+                self.pop_vals(&pop)?;
+                self.push_ctrl(FrameKind::TryLegacy, pop, push)?;
+            }
+            Op::CatchLegacy | Op::CatchAll => {
+                let frame = self.pop_ctrl()?;
+                if frame.kind != FrameKind::TryLegacy && frame.kind != FrameKind::CatchLegacy {
+                    return Err(ValidateError::MismatchedCatch);
+                }
+                // The handler starts from the try's ENTRY init state: locals set in the body
+                // (or in a prior handler) are not guaranteed on the path that reached this
+                // catch via a thrown exception — the same rule as `else`.
+                self.local_init.copy_from_slice(&frame.init_snapshot);
+                let start: Vec<V> = if instr.op == Op::CatchLegacy {
+                    let ft = self
+                        .module
+                        .tag_type(expect_tag(&instr.imm)?)
+                        .ok_or(ValidateError::UndefinedTag)?;
+                    if !ft.results.is_empty() {
+                        return Err(ValidateError::InvalidTag);
+                    }
+                    ft.params // the caught exception's operands
+                } else {
+                    Vec::new() // catch_all binds nothing
+                };
+                self.push_ctrl(FrameKind::CatchLegacy, start, frame.end)?;
+            }
+            Op::Delegate => {
+                // `delegate l` re-raises "at label l", which can SKIP the handlers of trys
+                // between this one and the target. The frozen oracle does not implement that
+                // routing (its interpreter traps on it) and rejects `delegate` here rather
+                // than accept a construct it cannot correctly execute. wasmrt matches, so
+                // the validator and the interpreter agree. Every other legacy construct —
+                // `try`/`catch`/`catch_all`/`rethrow` — is fully supported.
+                return Err(ValidateError::UnsupportedValidation);
+            }
+            Op::Rethrow => {
+                // Re-raise the exception caught `l` levels out: `l` must resolve, and
+                // control transfers, so the rest of the block is dead.
+                self.label_types_at(expect_label(&instr.imm)?)?;
+                self.set_unreachable();
             }
             Op::End => {
                 let frame = self.pop_ctrl()?;
@@ -881,6 +1059,275 @@ impl<'a> FuncValidator<'a> {
                 self.pop_expect(V::I32)?;
                 self.push_val_t(V::I31REF_NN);
             }
+
+            // --- WasmGC: struct objects ---
+            // A concrete `(ref $t)` is popped as the CONCRETE type, never the family head:
+            // popping `structref` would let ANY struct reference satisfy ANY `struct.*`, so
+            // `struct.get $b 0` on a `(ref $a)` could reinterpret one field type as another.
+            // `subtype_of` already walks the declared supertype chain for concrete pairs.
+            Op::StructNew => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let fields = self
+                    .module
+                    .struct_fields(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                for f in fields.iter().rev() {
+                    // operands are pushed field 0 first → pop in reverse
+                    self.pop_expect(f.storage.unpacked())?;
+                }
+                self.push_val_t(V::concrete_ref(false, RefHeap::Struct, ti));
+            }
+            Op::StructNewDefault => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let fields = self
+                    .module
+                    .struct_fields(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if fields.iter().any(|f| f.storage.unpacked().is_non_null_ref()) {
+                    return Err(ValidateError::TypeMismatch); // not defaultable
+                }
+                self.push_val_t(V::concrete_ref(false, RefHeap::Struct, ti));
+            }
+            Op::StructGet | Op::StructGetS | Op::StructGetU => {
+                let (ti, fi) = expect_gc_field(&instr.imm)?;
+                let field = self.struct_field(ti, fi)?;
+                require_packing(instr.op == Op::StructGet, field.storage)?;
+                self.pop_expect(V::concrete_ref(true, RefHeap::Struct, ti))?;
+                self.push_val_t(field.storage.unpacked());
+            }
+            Op::StructSet => {
+                let (ti, fi) = expect_gc_field(&instr.imm)?;
+                let field = self.struct_field(ti, fi)?;
+                if !field.mutable {
+                    return Err(ValidateError::ImmutableField);
+                }
+                self.pop_expect(field.storage.unpacked())?;
+                self.pop_expect(V::concrete_ref(true, RefHeap::Struct, ti))?;
+            }
+
+            // --- WasmGC: array objects ---
+            Op::ArrayNew => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let f = self
+                    .module
+                    .array_field(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                self.pop_expect(V::I32)?; // length
+                self.pop_expect(f.storage.unpacked())?; // init value
+                self.push_val_t(V::concrete_ref(false, RefHeap::Array, ti));
+            }
+            Op::ArrayNewDefault => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let f = self
+                    .module
+                    .array_field(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if f.storage.unpacked().is_non_null_ref() {
+                    return Err(ValidateError::TypeMismatch); // not defaultable
+                }
+                self.pop_expect(V::I32)?; // length
+                self.push_val_t(V::concrete_ref(false, RefHeap::Array, ti));
+            }
+            Op::ArrayNewFixed => {
+                let Imm::GcTypeN { type_index, n } = instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let f = self
+                    .module
+                    .array_field(type_index)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if n as usize > self.body_len {
+                    return Err(ValidateError::StackUnderflow); // see `body_len`
+                }
+                for _ in 0..n {
+                    self.pop_expect(f.storage.unpacked())?;
+                }
+                self.push_val_t(V::concrete_ref(false, RefHeap::Array, type_index));
+            }
+            Op::ArrayGet | Op::ArrayGetS | Op::ArrayGetU => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let f = self
+                    .module
+                    .array_field(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                require_packing(instr.op == Op::ArrayGet, f.storage)?;
+                self.pop_expect(V::I32)?; // index
+                self.pop_expect(V::concrete_ref(true, RefHeap::Array, ti))?;
+                self.push_val_t(f.storage.unpacked());
+            }
+            Op::ArraySet => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let f = self
+                    .module
+                    .array_field(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if !f.mutable {
+                    return Err(ValidateError::ImmutableField);
+                }
+                self.pop_expect(f.storage.unpacked())?; // value
+                self.pop_expect(V::I32)?; // index
+                self.pop_expect(V::concrete_ref(true, RefHeap::Array, ti))?;
+            }
+            Op::ArrayLen => {
+                self.pop_expect(V::ARRAYREF)?;
+                self.push_val_t(V::I32);
+            }
+
+            // --- SIMD (the `0xFD` v128 family) ---
+            Op::Simd => {
+                let Imm::Simd(s) = &instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let sg = simd_sig(s.sub);
+                if opcode::simd_is_memory_op(s.sub) {
+                    // A memory-touching SIMD op needs a memory to exist, its memarg index in
+                    // range (multi-memory), and its alignment within the natural maximum.
+                    let mi = s.mem.memory;
+                    self.require_memory(mi)?;
+                    if s.mem.alignment > opcode::simd_natural_align_log2(s.sub) {
+                        return Err(ValidateError::InvalidAlignment);
+                    }
+                    self.check_mem_offset(mi, s.mem.offset)?;
+                    // memory64: the address operand is the memory's index type, not the
+                    // `i32` baked into `simd_sig`. `pop[0]` is always the address — pop the
+                    // trailing v128 value(s) top-first, then it.
+                    let at = self.mem_addr_ty(mi);
+                    let mut k = sg.pop.len();
+                    while k > 1 {
+                        k -= 1;
+                        self.pop_expect(sg.pop[k])?;
+                    }
+                    self.pop_expect(at)?;
+                    self.push_vals(sg.push);
+                } else {
+                    self.pop_vals(sg.pop)?;
+                    self.push_vals(sg.push);
+                }
+            }
+
+            // --- Threads / atomics (the `0xFE` family) ---
+            Op::Atomic => {
+                let Imm::Atomic(a) = &instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let sub = a.sub;
+                if sub == 0x03 {
+                    return Ok(()); // atomic.fence: no memory, no operands
+                }
+                // Every other atomic op touches memory and MUST be naturally aligned — the
+                // alignment is exact here, not a maximum as it is for scalar/SIMD access.
+                self.require_memory(a.mem.memory)?;
+                if a.mem.alignment != opcode::atomic_natural_align_log2(sub) {
+                    return Err(ValidateError::InvalidAlignment);
+                }
+                self.check_mem_offset(a.mem.memory, a.mem.offset)?;
+                // memory64: the ADDRESS operand (the deepest one) takes the memory's type.
+                let adt = self.mem_addr_ty(a.mem.memory);
+                match sub {
+                    0x00 => {
+                        // notify: [addr, count] -> [i32]
+                        self.pop_expect(V::I32)?;
+                        self.pop_expect(adt)?;
+                        self.push_val_t(V::I32);
+                    }
+                    0x01 => {
+                        // wait32: [addr, i32, i64] -> [i32]
+                        self.pop_expect(V::I64)?;
+                        self.pop_expect(V::I32)?;
+                        self.pop_expect(adt)?;
+                        self.push_val_t(V::I32);
+                    }
+                    0x02 => {
+                        // wait64: [addr, i64, i64] -> [i32]
+                        self.pop_expect(V::I64)?;
+                        self.pop_expect(V::I64)?;
+                        self.pop_expect(adt)?;
+                        self.push_val_t(V::I32);
+                    }
+                    0x10..=0x16 => {
+                        // atomic load: [addr] -> [T]
+                        self.pop_expect(adt)?;
+                        self.push_val_t(atomic_val_type(sub));
+                    }
+                    0x17..=0x1d => {
+                        // atomic store: [addr, T] -> []
+                        self.pop_expect(atomic_val_type(sub))?;
+                        self.pop_expect(adt)?;
+                    }
+                    0x1e..=0x47 => {
+                        // rmw: [addr, T] -> [T]
+                        let t = atomic_val_type(sub);
+                        self.pop_expect(t)?;
+                        self.pop_expect(adt)?;
+                        self.push_val_t(t);
+                    }
+                    0x48..=0x4e => {
+                        // cmpxchg: [addr, expected, replacement] -> [T]
+                        let t = atomic_val_type(sub);
+                        self.pop_expect(t)?;
+                        self.pop_expect(t)?;
+                        self.pop_expect(adt)?;
+                        self.push_val_t(t);
+                    }
+                    _ => return Err(ValidateError::UnsupportedValidation),
+                }
+            }
+
+            // --- WasmGC: casts ---
+            // Spec: `ref.test rt : [rt'] -> [i32]` with `rt <: rt'` — operand and target
+            // must share a TOP type, so `ref.test (ref func)` on an `externref` is invalid.
+            Op::RefTest | Op::RefCastOp => {
+                let target = ref_type_val_type(self.module, expect_ref_cast(&instr.imm)?)?;
+                self.pop_expect(target.ref_heap().top().val_type(true))?;
+                if instr.op == Op::RefTest {
+                    self.push_val_t(V::I32);
+                } else {
+                    self.push_val_t(target);
+                }
+            }
+            // The label carries `[t* rt]`; the operand is `[t* src]`. `br_on_cast` branches
+            // when the ref matches `dst` and falls through otherwise; `br_on_cast_fail` is
+            // the mirror. `dst` must be a subtype of `src` (a downcast).
+            Op::BrOnCast | Op::BrOnCastFail => {
+                let Imm::BrCast { label, src, dst } = instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let src_vt = ref_type_val_type(self.module, src)?;
+                let dst_vt = ref_type_val_type(self.module, dst)?;
+                if !subtype_of(self.module, dst_vt, src_vt) {
+                    return Err(ValidateError::TypeMismatch);
+                }
+                let lt = self.label_types_at(label)?;
+                if lt.is_empty() {
+                    return Err(ValidateError::TypeMismatch);
+                }
+                // What the branch carries: `dst` for br_on_cast (it fires on a match),
+                // `src` for br_on_cast_fail (it fires on a miss).
+                let carried = if instr.op == Op::BrOnCast {
+                    dst_vt
+                } else {
+                    src_vt
+                };
+                if !subtype_of(self.module, carried, lt[lt.len() - 1]) {
+                    return Err(ValidateError::TypeMismatch);
+                }
+                let prefix = lt[..lt.len() - 1].to_vec(); // t*
+                self.pop_expect(src_vt)?; // the ref operand (top)
+                self.pop_vals(&prefix)?;
+                self.push_vals(&prefix);
+                // Fall-through: `src` for br_on_cast — but when the cast target is NULLABLE
+                // a null would have branched, so the fall-through ref is non-null.
+                // `br_on_cast_fail` falls through with the narrowed `dst`.
+                self.push_val_t(if instr.op == Op::BrOnCast {
+                    if dst_vt.is_non_null_ref() {
+                        src_vt
+                    } else {
+                        src_vt.non_null()
+                    }
+                } else {
+                    dst_vt
+                });
+            }
             Op::I31GetS | Op::I31GetU => {
                 self.pop_expect(V::I31REF)?;
                 self.push_val_t(V::I32);
@@ -1050,6 +1497,45 @@ fn expect_mem_index(imm: &Imm) -> ValidateResult<u32> {
         Err(ValidateError::UnsupportedValidation)
     }
 }
+fn expect_gc_type(imm: &Imm) -> ValidateResult<u32> {
+    if let Imm::GcType(t) = imm {
+        Ok(*t)
+    } else {
+        Err(ValidateError::UnsupportedValidation)
+    }
+}
+fn expect_gc_field(imm: &Imm) -> ValidateResult<(u32, u32)> {
+    if let Imm::GcField { type_index, field } = imm {
+        Ok((*type_index, *field))
+    } else {
+        Err(ValidateError::UnsupportedValidation)
+    }
+}
+fn expect_ref_cast(imm: &Imm) -> ValidateResult<RefType> {
+    if let Imm::RefCast(rt) = imm {
+        Ok(*rt)
+    } else {
+        Err(ValidateError::UnsupportedValidation)
+    }
+}
+
+/// A packed (`i8`/`i16`) field must be read with the sign-aware `*_get_s`/`*_get_u`; an
+/// unpacked one must be read with the plain `*.get`. `plain` says which form this op is.
+fn require_packing(plain: bool, storage: crate::module::StorageType) -> ValidateResult<()> {
+    let is_packed = !matches!(storage, crate::module::StorageType::Val(_));
+    if plain == is_packed {
+        return Err(ValidateError::TypeMismatch);
+    }
+    Ok(())
+}
+
+fn expect_tag(imm: &Imm) -> ValidateResult<u32> {
+    if let Imm::Tag(t) = imm {
+        Ok(*t)
+    } else {
+        Err(ValidateError::UnsupportedValidation)
+    }
+}
 fn expect_block_type(imm: &Imm) -> ValidateResult<opcode::BlockType> {
     if let Imm::BlockType(bt) = imm {
         Ok(*bt)
@@ -1122,9 +1608,99 @@ const F32_1: &[V] = &[V::F32];
 const F32_2: &[V] = &[V::F32, V::F32];
 const F64_1: &[V] = &[V::F64];
 const F64_2: &[V] = &[V::F64, V::F64];
+const V128_1: &[V] = &[V::V128];
+const V128_2: &[V] = &[V::V128, V::V128];
+const V128_3: &[V] = &[V::V128, V::V128, V::V128];
+const V128_SHIFT: &[V] = &[V::V128, V::I32];
+const ADDR_V128: &[V] = &[V::I32, V::V128];
+const V128_I32: &[V] = &[V::V128, V::I32];
+const V128_I64: &[V] = &[V::V128, V::I64];
+const V128_F32: &[V] = &[V::V128, V::F32];
+const V128_F64: &[V] = &[V::V128, V::F64];
 const STORE_I64: &[V] = &[V::I32, V::I64];
 const STORE_F32: &[V] = &[V::I32, V::F32];
 const STORE_F64: &[V] = &[V::I32, V::F64];
+
+/// Value-type signature of a `0xFD` SIMD sub-opcode. Memory ops list an `i32` address as
+/// `pop[0]`; the caller substitutes the memory's real index type (memory64).
+///
+/// The arity here must match the interpreter's, since both sides agree that a `v128` is a
+/// single operand (wasmrt's 128-bit value slot — see `interp.rs`).
+fn simd_sig(sub: u32) -> Sig {
+    match sub {
+        0x00..=0x0a | 0x5c | 0x5d => sig(I32_1, V128_1), // loads: addr -> v128
+        0x0b => sig(ADDR_V128, EMPTY),                   // v128.store
+        0x54..=0x57 => sig(ADDR_V128, V128_1),           // load lane
+        0x58..=0x5b => sig(ADDR_V128, EMPTY),            // store lane
+        0x0c => sig(EMPTY, V128_1),                      // v128.const
+        0x0d | 0x0e => sig(V128_2, V128_1),              // shuffle / swizzle
+        0x0f..=0x11 => sig(I32_1, V128_1),               // i8/i16/i32 splat
+        0x12 => sig(I64_1, V128_1),                      // i64x2.splat
+        0x13 => sig(F32_1, V128_1),                      // f32x4.splat
+        0x14 => sig(F64_1, V128_1),                      // f64x2.splat
+        0x15 | 0x16 | 0x18 | 0x19 | 0x1b => sig(V128_1, I32_1), // extract_lane -> i32
+        0x1d => sig(V128_1, I64_1),
+        0x1f => sig(V128_1, F32_1),
+        0x21 => sig(V128_1, F64_1),
+        0x17 | 0x1a | 0x1c => sig(V128_I32, V128_1), // replace_lane
+        0x1e => sig(V128_I64, V128_1),
+        0x20 => sig(V128_F32, V128_1),
+        0x22 => sig(V128_F64, V128_1),
+        0x23..=0x4c => sig(V128_2, V128_1), // comparisons
+        0x4d => sig(V128_1, V128_1),        // v128.not
+        0x4e..=0x51 => sig(V128_2, V128_1), // and / andnot / or / xor
+        // bitselect + relaxed madd/nmadd/laneselect/dot_add
+        0x52 | 0x105..=0x10c | 0x113 => sig(V128_3, V128_1),
+        0x53 | 0x63 | 0x83 | 0xa3 | 0xc3 => sig(V128_1, I32_1), // any_true / all_true
+        0x64 | 0x84 | 0xa4 | 0xc4 => sig(V128_1, I32_1),        // bitmask
+        0x6b..=0x6d | 0x8b..=0x8d | 0xab..=0xad | 0xcb..=0xcd => sig(V128_SHIFT, V128_1),
+        // unary v128 -> v128: abs/neg/popcnt, sqrt, ceil/floor/trunc/nearest, extend
+        // low/high, extadd_pairwise, int<->float convert, trunc_sat, promote/demote
+        // (incl. relaxed_trunc).
+        0x60..=0x62
+        | 0x67..=0x6a
+        | 0x74
+        | 0x75
+        | 0x7a
+        | 0x7c..=0x7f
+        | 0x80
+        | 0x81
+        | 0x87..=0x8a
+        | 0x94
+        | 0xa0
+        | 0xa1
+        | 0xa7..=0xaa
+        | 0xc0
+        | 0xc1
+        | 0xc7..=0xca
+        | 0x5e
+        | 0x5f
+        | 0xe0
+        | 0xe1
+        | 0xe3
+        | 0xec
+        | 0xed
+        | 0xef
+        | 0xf8..=0xff
+        | 0x101..=0x104 => sig(V128_1, V128_1),
+        // default: binary lane arithmetic (incl. relaxed swizzle/min/max/q15/dot)
+        _ => sig(V128_2, V128_1),
+    }
+}
+
+/// The value type a `0xFE` atomic sub-opcode loads/stores/exchanges.
+fn atomic_val_type(sub: u32) -> V {
+    match sub {
+        0x10 | 0x12 | 0x13 | 0x17 | 0x19 | 0x1a => V::I32, // i32 loads/stores (full/8/16)
+        0x11 | 0x14 | 0x15 | 0x16 | 0x18 | 0x1b | 0x1c | 0x1d => V::I64, // i64 loads/stores
+        // rmw/cmpxchg in groups of 7: [i32.full, i64.full, i32.8, i32.16, i64.8, i64.16,
+        // i64.32] — positions 0, 2, 3 are i32; the rest i64.
+        _ => match (sub.wrapping_sub(0x1e)) % 7 {
+            0 | 2 | 3 => V::I32,
+            _ => V::I64,
+        },
+    }
+}
 
 /// Fixed value-type signature for the numeric / comparison / conversion / const / load /
 /// store / memory opcodes. `None` for opcodes handled specially in [`FuncValidator::step`].
@@ -1439,6 +2015,270 @@ mod tests {
         // table section: 1 table, funcref (0x70), limits flag 0x04 (i64), min 1.
         let bytes = m(&[0x04, 0x04, 0x01, 0x70, 0x04, 0x01]);
         assert_eq!(decode(&bytes), Err(crate::types::DecodeError::MalformedFlag));
+    }
+
+    // --- the previously deferred typing arms: SIMD / atomics / GC / EH ---
+
+    /// Assemble a module from `(section_id, content)` pairs (content < 128 bytes).
+    fn asm(sections: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut v = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        for (id, c) in sections {
+            v.push(*id);
+            v.push(c.len() as u8);
+            v.extend_from_slice(c);
+        }
+        v
+    }
+    /// A code section holding one body.
+    fn code1(body: &[u8]) -> Vec<u8> {
+        let mut c = vec![0x01u8, body.len() as u8];
+        c.extend_from_slice(body);
+        c
+    }
+    /// `() -> ()` with one memory (min 1) and `body`.
+    fn mem_mod(body: &[u8]) -> Vec<u8> {
+        asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x00]),
+            (3, vec![0x01, 0x00]),
+            (5, vec![0x01, 0x00, 0x01]),
+            (10, code1(body)),
+        ])
+    }
+    fn check(bytes: &[u8]) -> ValidateResult<()> {
+        validate(&decode(bytes).unwrap())
+    }
+
+    #[test]
+    fn simd_typing_accepts_and_checks_alignment() {
+        // i32.const 0 ; v128.load align=4 ; drop  — align 4 (16 bytes) is the natural max.
+        let ok = [0x00, 0x41, 0x00, 0xfd, 0x00, 0x04, 0x00, 0x1a, 0x0b];
+        assert_eq!(check(&mem_mod(&ok)), Ok(()));
+
+        // align=5 exceeds the natural alignment of v128.load.
+        let over = [0x00, 0x41, 0x00, 0xfd, 0x00, 0x05, 0x00, 0x1a, 0x0b];
+        assert_eq!(
+            check(&mem_mod(&over)),
+            Err(ValidateError::InvalidAlignment)
+        );
+
+        // A narrower SIMD load has a smaller natural maximum: v128.load8_splat (0x07) is 1
+        // byte, so align=1 is already too much.
+        let lane_over = [0x00, 0x41, 0x00, 0xfd, 0x07, 0x01, 0x00, 0x1a, 0x0b];
+        assert_eq!(
+            check(&mem_mod(&lane_over)),
+            Err(ValidateError::InvalidAlignment)
+        );
+    }
+
+    #[test]
+    fn simd_memory_op_requires_a_memory() {
+        // The same v128.load in a module with NO memory must be rejected, not silently
+        // accepted the way an unchecked SIMD arm would.
+        let body = [0x00, 0x41, 0x00, 0xfd, 0x00, 0x04, 0x00, 0x1a, 0x0b];
+        let no_mem = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x00]),
+            (3, vec![0x01, 0x00]),
+            (10, code1(&body)),
+        ]);
+        assert_eq!(check(&no_mem), Err(ValidateError::MissingMemory));
+    }
+
+    #[test]
+    fn simd_typing_rejects_a_wrong_operand_type() {
+        // i32.const 0 ; i32.add — feeding an i32 where i32x4.add wants two v128s.
+        // (i32x4.add = 0xfd 0xae 0x01)
+        let bad = [
+            0x00, 0x41, 0x00, 0x41, 0x00, 0xfd, 0xae, 0x01, 0x1a, 0x0b,
+        ];
+        assert_eq!(check(&mem_mod(&bad)), Err(ValidateError::TypeMismatch));
+    }
+
+    #[test]
+    fn atomic_alignment_must_be_exact() {
+        // i32.atomic.load requires align=2 EXACTLY — unlike a scalar load, where a smaller
+        // alignment is merely a hint and stays valid.
+        let ok = [0x00, 0x41, 0x00, 0xfe, 0x10, 0x02, 0x00, 0x1a, 0x0b];
+        assert_eq!(check(&mem_mod(&ok)), Ok(()));
+
+        let under = [0x00, 0x41, 0x00, 0xfe, 0x10, 0x01, 0x00, 0x1a, 0x0b];
+        assert_eq!(
+            check(&mem_mod(&under)),
+            Err(ValidateError::InvalidAlignment)
+        );
+
+        // The scalar counterpart with the same under-alignment stays valid.
+        let scalar = [0x00, 0x41, 0x00, 0x28, 0x01, 0x00, 0x1a, 0x0b];
+        assert_eq!(check(&mem_mod(&scalar)), Ok(()));
+    }
+
+    #[test]
+    fn atomic_rmw_typing() {
+        // i32.atomic.rmw.add : [addr, i32] -> [i32]
+        let ok = [
+            0x00, 0x41, 0x00, 0x41, 0x05, 0xfe, 0x1e, 0x02, 0x00, 0x1a, 0x0b,
+        ];
+        assert_eq!(check(&mem_mod(&ok)), Ok(()));
+
+        // …fed an i64 value instead of an i32.
+        let bad = [
+            0x00, 0x41, 0x00, 0x42, 0x05, 0xfe, 0x1e, 0x02, 0x00, 0x1a, 0x0b,
+        ];
+        assert_eq!(check(&mem_mod(&bad)), Err(ValidateError::TypeMismatch));
+    }
+
+    /// `() -> ()` plus a struct type `$1` whose single i32 field has mutability `mutable`.
+    fn struct_mod(body: &[u8], mutable: u8) -> Vec<u8> {
+        asm(&[
+            (
+                1,
+                vec![0x02, 0x60, 0x00, 0x00, 0x5f, 0x01, 0x7f, mutable],
+            ),
+            (3, vec![0x01, 0x00]),
+            (10, code1(body)),
+        ])
+    }
+
+    #[test]
+    fn gc_struct_typing() {
+        // struct.new_default $1 ; struct.get $1 0 ; drop
+        let ok = [
+            0x00, 0xfb, 0x01, 0x01, 0xfb, 0x02, 0x01, 0x00, 0x1a, 0x0b,
+        ];
+        assert_eq!(check(&struct_mod(&ok, 0x01)), Ok(()));
+
+        // Field index 1 on a one-field struct.
+        let bad_field = [
+            0x00, 0xfb, 0x01, 0x01, 0xfb, 0x02, 0x01, 0x01, 0x1a, 0x0b,
+        ];
+        assert_eq!(
+            check(&struct_mod(&bad_field, 0x01)),
+            Err(ValidateError::UndefinedField)
+        );
+    }
+
+    #[test]
+    fn gc_struct_set_requires_a_mutable_field() {
+        // struct.new_default $1 ; i32.const 5 ; struct.set $1 0
+        let body = [
+            0x00, 0xfb, 0x01, 0x01, 0x41, 0x05, 0xfb, 0x05, 0x01, 0x00, 0x0b,
+        ];
+        assert_eq!(check(&struct_mod(&body, 0x01)), Ok(()));
+        assert_eq!(
+            check(&struct_mod(&body, 0x00)),
+            Err(ValidateError::ImmutableField)
+        );
+    }
+
+    #[test]
+    fn gc_packed_field_needs_a_sign_aware_get() {
+        // A packed i8 field (storage 0x78) must be read with struct.get_s/_u, not struct.get.
+        let plain = [
+            0x00, 0xfb, 0x01, 0x01, 0xfb, 0x02, 0x01, 0x00, 0x1a, 0x0b,
+        ];
+        let packed = asm(&[
+            (
+                1,
+                vec![0x02, 0x60, 0x00, 0x00, 0x5f, 0x01, 0x78, 0x01],
+            ),
+            (3, vec![0x01, 0x00]),
+            (10, code1(&plain)),
+        ]);
+        assert_eq!(check(&packed), Err(ValidateError::TypeMismatch));
+
+        // struct.get_s (0x03) on the same field is well-typed.
+        let signed = [
+            0x00, 0xfb, 0x01, 0x01, 0xfb, 0x03, 0x01, 0x00, 0x1a, 0x0b,
+        ];
+        let ok = asm(&[
+            (
+                1,
+                vec![0x02, 0x60, 0x00, 0x00, 0x5f, 0x01, 0x78, 0x01],
+            ),
+            (3, vec![0x01, 0x00]),
+            (10, code1(&signed)),
+        ]);
+        assert_eq!(check(&ok), Ok(()));
+    }
+
+    /// `() -> results` plus a tag of type `(i32) -> ()`.
+    fn eh_mod(body: &[u8], results: &[u8]) -> Vec<u8> {
+        let mut ty = vec![0x02u8, 0x60, 0x00];
+        ty.push(results.len() as u8);
+        ty.extend_from_slice(results);
+        ty.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+        asm(&[
+            (1, ty),
+            (3, vec![0x01, 0x00]),
+            (13, vec![0x01, 0x00, 0x01]),
+            (10, code1(body)),
+        ])
+    }
+
+    #[test]
+    fn eh_try_table_typing() {
+        // (block (result i32) (try_table (catch $e 1) (i32.const 42) (throw $e)))
+        let ok = [
+            0x00, 0x02, 0x7f, 0x1f, 0x7f, 0x01, 0x00, 0x00, 0x01, 0x41, 0x2a, 0x08, 0x00, 0x0b,
+            0x0b, 0x0b,
+        ];
+        assert_eq!(check(&eh_mod(&ok, &[0x7f])), Ok(()));
+
+        // A `catch_all` clause binds nothing, so its target label must carry no values —
+        // here it targets a `(result i32)` block.
+        let bad_all = [
+            0x00, 0x02, 0x7f, 0x1f, 0x7f, 0x01, 0x02, 0x01, 0x41, 0x2a, 0x08, 0x00, 0x0b, 0x0b,
+            0x0b,
+        ];
+        assert_eq!(
+            check(&eh_mod(&bad_all, &[0x7f])),
+            Err(ValidateError::TypeMismatch)
+        );
+    }
+
+    #[test]
+    fn eh_throw_checks_the_tag() {
+        // throw $e with no i32 on the stack.
+        let underflow = [0x00, 0x08, 0x00, 0x0b];
+        assert_eq!(
+            check(&eh_mod(&underflow, &[])),
+            Err(ValidateError::StackUnderflow)
+        );
+
+        // A tag index out of range.
+        let bad_tag = [0x00, 0x41, 0x00, 0x08, 0x09, 0x0b];
+        assert_eq!(
+            check(&eh_mod(&bad_tag, &[])),
+            Err(ValidateError::UndefinedTag)
+        );
+    }
+
+    #[test]
+    fn eh_legacy_try_catch_typing() {
+        // (try (result i32) (i32.const 3) (throw $e) (catch $e))
+        let ok = [
+            0x00, 0x06, 0x7f, 0x41, 0x03, 0x08, 0x00, 0x07, 0x00, 0x0b, 0x0b,
+        ];
+        assert_eq!(check(&eh_mod(&ok, &[0x7f])), Ok(()));
+
+        // A bare `catch` whose enclosing opener is a plain block, not a `try`.
+        let bare = [0x00, 0x02, 0x40, 0x07, 0x00, 0x0b, 0x0b];
+        assert_eq!(
+            check(&eh_mod(&bare, &[])),
+            Err(ValidateError::MismatchedCatch)
+        );
+    }
+
+    #[test]
+    fn eh_delegate_is_rejected() {
+        // `delegate` is refused outright — the interpreter cannot route it, and the frozen
+        // oracle's validator rejects it, so text and binary paths agree.
+        let body = [
+            0x00, 0x02, 0x40, 0x06, 0x40, 0x41, 0x04, 0x08, 0x00, 0x18, 0x00, 0x0b, 0x0b,
+        ];
+        assert_eq!(
+            check(&eh_mod(&body, &[])),
+            Err(ValidateError::UnsupportedValidation)
+        );
     }
 
     /// Minimal unsigned-LEB128 encoder for the test byte-builders.

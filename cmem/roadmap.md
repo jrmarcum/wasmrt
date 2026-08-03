@@ -10,8 +10,9 @@ so the oracle split has collapsed to that one item (see `design-decisions.md`, `
 is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–9 (v0.6.0 integer,
 v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC, v0.6.5 SIMD,
 v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64, v0.6.9 exception handling) DONE — the
-interpreter's wasm-proposal coverage is COMPLETE. Next: host imports (WASI needs them) + the deferred
-0.5.x validation arms, then T6.**
+interpreter's wasm-proposal coverage is COMPLETE — **and T4 finished too (v0.7.0: the deferred SIMD/
+atomic/GC/EH validation arms). Next: T6 (text toolchain), which brings the spec testsuite online as the
+real conformance gate; host imports land with T7/WASI.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -61,7 +62,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   summary (+ `-h`/`-v`). **Gate met:** wazmrt's 15 decode/rejection vectors ported 1:1; verified on a
   real `add.wasm` via the CLI; 45 core tests, clippy clean, native + `wasm32` no_std green. (`wasm_mod`
   corpus lives on removable media — the ported oracle tests stand in for it.) `[x]`
-- **T4 — `validate`. ◐ CORE DONE 2026-07-28 (v0.5.0); exotic arms → 0.5.x.** The spec §3 validation
+- **T4 — `validate`. ✅ DONE — core 2026-07-28 (v0.5.0), exotic arms 2026-08-03 (v0.7.0).** The spec §3 validation
   algorithm (value + control-frame stacks, `unknown` bottom), `subtype_of`, `simple_sig`, module-level
   checks (count-match, const-expr typing, elements/data, limits §3.2.5, tags, dup-exports, start,
   `C.refs`), local-init tracking, `natural_align_log2` (the deferred T2 table), per-memory (memory64)
@@ -71,8 +72,21 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   CLI prints a validation verdict. 54 core tests, clippy clean, native + `wasm32` no_std green.
   **Gate note:** `assert_invalid`/`assert_malformed` spec-suite parity is the T6 gate (needs the `.wast`
   runner); at T4 the gate is the ported oracle hand-vectors + no over-acceptance on the core set. `[◐]`
-  - **0.5.x follow-up:** port the deferred validation arms — `simd_sig`, atomic typing, GC struct/array/
-    cast typing, EH (`try_table`/`throw`/legacy) — + the SIMD/atomic natural-align tables. Then T5. `[ ]`
+  - **0.5.x follow-up — ✅ DONE 2026-08-03 (v0.7.0), landed after T5 rather than before it.** All four
+    deferred arms ported from wazmrt `validate.zig`: **`simd_sig`** (the whole `0xFD` fixed-width +
+    relaxed signature table) with the checks the stub had skipped — `require_memory`, memarg index range,
+    alignment ≤ `simd_natural_align_log2`, and the memory64 address type; **atomic typing** (notify/wait/
+    load/store/rmw/cmpxchg) where alignment must be **exactly** natural, not a maximum; **GC typing**
+    (struct/array new/get/set/len, `ref.test`/`ref.cast`, `br_on_cast`/`_fail`) popping the **concrete**
+    ref type, never the family head, so `struct.get $b` can't be applied to a `(ref $a)`; and **EH typing**
+    (`try_table` + per-clause label checks via `check_catch`, `throw`, `throw_ref`, legacy
+    `try`/`catch`/`catch_all`/`rethrow`) with `delegate` **rejected** to match the oracle. Also added the
+    `simd_natural_align_log2` / `simd_is_memory_op` / `atomic_natural_align_log2` tables to `opcode.rs`
+    (the T2 deferral) and `FuncValidator.body_len` to bound `array.new_fixed`'s unvalidated `n` (in
+    unreachable code `pop_expect` yields `Unknown` instead of underflowing, so an unbounded loop could
+    spin 2^32 times on a tiny module). **T4 is now COMPLETE** — the validator covers everything the
+    interpreter runs, and `wasmrt <file>` never prints "validation SKIPPED". 135 core tests (12 new),
+    clippy clean. Full `assert_invalid`/`assert_malformed` conformance remains the **T6** gate. `[x]`
 - **T5 — `interp` (the switch interpreter). ◐ FIRST SLICE DONE 2026-07-28 (v0.6.0): integer compute.**
   Ported the value model (`u64` slots), `Instance`/instantiation (decode bodies + `precompute_control_flow`
   end_of/else_of + eval global inits), `Frame` + `branch` (label stack) + the `run` dispatch loop, and

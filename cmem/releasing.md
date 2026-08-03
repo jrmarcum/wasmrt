@@ -16,10 +16,17 @@ matrix + a fast cadence).
 - Pre-1.0 the public API (both `wasmrt-core` and `wasmrt.h`) is **unstable** — breaking changes bump the
   minor (`0.y`), which is the SemVer compatibility unit below 1.0. Expect frequent `0.y` bumps until T8.
 
-**Stage → version map** (the ladder lives in `ROADMAP.md`; the port tasks in `roadmap.md`):
-0.1 T0 scaffold · 0.2 T1 types+reader · 0.3 T2 opcode · 0.4 T3 decode · 0.5 T4 validate ·
-0.6.x T5 interp (patch per feature slice) · 0.7 T6 text · 0.8 T7 wasi+cli · 0.9 T8 C-ABI ·
-0.10 T9 hardening · **1.0 = parity**.
+**Cadence rule (owner, 2026-08-03): the patch component stays a single digit.** A `0.y.z` line runs
+`z = 0…9`; the release after `0.y.9` is **`0.(y+1).0`**, never `0.y.10`. That is what closed the 0.6
+interp line: v0.6.9 (exception handling) was its last slice, so the next release took **0.7.0**. When a
+line fills up, the remaining stage→version map shifts down by one rather than growing a two-digit patch.
+
+**Stage → version map** (the ladder lives in `ROADMAP.md`; the port tasks in `roadmap.md`) — *shifted by
+one from 0.8 onward when 0.7.0 was consumed by the validator completion*:
+0.1 T0 scaffold · 0.2 T1 types+reader · 0.3 T2 opcode · 0.4 T3 decode · 0.5 T4 validate (core) ·
+0.6.x T5 interp (patch per feature slice, 0.6.0–0.6.9) · **0.7 T4 completion (the deferred SIMD/atomics/
+GC/EH typing arms)** · 0.8 T6 text · 0.9 T7 wasi+cli · 0.10 T8 C-ABI · 0.11 T9 hardening ·
+**1.0 = parity**.
 
 ## Crates & names (owner decision: CLI takes the bare `wasmrt` name)
 
@@ -110,7 +117,8 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-08-03)
 
-- **Published through v0.6.9 — no release is pending.** `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
+- **Published through v0.6.9; v0.7.0 (the validator completion) is prepped and awaiting the owner's
+  publish.** `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
   crates.io through v0.6.9 (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
   WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6 → threads/atomics v0.6.7 → memory64 v0.6.8 →

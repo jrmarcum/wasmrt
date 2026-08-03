@@ -11,7 +11,37 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: host imports (for WASI) + the deferred 0.5.x validation arms, then T6 (the text toolchain)._
+_Next: T6 — the text toolchain (`.wat` assembler + `.wast` spec-script runner), which brings the official
+spec testsuite online as a conformance gate. Host imports (for WASI) follow at T7._
+
+## [0.7.0] — Validator: the deferred typing arms (completes stage T4)
+
+### Added
+- **SIMD typing** (the `0xFD` family): a full signature table for the fixed-width and relaxed sets, plus
+  the checks the deferred arm had skipped entirely — a memory-touching SIMD op now requires a memory to
+  exist, its `memarg` memory index to be in range, its alignment to be within the op's natural maximum,
+  and (memory64) its address operand to take the memory's own index type.
+- **Atomics typing** (`0xFE`): notify/wait, atomic loads/stores, RMW, and cmpxchg. Atomics must be
+  **exactly** naturally aligned — unlike a scalar or SIMD access, where a smaller alignment is a valid
+  hint — so the validator enforces equality, not a maximum.
+- **WasmGC typing**: `struct.new`/`new_default`/`get`/`get_s`/`get_u`/`set`, `array.new`/`new_default`/
+  `new_fixed`/`get`/`get_s`/`get_u`/`set`/`len`, `ref.test`/`ref.cast`, and `br_on_cast`/`br_on_cast_fail`.
+  Struct and array references are checked at their **concrete** type rather than the family head, so
+  `struct.get $b` cannot be applied to a `(ref $a)` and reinterpret one field type as another. Packed
+  `i8`/`i16` fields require the sign-aware `*_get_s`/`*_get_u`; immutable fields reject `*.set`.
+- **Exception-handling typing**: `try_table` (each catch clause checked against its target label's types),
+  `throw`, `throw_ref`, and the legacy `try`/`catch`/`catch_all`/`rethrow` frames. A legacy handler starts
+  from the try's *entry* local-init state, since locals set in the body are not guaranteed on the path
+  that arrived via a thrown exception — the same rule `else` follows.
+
+With this, **stage T4 (validate) is complete**: the validator covers every construct the interpreter
+executes. `wasmrt <file>` no longer reports `validation SKIPPED` for SIMD, atomic, GC, or EH modules.
+
+### Notes
+- **`delegate` is rejected by the validator too**, matching the frozen oracle — so the text and binary
+  paths agree, and a module that validates is one the interpreter can actually run.
+- Full `assert_invalid` / `assert_malformed` conformance against the official spec testsuite is the **T6**
+  gate; this release's gate is the ported oracle typing rules plus per-arm vectors.
 
 ## [0.6.9] — Interpreter: exception handling (stage T5, slice 10)
 
