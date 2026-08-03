@@ -61,6 +61,24 @@ were **sliced** (core-first, exotic-later) with deferred ops rejecting loudly. T
 conformance gates come online at **T6** (text toolchain) and are where SIMD/GC/atomics/EH validation +
 execution finally get real coverage; the C-ABI/Miri gates at **T8**.
 
+## Where the spec testsuite lives (owner, 2026-08-03)
+
+The official WebAssembly spec testsuite is **already vendored locally** — no clone needed:
+
+```
+D:\Programs\_ProgramExamples\Example_Programs\wasmExamples\wasmtk\tests\module\wasm_wast\testsuite-main\
+```
+
+**257 core `.wast` files** plus `proposals/` (custom-descriptors 14, threads 4, custom-page-sizes 4,
+wide-arithmetic 1) and `legacy/` (4 — the legacy EH encoding: `throw`, `rethrow`, `try_catch`,
+`try_delegate`). Mirrored on GitHub at <https://github.com/jrmarcum/wasmtk/tree/main/tests>. The wider
+`wasmtk/tests` tree also holds the **WASI corpus** used at T7 and 534 `.wat` files.
+
+This is the **T6 conformance gate**: the `.wast` runner walks these and must reach wazmrt's ~60k-assertion
+pass profile. Note `legacy/try_delegate.wast` is expected to fail its `delegate` cases — wasmrt rejects
+`delegate` deliberately, matching the frozen oracle (see `known-issues.md`); record it as a known
+divergence rather than chasing it.
+
 ## Test layers (mirror wazmrt, ported)
 
 - **Unit tests** — port wazmrt's test corpus module-by-module (decode/validate/interp/text/wasi/pin).

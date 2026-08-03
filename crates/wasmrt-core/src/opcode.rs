@@ -25,10 +25,18 @@ use crate::types::{DecodeError, DecodeResult, ValType};
 /// Defines the [`Op`] enum and [`Op::from_u8`] from one list, split into `wire`
 /// (real single-byte opcodes, mapped by `from_u8`) and `internal` (tags whose wire form
 /// is a `0xFB`/`0xFC` prefix + sub-opcode; enum-only, never produced by `from_u8`).
+/// Each entry is `Variant = byte => "text.name"`. Keeping the **text name** in the same
+/// table as the byte makes the binary and text spellings one authority, so the assembler's
+/// reverse map cannot drift from the decoder (the discipline the oracle applies to its own
+/// `decode_simd`-adjacent tables).
+///
+/// A name of `""` means the op has no text spelling of its own — the `0xFD`/`0xFE` family
+/// tags, whose members are named by their sub-opcode tables. Empty names are excluded from
+/// [`Op::from_text_name`].
 macro_rules! define_ops {
     (
-        wire { $($w:ident = $wv:literal),* $(,)? }
-        internal { $($i:ident = $iv:literal),* $(,)? }
+        wire { $($w:ident = $wv:literal => $wn:literal),* $(,)? }
+        internal { $($i:ident = $iv:literal => $in:literal),* $(,)? }
     ) => {
         /// Every WebAssembly opcode, keyed by its binary byte (§5.4) for the single-byte
         /// forms and by an internal tag for the prefixed families.
@@ -50,6 +58,28 @@ macro_rules! define_ops {
                     _ => None,
                 }
             }
+
+            /// This op's WebAssembly **text-format** name (`i32.add`), or `""` for a family
+            /// tag that has no text spelling of its own.
+            #[must_use]
+            pub const fn text_name(self) -> &'static str {
+                match self {
+                    $(Op::$w => $wn,)*
+                    $(Op::$i => $in,)*
+                }
+            }
+
+            /// The op a text-format instruction name denotes — the assembler's reverse map.
+            /// Names that belong to a prefixed family (`0xFD` SIMD, `0xFE` atomics) are not
+            /// here; those resolve through their own sub-opcode tables.
+            #[must_use]
+            pub fn from_text_name(name: &str) -> Option<Op> {
+                match name {
+                    $($wn if !$wn.is_empty() => Some(Op::$w),)*
+                    $($in if !$in.is_empty() => Some(Op::$i),)*
+                    _ => None,
+                }
+            }
         }
     };
 }
@@ -57,86 +87,140 @@ macro_rules! define_ops {
 define_ops! {
     wire {
         // Control + exception handling (both encodings) + typed-ref calls.
-        Unreachable = 0x00, Nop = 0x01, Block = 0x02, Loop = 0x03, If = 0x04, Else = 0x05,
-        TryLegacy = 0x06, CatchLegacy = 0x07, Throw = 0x08, Rethrow = 0x09, ThrowRef = 0x0a,
-        End = 0x0b, Br = 0x0c, BrIf = 0x0d, BrTable = 0x0e, Return = 0x0f, Call = 0x10,
-        CallIndirect = 0x11, CallRef = 0x14, ReturnCallRef = 0x15, Delegate = 0x18,
-        CatchAll = 0x19, TryTable = 0x1f,
-        // Parametric.
-        Drop = 0x1a, Select = 0x1b, SelectT = 0x1c,
+        Unreachable = 0x00 => "unreachable", Nop = 0x01 => "nop", Block = 0x02 => "block",
+        Loop = 0x03 => "loop", If = 0x04 => "if", Else = 0x05 => "else",
+        TryLegacy = 0x06 => "try", CatchLegacy = 0x07 => "catch", Throw = 0x08 => "throw",
+        Rethrow = 0x09 => "rethrow", ThrowRef = 0x0a => "throw_ref",
+        End = 0x0b => "end", Br = 0x0c => "br", BrIf = 0x0d => "br_if",
+        BrTable = 0x0e => "br_table", Return = 0x0f => "return", Call = 0x10 => "call",
+        CallIndirect = 0x11 => "call_indirect", CallRef = 0x14 => "call_ref",
+        ReturnCallRef = 0x15 => "return_call_ref", Delegate = 0x18 => "delegate",
+        CatchAll = 0x19 => "catch_all", TryTable = 0x1f => "try_table",
+        // Parametric. `select` with an explicit result type assembles to `SelectT`, so the
+        // typed form carries a sentinel name that no source text can spell.
+        Drop = 0x1a => "drop", Select = 0x1b => "select", SelectT = 0x1c => "select.t",
         // Variable.
-        LocalGet = 0x20, LocalSet = 0x21, LocalTee = 0x22, GlobalGet = 0x23, GlobalSet = 0x24,
+        LocalGet = 0x20 => "local.get", LocalSet = 0x21 => "local.set",
+        LocalTee = 0x22 => "local.tee", GlobalGet = 0x23 => "global.get",
+        GlobalSet = 0x24 => "global.set",
         // Table access.
-        TableGet = 0x25, TableSet = 0x26,
+        TableGet = 0x25 => "table.get", TableSet = 0x26 => "table.set",
         // Memory.
-        I32Load = 0x28, I64Load = 0x29, F32Load = 0x2a, F64Load = 0x2b,
-        I32Load8S = 0x2c, I32Load8U = 0x2d, I32Load16S = 0x2e, I32Load16U = 0x2f,
-        I64Load8S = 0x30, I64Load8U = 0x31, I64Load16S = 0x32, I64Load16U = 0x33,
-        I64Load32S = 0x34, I64Load32U = 0x35, I32Store = 0x36, I64Store = 0x37,
-        F32Store = 0x38, F64Store = 0x39, I32Store8 = 0x3a, I32Store16 = 0x3b,
-        I64Store8 = 0x3c, I64Store16 = 0x3d, I64Store32 = 0x3e, MemorySize = 0x3f, MemoryGrow = 0x40,
+        I32Load = 0x28 => "i32.load", I64Load = 0x29 => "i64.load",
+        F32Load = 0x2a => "f32.load", F64Load = 0x2b => "f64.load",
+        I32Load8S = 0x2c => "i32.load8_s", I32Load8U = 0x2d => "i32.load8_u",
+        I32Load16S = 0x2e => "i32.load16_s", I32Load16U = 0x2f => "i32.load16_u",
+        I64Load8S = 0x30 => "i64.load8_s", I64Load8U = 0x31 => "i64.load8_u",
+        I64Load16S = 0x32 => "i64.load16_s", I64Load16U = 0x33 => "i64.load16_u",
+        I64Load32S = 0x34 => "i64.load32_s", I64Load32U = 0x35 => "i64.load32_u",
+        I32Store = 0x36 => "i32.store", I64Store = 0x37 => "i64.store",
+        F32Store = 0x38 => "f32.store", F64Store = 0x39 => "f64.store",
+        I32Store8 = 0x3a => "i32.store8", I32Store16 = 0x3b => "i32.store16",
+        I64Store8 = 0x3c => "i64.store8", I64Store16 = 0x3d => "i64.store16",
+        I64Store32 = 0x3e => "i64.store32", MemorySize = 0x3f => "memory.size",
+        MemoryGrow = 0x40 => "memory.grow",
         // Numeric constants.
-        I32Const = 0x41, I64Const = 0x42, F32Const = 0x43, F64Const = 0x44,
+        I32Const = 0x41 => "i32.const", I64Const = 0x42 => "i64.const",
+        F32Const = 0x43 => "f32.const", F64Const = 0x44 => "f64.const",
         // Comparison — i32.
-        I32Eqz = 0x45, I32Eq = 0x46, I32Ne = 0x47, I32LtS = 0x48, I32LtU = 0x49, I32GtS = 0x4a,
-        I32GtU = 0x4b, I32LeS = 0x4c, I32LeU = 0x4d, I32GeS = 0x4e, I32GeU = 0x4f,
+        I32Eqz = 0x45 => "i32.eqz", I32Eq = 0x46 => "i32.eq", I32Ne = 0x47 => "i32.ne",
+        I32LtS = 0x48 => "i32.lt_s", I32LtU = 0x49 => "i32.lt_u", I32GtS = 0x4a => "i32.gt_s",
+        I32GtU = 0x4b => "i32.gt_u", I32LeS = 0x4c => "i32.le_s", I32LeU = 0x4d => "i32.le_u",
+        I32GeS = 0x4e => "i32.ge_s", I32GeU = 0x4f => "i32.ge_u",
         // Comparison — i64.
-        I64Eqz = 0x50, I64Eq = 0x51, I64Ne = 0x52, I64LtS = 0x53, I64LtU = 0x54, I64GtS = 0x55,
-        I64GtU = 0x56, I64LeS = 0x57, I64LeU = 0x58, I64GeS = 0x59, I64GeU = 0x5a,
+        I64Eqz = 0x50 => "i64.eqz", I64Eq = 0x51 => "i64.eq", I64Ne = 0x52 => "i64.ne",
+        I64LtS = 0x53 => "i64.lt_s", I64LtU = 0x54 => "i64.lt_u", I64GtS = 0x55 => "i64.gt_s",
+        I64GtU = 0x56 => "i64.gt_u", I64LeS = 0x57 => "i64.le_s", I64LeU = 0x58 => "i64.le_u",
+        I64GeS = 0x59 => "i64.ge_s", I64GeU = 0x5a => "i64.ge_u",
         // Comparison — f32 / f64.
-        F32Eq = 0x5b, F32Ne = 0x5c, F32Lt = 0x5d, F32Gt = 0x5e, F32Le = 0x5f, F32Ge = 0x60,
-        F64Eq = 0x61, F64Ne = 0x62, F64Lt = 0x63, F64Gt = 0x64, F64Le = 0x65, F64Ge = 0x66,
+        F32Eq = 0x5b => "f32.eq", F32Ne = 0x5c => "f32.ne", F32Lt = 0x5d => "f32.lt",
+        F32Gt = 0x5e => "f32.gt", F32Le = 0x5f => "f32.le", F32Ge = 0x60 => "f32.ge",
+        F64Eq = 0x61 => "f64.eq", F64Ne = 0x62 => "f64.ne", F64Lt = 0x63 => "f64.lt",
+        F64Gt = 0x64 => "f64.gt", F64Le = 0x65 => "f64.le", F64Ge = 0x66 => "f64.ge",
         // Numeric — i32.
-        I32Clz = 0x67, I32Ctz = 0x68, I32Popcnt = 0x69, I32Add = 0x6a, I32Sub = 0x6b, I32Mul = 0x6c,
-        I32DivS = 0x6d, I32DivU = 0x6e, I32RemS = 0x6f, I32RemU = 0x70, I32And = 0x71, I32Or = 0x72,
-        I32Xor = 0x73, I32Shl = 0x74, I32ShrS = 0x75, I32ShrU = 0x76, I32Rotl = 0x77, I32Rotr = 0x78,
+        I32Clz = 0x67 => "i32.clz", I32Ctz = 0x68 => "i32.ctz", I32Popcnt = 0x69 => "i32.popcnt",
+        I32Add = 0x6a => "i32.add", I32Sub = 0x6b => "i32.sub", I32Mul = 0x6c => "i32.mul",
+        I32DivS = 0x6d => "i32.div_s", I32DivU = 0x6e => "i32.div_u",
+        I32RemS = 0x6f => "i32.rem_s", I32RemU = 0x70 => "i32.rem_u",
+        I32And = 0x71 => "i32.and", I32Or = 0x72 => "i32.or", I32Xor = 0x73 => "i32.xor",
+        I32Shl = 0x74 => "i32.shl", I32ShrS = 0x75 => "i32.shr_s", I32ShrU = 0x76 => "i32.shr_u",
+        I32Rotl = 0x77 => "i32.rotl", I32Rotr = 0x78 => "i32.rotr",
         // Numeric — i64.
-        I64Clz = 0x79, I64Ctz = 0x7a, I64Popcnt = 0x7b, I64Add = 0x7c, I64Sub = 0x7d, I64Mul = 0x7e,
-        I64DivS = 0x7f, I64DivU = 0x80, I64RemS = 0x81, I64RemU = 0x82, I64And = 0x83, I64Or = 0x84,
-        I64Xor = 0x85, I64Shl = 0x86, I64ShrS = 0x87, I64ShrU = 0x88, I64Rotl = 0x89, I64Rotr = 0x8a,
+        I64Clz = 0x79 => "i64.clz", I64Ctz = 0x7a => "i64.ctz", I64Popcnt = 0x7b => "i64.popcnt",
+        I64Add = 0x7c => "i64.add", I64Sub = 0x7d => "i64.sub", I64Mul = 0x7e => "i64.mul",
+        I64DivS = 0x7f => "i64.div_s", I64DivU = 0x80 => "i64.div_u",
+        I64RemS = 0x81 => "i64.rem_s", I64RemU = 0x82 => "i64.rem_u",
+        I64And = 0x83 => "i64.and", I64Or = 0x84 => "i64.or", I64Xor = 0x85 => "i64.xor",
+        I64Shl = 0x86 => "i64.shl", I64ShrS = 0x87 => "i64.shr_s", I64ShrU = 0x88 => "i64.shr_u",
+        I64Rotl = 0x89 => "i64.rotl", I64Rotr = 0x8a => "i64.rotr",
         // Numeric — f32.
-        F32Abs = 0x8b, F32Neg = 0x8c, F32Ceil = 0x8d, F32Floor = 0x8e, F32Trunc = 0x8f,
-        F32Nearest = 0x90, F32Sqrt = 0x91, F32Add = 0x92, F32Sub = 0x93, F32Mul = 0x94, F32Div = 0x95,
-        F32Min = 0x96, F32Max = 0x97, F32Copysign = 0x98,
+        F32Abs = 0x8b => "f32.abs", F32Neg = 0x8c => "f32.neg", F32Ceil = 0x8d => "f32.ceil",
+        F32Floor = 0x8e => "f32.floor", F32Trunc = 0x8f => "f32.trunc",
+        F32Nearest = 0x90 => "f32.nearest", F32Sqrt = 0x91 => "f32.sqrt",
+        F32Add = 0x92 => "f32.add", F32Sub = 0x93 => "f32.sub", F32Mul = 0x94 => "f32.mul",
+        F32Div = 0x95 => "f32.div", F32Min = 0x96 => "f32.min", F32Max = 0x97 => "f32.max",
+        F32Copysign = 0x98 => "f32.copysign",
         // Numeric — f64.
-        F64Abs = 0x99, F64Neg = 0x9a, F64Ceil = 0x9b, F64Floor = 0x9c, F64Trunc = 0x9d,
-        F64Nearest = 0x9e, F64Sqrt = 0x9f, F64Add = 0xa0, F64Sub = 0xa1, F64Mul = 0xa2, F64Div = 0xa3,
-        F64Min = 0xa4, F64Max = 0xa5, F64Copysign = 0xa6,
+        F64Abs = 0x99 => "f64.abs", F64Neg = 0x9a => "f64.neg", F64Ceil = 0x9b => "f64.ceil",
+        F64Floor = 0x9c => "f64.floor", F64Trunc = 0x9d => "f64.trunc",
+        F64Nearest = 0x9e => "f64.nearest", F64Sqrt = 0x9f => "f64.sqrt",
+        F64Add = 0xa0 => "f64.add", F64Sub = 0xa1 => "f64.sub", F64Mul = 0xa2 => "f64.mul",
+        F64Div = 0xa3 => "f64.div", F64Min = 0xa4 => "f64.min", F64Max = 0xa5 => "f64.max",
+        F64Copysign = 0xa6 => "f64.copysign",
         // Conversions.
-        I32WrapI64 = 0xa7, I32TruncF32S = 0xa8, I32TruncF32U = 0xa9, I32TruncF64S = 0xaa,
-        I32TruncF64U = 0xab, I64ExtendI32S = 0xac, I64ExtendI32U = 0xad, I64TruncF32S = 0xae,
-        I64TruncF32U = 0xaf, I64TruncF64S = 0xb0, I64TruncF64U = 0xb1, F32ConvertI32S = 0xb2,
-        F32ConvertI32U = 0xb3, F32ConvertI64S = 0xb4, F32ConvertI64U = 0xb5, F32DemoteF64 = 0xb6,
-        F64ConvertI32S = 0xb7, F64ConvertI32U = 0xb8, F64ConvertI64S = 0xb9, F64ConvertI64U = 0xba,
-        F64PromoteF32 = 0xbb, I32ReinterpretF32 = 0xbc, I64ReinterpretF64 = 0xbd,
-        F32ReinterpretI32 = 0xbe, F64ReinterpretI64 = 0xbf,
+        I32WrapI64 = 0xa7 => "i32.wrap_i64", I32TruncF32S = 0xa8 => "i32.trunc_f32_s",
+        I32TruncF32U = 0xa9 => "i32.trunc_f32_u", I32TruncF64S = 0xaa => "i32.trunc_f64_s",
+        I32TruncF64U = 0xab => "i32.trunc_f64_u", I64ExtendI32S = 0xac => "i64.extend_i32_s",
+        I64ExtendI32U = 0xad => "i64.extend_i32_u", I64TruncF32S = 0xae => "i64.trunc_f32_s",
+        I64TruncF32U = 0xaf => "i64.trunc_f32_u", I64TruncF64S = 0xb0 => "i64.trunc_f64_s",
+        I64TruncF64U = 0xb1 => "i64.trunc_f64_u", F32ConvertI32S = 0xb2 => "f32.convert_i32_s",
+        F32ConvertI32U = 0xb3 => "f32.convert_i32_u", F32ConvertI64S = 0xb4 => "f32.convert_i64_s",
+        F32ConvertI64U = 0xb5 => "f32.convert_i64_u", F32DemoteF64 = 0xb6 => "f32.demote_f64",
+        F64ConvertI32S = 0xb7 => "f64.convert_i32_s", F64ConvertI32U = 0xb8 => "f64.convert_i32_u",
+        F64ConvertI64S = 0xb9 => "f64.convert_i64_s", F64ConvertI64U = 0xba => "f64.convert_i64_u",
+        F64PromoteF32 = 0xbb => "f64.promote_f32", I32ReinterpretF32 = 0xbc => "i32.reinterpret_f32",
+        I64ReinterpretF64 = 0xbd => "i64.reinterpret_f64",
+        F32ReinterpretI32 = 0xbe => "f32.reinterpret_i32",
+        F64ReinterpretI64 = 0xbf => "f64.reinterpret_i64",
         // Sign extension.
-        I32Extend8S = 0xc0, I32Extend16S = 0xc1, I64Extend8S = 0xc2, I64Extend16S = 0xc3,
-        I64Extend32S = 0xc4,
+        I32Extend8S = 0xc0 => "i32.extend8_s", I32Extend16S = 0xc1 => "i32.extend16_s",
+        I64Extend8S = 0xc2 => "i64.extend8_s", I64Extend16S = 0xc3 => "i64.extend16_s",
+        I64Extend32S = 0xc4 => "i64.extend32_s",
         // Saturating (non-trapping) float→int truncation. Real wire form is `0xFC 0x00..0x07`;
         // these bytes are also accepted as raw single-byte forms, mirroring the wazmrt oracle.
-        I32TruncSatF32S = 0xc5, I32TruncSatF32U = 0xc6, I32TruncSatF64S = 0xc7, I32TruncSatF64U = 0xc8,
-        I64TruncSatF32S = 0xc9, I64TruncSatF32U = 0xca, I64TruncSatF64S = 0xcb, I64TruncSatF64U = 0xcc,
+        I32TruncSatF32S = 0xc5 => "i32.trunc_sat_f32_s", I32TruncSatF32U = 0xc6 => "i32.trunc_sat_f32_u",
+        I32TruncSatF64S = 0xc7 => "i32.trunc_sat_f64_s", I32TruncSatF64U = 0xc8 => "i32.trunc_sat_f64_u",
+        I64TruncSatF32S = 0xc9 => "i64.trunc_sat_f32_s", I64TruncSatF32U = 0xca => "i64.trunc_sat_f32_u",
+        I64TruncSatF64S = 0xcb => "i64.trunc_sat_f64_s", I64TruncSatF64U = 0xcc => "i64.trunc_sat_f64_u",
         // Reference.
-        RefNull = 0xd0, RefIsNull = 0xd1, RefFunc = 0xd2, RefEq = 0xd3, RefAsNonNull = 0xd4,
-        BrOnNull = 0xd5, BrOnNonNull = 0xd6,
+        RefNull = 0xd0 => "ref.null", RefIsNull = 0xd1 => "ref.is_null",
+        RefFunc = 0xd2 => "ref.func", RefEq = 0xd3 => "ref.eq",
+        RefAsNonNull = 0xd4 => "ref.as_non_null", BrOnNull = 0xd5 => "br_on_null",
+        BrOnNonNull = 0xd6 => "br_on_non_null",
     }
     internal {
-        // Bulk memory (`0xFC 0x08..0x0b`) + the SIMD / atomic family tags.
-        MemoryInit = 0xd7, DataDrop = 0xd8, MemoryCopy = 0xd9, MemoryFill = 0xda,
-        Simd = 0xdb, Atomic = 0xdc,
+        // Bulk memory (`0xFC 0x08..0x0b`) + the SIMD / atomic family tags. The two family
+        // tags have no text name of their own — their members are named per sub-opcode.
+        MemoryInit = 0xd7 => "memory.init", DataDrop = 0xd8 => "data.drop",
+        MemoryCopy = 0xd9 => "memory.copy", MemoryFill = 0xda => "memory.fill",
+        Simd = 0xdb => "", Atomic = 0xdc => "",
         // Table ops (`0xFC 0x0c..0x11`).
-        TableInit = 0xe0, ElemDrop = 0xe1, TableCopy = 0xe2, TableGrow = 0xe3, TableSize = 0xe4,
-        TableFill = 0xe5,
+        TableInit = 0xe0 => "table.init", ElemDrop = 0xe1 => "elem.drop",
+        TableCopy = 0xe2 => "table.copy", TableGrow = 0xe3 => "table.grow",
+        TableSize = 0xe4 => "table.size", TableFill = 0xe5 => "table.fill",
         // GC array ops (`0xFB` prefix).
-        ArrayNew = 0xe6, ArrayNewDefault = 0xe7, ArrayNewFixed = 0xe8, ArrayGet = 0xe9,
-        ArrayGetS = 0xea, ArrayGetU = 0xeb, ArraySet = 0xec, ArrayLen = 0xed,
+        ArrayNew = 0xe6 => "array.new", ArrayNewDefault = 0xe7 => "array.new_default",
+        ArrayNewFixed = 0xe8 => "array.new_fixed", ArrayGet = 0xe9 => "array.get",
+        ArrayGetS = 0xea => "array.get_s", ArrayGetU = 0xeb => "array.get_u",
+        ArraySet = 0xec => "array.set", ArrayLen = 0xed => "array.len",
         // GC casts (`0xFB` prefix).
-        RefTest = 0xee, RefCastOp = 0xef,
+        RefTest = 0xee => "ref.test", RefCastOp = 0xef => "ref.cast",
         // GC i31 / struct ops (`0xFB` prefix) + cast branches.
-        RefI31 = 0xf0, I31GetS = 0xf1, I31GetU = 0xf2, StructNew = 0xf3, StructNewDefault = 0xf4,
-        StructGet = 0xf5, StructGetS = 0xf6, StructGetU = 0xf7, StructSet = 0xf8,
-        BrOnCast = 0xf9, BrOnCastFail = 0xfa,
+        RefI31 = 0xf0 => "ref.i31", I31GetS = 0xf1 => "i31.get_s", I31GetU = 0xf2 => "i31.get_u",
+        StructNew = 0xf3 => "struct.new", StructNewDefault = 0xf4 => "struct.new_default",
+        StructGet = 0xf5 => "struct.get", StructGetS = 0xf6 => "struct.get_s",
+        StructGetU = 0xf7 => "struct.get_u", StructSet = 0xf8 => "struct.set",
+        BrOnCast = 0xf9 => "br_on_cast", BrOnCastFail = 0xfa => "br_on_cast_fail",
     }
 }
 
@@ -1031,5 +1115,78 @@ mod tests {
         assert_eq!(Op::from_u8(0xfb), None);
         assert_eq!(Op::from_u8(0xdb), None); // the SIMD internal tag
         assert_eq!(Op::from_u8(0xe3), None); // table.grow internal tag
+    }
+
+    #[test]
+    fn text_names_round_trip() {
+        // Every op with a text name must resolve back to itself — the property that keeps
+        // the assembler's reverse map from drifting off the decoder's table.
+        for b in 0u16..=0xff {
+            if let Some(op) = Op::from_u8(b as u8) {
+                let n = op.text_name();
+                assert!(!n.is_empty(), "{op:?} has no text name");
+                assert_eq!(Op::from_text_name(n), Some(op), "round-trip failed for {n}");
+            }
+        }
+        // Spot-check the internal (prefixed-family) tags too.
+        for op in [
+            Op::MemoryInit,
+            Op::DataDrop,
+            Op::MemoryCopy,
+            Op::MemoryFill,
+            Op::TableInit,
+            Op::ElemDrop,
+            Op::TableCopy,
+            Op::TableGrow,
+            Op::TableSize,
+            Op::TableFill,
+            Op::ArrayNew,
+            Op::ArrayNewDefault,
+            Op::ArrayNewFixed,
+            Op::ArrayGet,
+            Op::ArrayGetS,
+            Op::ArrayGetU,
+            Op::ArraySet,
+            Op::ArrayLen,
+            Op::RefTest,
+            Op::RefCastOp,
+            Op::RefI31,
+            Op::I31GetS,
+            Op::I31GetU,
+            Op::StructNew,
+            Op::StructNewDefault,
+            Op::StructGet,
+            Op::StructGetS,
+            Op::StructGetU,
+            Op::StructSet,
+            Op::BrOnCast,
+            Op::BrOnCastFail,
+        ] {
+            assert_eq!(Op::from_text_name(op.text_name()), Some(op));
+        }
+    }
+
+    #[test]
+    fn family_tags_have_no_text_name() {
+        // `0xFD`/`0xFE` members are named by their sub-opcode tables, not by the tag.
+        assert_eq!(Op::Simd.text_name(), "");
+        assert_eq!(Op::Atomic.text_name(), "");
+        assert_eq!(Op::from_text_name(""), None);
+    }
+
+    #[test]
+    fn spot_check_text_names() {
+        assert_eq!(Op::from_text_name("i32.add"), Some(Op::I32Add));
+        assert_eq!(Op::from_text_name("local.get"), Some(Op::LocalGet));
+        assert_eq!(Op::from_text_name("i64.trunc_sat_f64_u"), Some(Op::I64TruncSatF64U));
+        assert_eq!(Op::from_text_name("memory.copy"), Some(Op::MemoryCopy));
+        assert_eq!(Op::from_text_name("try_table"), Some(Op::TryTable));
+        assert_eq!(Op::from_text_name("throw_ref"), Some(Op::ThrowRef));
+        assert_eq!(Op::from_text_name("struct.get_u"), Some(Op::StructGetU));
+        assert_eq!(Op::from_text_name("ref.cast"), Some(Op::RefCastOp));
+        // `select` resolves to the untyped form; the typed one carries a sentinel name
+        // that source text cannot spell, so it never shadows it.
+        assert_eq!(Op::from_text_name("select"), Some(Op::Select));
+        assert_eq!(Op::from_text_name("nope.nope"), None);
     }
 }
