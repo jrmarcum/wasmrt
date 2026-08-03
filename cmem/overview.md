@@ -23,7 +23,7 @@ The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the 
 released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
 **memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
 
-**Done — T0–T5-slices-1–8 (v0.1.0 → v0.6.7):**
+**Done — T0–T5-slices-1–9 (v0.1.0 → v0.6.8):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
   surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
 - **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`
@@ -35,20 +35,22 @@ released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope a
 - **T4 core (v0.5.0)** — `validate` (spec §3 type-checker: value/control stacks, module-level checks,
   const-expr, C.refs). **Core language done; SIMD/atomics/GC-objects/EH typing deferred to 0.5.x**
   (deferred ops reject loudly). CLI prints a validation verdict.
-- **T5 slices 1–8 (v0.6.0 integer, v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types,
-  v0.6.4 WasmGC, v0.6.5 SIMD, v0.6.6 multi-memory, v0.6.7 threads/atomics)** — `interp` (switch
-  interpreter over the IR). **`wasmrt run <file> <fn> [args]` runs compute + linear memory (multi-memory) +
-  indirect calls + GC + SIMD + atomics** (control flow, recursion, locals,
+- **T5 slices 1–9 (v0.6.0 integer, v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types,
+  v0.6.4 WasmGC, v0.6.5 SIMD, v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64)** — `interp`
+  (switch interpreter over the IR). **`wasmrt run <file> <fn> [args]` runs compute + linear memory
+  (multi-memory + memory64) + indirect calls + GC + SIMD + atomics** (control flow, recursion, locals,
   globals, all i32/i64/f32/f64 ops incl. NaN-correct min/max + ties-to-even nearest + trap/sat conversions;
   loads/stores + `memory.size`/`grow` + bulk memory + active data init; `call_indirect` + full `table.*` +
   `ref.*` + element-segment init; **GC struct/array heap + `i31` + `ref.test`/`ref.cast`/`br_on_cast`**;
   **the full `v128` SIMD set incl. relaxed**; `NULL_REF = u64::MAX` checked before `I31_TAG = 1<<63` —
   slot-encoding invariant anchored). **The value slot is now 128-bit (`Value = u128`)** so a `v128` is one
-  slot (idiomatic divergence from wazmrt's 2-`u64`-slots; scalars/refs in the low 64).
+  slot (idiomatic divergence from wazmrt's 2-`u64`-slots; scalars/refs in the low 64). **A memory carries
+  its own index type** — every address/count/page-count is `i64` on a 64-bit memory, `i32` otherwise;
+  **tables stay 32-bit** (the oracle rejects an `i64` table type as malformed).
 
-**Next: 0.6.x slice 9 — memory64**, then EH + host imports; plus the deferred 0.5.x validation arms. See
-the task list in [roadmap.md](roadmap.md). **94 core unit tests** green; clippy clean; native + `wasm32`
-no_std all build.
+**Next: 0.6.x slice 10 — exception handling**, then host imports; plus the deferred 0.5.x validation arms.
+See the task list in [roadmap.md](roadmap.md). **112 core unit tests** green; clippy clean; native +
+`wasm32` no_std all build.
 
 ## Planned repo / crate layout
 

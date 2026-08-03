@@ -4160,6 +4160,220 @@ mod tests {
         assert_eq!(as_i32(run1(&m, "g", &[]).unwrap()[0]), 9);
     }
 
+    // --- memory64 ---
+
+    /// A single memory64 memory (limits flag `0x04` = i64 index), min 1 page, no max.
+    const MEM64_SECTION: [u8; 3] = [0x01, 0x04, 0x01];
+
+    #[test]
+    fn mem64_store_load_roundtrip() {
+        // i64.const 8 ; i32.const 1234 ; i32.store ; i64.const 8 ; i32.load
+        let entry = [
+            0x00, //
+            0x42, 0x08, // i64.const 8   (address — i64 because the memory is 64-bit)
+            0x41, 0xd2, 0x09, // i32.const 1234
+            0x36, 0x02, 0x00, // i32.store align=2 offset=0
+            0x42, 0x08, // i64.const 8
+            0x28, 0x02, 0x00, // i32.load align=2 offset=0
+            0x0b,
+        ];
+        let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 1234);
+    }
+
+    #[test]
+    fn mem64_size_and_grow_are_i64() {
+        // memory.size (1) + memory.grow(2) (old 1) + memory.size (3) = 5, via i64.add.
+        let entry = [
+            0x00, //
+            0x3f, 0x00, // memory.size -> i64 1
+            0x42, 0x02, // i64.const 2  (delta — i64)
+            0x40, 0x00, // memory.grow -> i64 1 (old page count)
+            0x7c, // i64.add -> 2
+            0x3f, 0x00, // memory.size -> i64 3
+            0x7c, // i64.add -> 5
+            0xa7, // i32.wrap_i64
+            0x0b,
+        ];
+        let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 5);
+    }
+
+    #[test]
+    fn mem64_grow_beyond_max_returns_minus_one() {
+        // (memory i64 1 1) — grow by 1 exceeds the declared max, so grow yields i64 -1.
+        let entry = [
+            0x00, //
+            0x42, 0x01, // i64.const 1
+            0x40, 0x00, // memory.grow -> i64 -1 (refused)
+            0xa7, // i32.wrap_i64
+            0x0b,
+        ];
+        // flag 0x05 = has-max + i64 index; min 1, max 1.
+        let m = mem_func(&entry, vec![0x01, 0x05, 0x01, 0x01], &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), -1);
+    }
+
+    #[test]
+    fn mem64_active_data_segment_uses_i64_offset() {
+        // active data segment whose offset const-expr is `i64.const 4` (the memory's index type)
+        let entry = [0x00, 0x42, 0x04, 0x28, 0x02, 0x00, 0x0b]; // i64.const 4 ; i32.load
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, MEM64_SECTION.to_vec()),
+            (7, vec![0x01, 0x01, b'a', 0x00, 0x00]),
+            (10, code1(&entry)),
+            // 1 segment, flag 0 (active, memory 0), (i64.const 4), 4 bytes = 42 LE
+            (11, vec![0x01, 0x00, 0x42, 0x04, 0x0b, 0x04, 0x2a, 0x00, 0x00, 0x00]),
+        ]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 42);
+    }
+
+    #[test]
+    fn mem64_address_above_4gib_traps() {
+        // The memory64-defining case: an address of 2^32 must trap, NOT wrap to 0 the way a
+        // 32-bit address would. Proves the address is carried full-width.
+        let entry = [
+            0x00, //
+            0x42, 0x80, 0x80, 0x80, 0x80, 0x10, // i64.const 0x1_0000_0000
+            0x28, 0x02, 0x00, // i32.load
+            0x0b,
+        ];
+        let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
+        assert_eq!(run1(&m, "a", &[]), Err(Trap::MemoryOutOfBounds));
+    }
+
+    #[test]
+    fn mem64_memarg_offset_above_u32() {
+        // A 64-bit memory may carry a static offset wider than u32 (decoded as a full u64
+        // LEB). Address 0 + offset 2^32 is out of bounds -> trap, not a decode error.
+        let entry = [
+            0x00, //
+            0x42, 0x00, // i64.const 0
+            0x28, 0x02, 0x80, 0x80, 0x80, 0x80, 0x10, // i32.load offset=0x1_0000_0000
+            0x0b,
+        ];
+        let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
+        assert_eq!(run1(&m, "a", &[]), Err(Trap::MemoryOutOfBounds));
+    }
+
+    #[test]
+    fn mem64_bulk_fill_and_copy() {
+        // fill mem[0..4] = 0xab ; copy mem[0..4] -> mem[16..20] ; load mem[16]
+        let entry = [
+            0x00, //
+            0x42, 0x00, // i64.const 0    (dst)
+            0x41, 0xab, 0x01, // i32.const 0xab (byte — always i32)
+            0x42, 0x04, // i64.const 4    (n — i64 on a 64-bit memory)
+            0xfc, 0x0b, 0x00, // memory.fill 0
+            0x42, 0x10, // i64.const 16   (dst)
+            0x42, 0x00, // i64.const 0    (src)
+            0x42, 0x04, // i64.const 4    (n — i64: both memories are 64-bit)
+            0xfc, 0x0a, 0x00, 0x00, // memory.copy dst=0 src=0
+            0x42, 0x10, // i64.const 16
+            0x28, 0x02, 0x00, // i32.load
+            0x0b,
+        ];
+        let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
+        let got = as_i32(run1(&m, "a", &[]).unwrap()[0]) as u32;
+        assert_eq!(got, 0xabab_abab);
+    }
+
+    #[test]
+    fn mem64_memory_init_dst_is_i64() {
+        // memory.init: n/src index the segment (i32), but dst is the memory's index type.
+        let entry = [
+            0x00, //
+            0x42, 0x20, // i64.const 32 (dst — i64)
+            0x41, 0x00, // i32.const 0  (src into the segment)
+            0x41, 0x04, // i32.const 4  (n)
+            0xfc, 0x08, 0x00, 0x00, // memory.init data=0 mem=0
+            0x42, 0x20, // i64.const 32
+            0x28, 0x02, 0x00, // i32.load
+            0x0b,
+        ];
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            (3, vec![0x01, 0x00]),
+            (5, MEM64_SECTION.to_vec()),
+            (7, vec![0x01, 0x01, b'a', 0x00, 0x00]),
+            (12, vec![0x01]), // data count = 1
+            (10, code1(&entry)),
+            // 1 passive segment (flag 1), 4 bytes = 99 LE
+            (11, vec![0x01, 0x01, 0x04, 0x63, 0x00, 0x00, 0x00]),
+        ]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 99);
+    }
+
+    #[test]
+    fn mem64_atomic_address_is_i64() {
+        // The 0xFE family routes its address through the same 64-bit path.
+        let entry = [
+            0x00, //
+            0x42, 0x00, // i64.const 0
+            0x41, 0x0a, // i32.const 10
+            0x36, 0x02, 0x00, // i32.store [0] = 10
+            0x42, 0x00, // i64.const 0
+            0x41, 0x05, // i32.const 5
+            0xfe, 0x1e, 0x02, 0x00, // i32.atomic.rmw.add -> old 10
+            0x42, 0x00, // i64.const 0
+            0xfe, 0x10, 0x02, 0x00, // i32.atomic.load -> 15
+            0x6a, // + -> 25
+            0x0b,
+        ];
+        let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 25);
+    }
+
+    #[test]
+    fn mem64_huge_minimum_exceeds_the_budget() {
+        // A 64-bit memory may DECLARE up to 2^48 pages; this instance still refuses to back
+        // more than its budget, and must do so without overflowing the size computation.
+        let entry = [0x00, 0x3f, 0x00, 0xa7, 0x0b]; // memory.size ; i32.wrap_i64
+        // min = 2^40 pages (64 TiB)
+        let mem = vec![0x01, 0x04, 0x80, 0x80, 0x80, 0x80, 0x80, 0x20];
+        let m = mem_func(&entry, mem, &[0x7f]);
+        assert_eq!(run1(&m, "a", &[]), Err(Trap::MemoryLimitExceeded));
+    }
+
+    #[test]
+    fn mem64_cross_copy_with_a_32bit_memory() {
+        // memory.copy between a 64-bit dst and a 32-bit src: each address keeps its own
+        // index type, and the count is i32 (the narrower of the two).
+        let entry = [
+            0x00, //
+            0x41, 0x00, 0x41, 0x37, 0x36, 0x40, 0x01, 0x00, // i32.store mem1[0] = 55
+            0x42, 0x00, // i64.const 0  (dst — mem0 is 64-bit)
+            0x41, 0x00, // i32.const 0  (src — mem1 is 32-bit)
+            0x41, 0x04, // i32.const 4  (n — i32, not both memories are 64-bit)
+            0xfc, 0x0a, 0x00, 0x01, // memory.copy dst=0 src=1
+            0x42, 0x00, 0x28, 0x02, 0x00, // i64.const 0 ; i32.load mem0[0]
+            0x0b,
+        ];
+        // 2 memories: mem0 = i64-indexed min 1, mem1 = 32-bit min 1.
+        let m = mem_func(&entry, vec![0x02, 0x04, 0x01, 0x00, 0x01], &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 55);
+    }
+
+    #[test]
+    fn mem64_simd_address_is_i64() {
+        // v128 loads/stores share `simd_mem_ea`, which is memory64-aware.
+        let entry = [
+            0x00, //
+            0x42, 0x00, // i64.const 0
+            0x41, 0x07, // i32.const 7
+            0xfd, 0x11, // i32x4.splat
+            0xfd, 0x0b, 0x04, 0x00, // v128.store align=4 offset=0
+            0x42, 0x00, // i64.const 0
+            0xfd, 0x00, 0x04, 0x00, // v128.load align=4 offset=0
+            0xfd, 0x1b, 0x02, // i32x4.extract_lane 2
+            0x0b,
+        ];
+        let m = mem_func(&entry, MEM64_SECTION.to_vec(), &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "a", &[]).unwrap()[0]), 7);
+    }
+
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {
         loop {
             let b = (v & 0x7f) as u8;

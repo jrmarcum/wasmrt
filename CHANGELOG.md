@@ -11,8 +11,31 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next (0.6.x interpreter slices): memory64 and exception handling — plus host imports (for WASI). Plus
-the deferred 0.5.x validation arms._
+_Next (0.6.x interpreter slices): exception handling — plus host imports (for WASI). Plus the deferred
+0.5.x validation arms._
+
+## [0.6.8] — Interpreter: memory64 (stage T5, slice 9)
+
+### Added
+- **memory64** — a module declaring a 64-bit-indexed linear memory (the limits `i64` flag) now runs end
+  to end and is conformance-tested. Addresses, counts, and page counts carry the memory's own index type:
+  loads/stores, `memory.size`/`grow`/`fill`/`copy`/`init`, active data-segment offsets, the `0xFE` atomic
+  family, and the `v128` load/store family all take an `i64` address on a 64-bit memory. A `memarg`'s
+  static offset may exceed `u32` on such a memory (a 32-bit memory still rejects that at validation), and
+  a 64-bit memory may declare up to 2^48 pages.
+- **Mixed-width `memory.copy`** — with one 64-bit and one 32-bit memory, each address keeps its own index
+  type and the count is the narrower of the two (`i32`), per the proposal.
+
+The 64-bit plumbing itself shipped with linear memory in **0.6.2** (the `is64` limits flag, `u64`
+`memarg` offsets, per-memory address typing in the validator, and the interpreter's index-type-aware
+address pop); this release proves it with 18 conformance vectors and lifts the use-case matrix cell.
+
+### Notes
+- **Tables stay 32-bit-indexed.** The memory64 proposal's 64-bit *table* extension is out of scope: the
+  frozen wazmrt oracle rejects an `i64` table type as malformed, and wasmrt matches that byte for byte.
+- A 64-bit memory may *declare* far more than this instance will back. The per-instance memory budget
+  (1 GiB) still applies, so a huge declared minimum fails instantiation with a memory-limit error rather
+  than attempting the allocation.
 
 ## [0.6.7] — Interpreter: threads / atomics (stage T5, slice 8)
 

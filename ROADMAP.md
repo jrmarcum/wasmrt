@@ -32,7 +32,7 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | **0.3.0** | Opcode IR | the shared pre-decoded instruction table | ✅ |
 | **0.4.0** | Decode | full module decoding | ✅ |
 | **0.5.0** | Validate | the spec type-checker (core language; SIMD/atomics/GC/EH in 0.5.x) | ✅ |
-| 0.6.x | Interpret | execution, landing one feature slice at a time (compute + memory + tables/reftypes + WasmGC + SIMD + multi-memory + threads/atomics done) | 🚧 |
+| 0.6.x | Interpret | execution, landing one feature slice at a time (compute + memory + tables/reftypes + WasmGC + SIMD + multi-memory + threads/atomics + memory64 done) | 🚧 |
 | 0.7.0 | Text toolchain | `.wat` assembler + `.wast` spec-script runner | ⬜ |
 | 0.8.0 | WASI + CLI | run real compiled programs | ⬜ |
 | 0.9.0 | C ABI | the `wasmrt.h` embedding surface | ⬜ |
@@ -56,7 +56,7 @@ Checked off as each capability lands and passes its gate.
 | SIMD (full `v128`, incl. relaxed) | ✅ | 0.6 |
 | Multi-memory | ✅ | 0.6 |
 | Threads / atomics | ✅ | 0.6 |
-| memory64 | ⬜ | 0.6 |
+| memory64 | ✅ | 0.6 |
 | Exception handling (exnref + legacy) | ⬜ | 0.6 |
 | Tail calls | ⬜ | 0.6 |
 

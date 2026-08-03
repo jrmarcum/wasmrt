@@ -1,7 +1,7 @@
 # Known Issues
 
 Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–8 done, v0.1.0–v0.6.7). This records the **inherited concerns** from the frozen wazmrt oracle, the
+1–9 done, v0.1.0–v0.6.8). This records the **inherited concerns** from the frozen wazmrt oracle, the
 **port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
 Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
@@ -34,6 +34,22 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
   add two stricter-than-normal traps: `UnalignedAtomic` (the effective address must be naturally aligned
   to the access width) and `ExpectedSharedMemory` (`wait*` requires a `shared` memory). The `shared` flag
   is decoded (limits bit 1) and now threaded onto the runtime `Memory`.
+- **memory64 needed no new engine code either** (v0.6.8) — the second "already worked, now proven" slice.
+  The 64-bit plumbing was built generically in the linear-memory slice (0.6.2): the `is64` limits flag,
+  `u64` `memarg` offsets, `mem_addr_ty` per-memory address typing in the validator, and the interpreter's
+  `pop_mem(is64)`. v0.6.8's deliverable is the 18 conformance vectors + the flipped use-case cell. Three
+  facts worth not drifting on: (1) **tables stay 32-bit-indexed** — the memory64 proposal's 64-bit *table*
+  extension is out of scope because the frozen oracle rejects an `i64` table type as `MalformedFlag`
+  (`module.rs read_table_type`), and wasmrt matches; (2) a `memarg` static offset above `u32` is legal
+  only on a 64-bit memory (`validate.rs check_mem_offset`) — a decode-time `u64` read, a validate-time
+  rule; (3) **`memory.copy` between a 64-bit and a 32-bit memory takes an `i32` count** (the narrower of
+  the two index types) while each address keeps its own — the one place the two widths meet.
+- **A memory64 memory may declare far more than the instance will back.** The declared minimum is checked
+  against the per-instance budget (`DEFAULT_MAX_MEMORY_BYTES`, 1 GiB) at instantiation, so a module
+  declaring e.g. 2^40 pages fails with `MemoryLimitExceeded` rather than attempting the allocation; the
+  size computation is overflow-checked before the budget test. Validation separately caps the *declared*
+  limits at the type ceiling (2^48 pages for a 64-bit memory, 2^16 for a 32-bit one). Guests that assume
+  a genuinely huge memory will not run until the budget is made configurable (a T8/T9 concern).
 - **Multi-memory needed no new engine code** (v0.6.6). The memory-index plumbing was built generically in
   the linear-memory slice (0.6.2) — `Vec<Memory>`, `memarg` memory index, `require_memory` in validate,
   cross-memory `memory.copy`, flag-`0x02` data segments, per-memory instantiation. v0.6.6's deliverable is

@@ -1330,6 +1330,117 @@ mod tests {
         assert_eq!(validate(&md), Err(ValidateError::InvalidAlignment));
     }
 
+    // --- memory64 typing ---
+
+    /// Section 5 declaring one memory64 memory (limits flag `0x04` = i64 index), min 1.
+    const MEM64: [u8; 5] = [0x05, 0x03, 0x01, 0x04, 0x01];
+
+    #[test]
+    fn mem64_address_must_be_i64() {
+        // (func) i32.const 0 ; i32.load ; drop  — an i32 address on a 64-bit memory.
+        let mut rest = vec![0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00];
+        rest.extend_from_slice(&MEM64);
+        rest.extend_from_slice(&[
+            0x0a, 0x0a, 0x01, 0x08, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x1a, 0x0b,
+        ]);
+        let md = decode(&m(&rest)).unwrap();
+        assert_eq!(validate(&md), Err(ValidateError::TypeMismatch));
+
+        // Same body with an i64 address (0x42 = i64.const) -> valid.
+        let mut ok = vec![0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00];
+        ok.extend_from_slice(&MEM64);
+        ok.extend_from_slice(&[
+            0x0a, 0x0a, 0x01, 0x08, 0x00, 0x42, 0x00, 0x28, 0x02, 0x00, 0x1a, 0x0b,
+        ]);
+        let md = decode(&m(&ok)).unwrap();
+        assert_eq!(validate(&md), Ok(()));
+    }
+
+    #[test]
+    fn mem64_size_yields_i64() {
+        // (func (result i32) memory.size) over a 64-bit memory -> the result is i64.
+        let mut rest = vec![0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00];
+        rest.extend_from_slice(&MEM64);
+        rest.extend_from_slice(&[0x0a, 0x06, 0x01, 0x04, 0x00, 0x3f, 0x00, 0x0b]);
+        let md = decode(&m(&rest)).unwrap();
+        assert_eq!(validate(&md), Err(ValidateError::TypeMismatch));
+
+        // Declaring the result as i64 (0x7e) -> valid.
+        let mut ok = vec![0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7e, 0x03, 0x02, 0x01, 0x00];
+        ok.extend_from_slice(&MEM64);
+        ok.extend_from_slice(&[0x0a, 0x06, 0x01, 0x04, 0x00, 0x3f, 0x00, 0x0b]);
+        let md = decode(&m(&ok)).unwrap();
+        assert_eq!(validate(&md), Ok(()));
+    }
+
+    #[test]
+    fn rejects_memarg_offset_above_u32_on_32bit_memory() {
+        // i32.load offset=2^32 against a 32-bit memory -> InvalidMemArgOffset.
+        let body = [
+            0x00, 0x41, 0x00, 0x28, 0x02, 0x80, 0x80, 0x80, 0x80, 0x10, 0x1a, 0x0b,
+        ];
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x05, 0x03, 0x01, 0x00, 0x01, // 32-bit memory, min 1
+            0x0a, 0x0e, 0x01, 0x0c, body[0], body[1], body[2], body[3], body[4], body[5],
+            body[6], body[7], body[8], body[9], body[10], body[11],
+        ]);
+        let md = decode(&bytes).unwrap();
+        assert_eq!(validate(&md), Err(ValidateError::InvalidMemArgOffset));
+
+        // The same offset on a 64-bit memory is legal (bounds are a runtime concern).
+        let mut body64 = body;
+        body64[1] = 0x42; // i64.const address
+        let mut ok = vec![0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00];
+        ok.extend_from_slice(&MEM64);
+        ok.extend_from_slice(&[0x0a, 0x0e, 0x01, 0x0c]);
+        ok.extend_from_slice(&body64);
+        let md = decode(&m(&ok)).unwrap();
+        assert_eq!(validate(&md), Ok(()));
+    }
+
+    #[test]
+    fn mem64_data_offset_must_be_i64() {
+        // An active data segment on a 64-bit memory needs an i64 offset const-expr.
+        let mut rest = MEM64.to_vec();
+        // data: 1 segment, flag 0 (active, memory 0), (i32.const 0), 1 byte
+        rest.extend_from_slice(&[0x0b, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x2a]);
+        let md = decode(&m(&rest)).unwrap();
+        assert_eq!(validate(&md), Err(ValidateError::TypeMismatch));
+
+        // i64.const (0x42) -> valid.
+        let mut ok = MEM64.to_vec();
+        ok.extend_from_slice(&[0x0b, 0x07, 0x01, 0x00, 0x42, 0x00, 0x0b, 0x01, 0x2a]);
+        let md = decode(&m(&ok)).unwrap();
+        assert_eq!(validate(&md), Ok(()));
+    }
+
+    #[test]
+    fn rejects_memory64_limits_above_the_type_ceiling() {
+        // min = 2^48 + 1 pages exceeds the 64-bit memory ceiling (2^48).
+        let bytes = m(&[
+            0x05, 0x09, 0x01, 0x04, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40,
+        ]);
+        let md = decode(&bytes).unwrap();
+        assert_eq!(validate(&md), Err(ValidateError::InvalidLimits));
+
+        // Exactly 2^48 is at the ceiling -> accepted.
+        let ok = m(&[
+            0x05, 0x09, 0x01, 0x04, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40,
+        ]);
+        let md = decode(&ok).unwrap();
+        assert_eq!(validate(&md), Ok(()));
+    }
+
+    #[test]
+    fn rejects_64bit_table() {
+        // Tables are 32-bit-indexed in the frozen oracle: an i64 table type is malformed.
+        // table section: 1 table, funcref (0x70), limits flag 0x04 (i64), min 1.
+        let bytes = m(&[0x04, 0x04, 0x01, 0x70, 0x04, 0x01]);
+        assert_eq!(decode(&bytes), Err(crate::types::DecodeError::MalformedFlag));
+    }
+
     /// Minimal unsigned-LEB128 encoder for the test byte-builders.
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {
         loop {

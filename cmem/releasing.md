@@ -108,9 +108,13 @@ bump + public trackers + **full `cmem/` sync** + release commit (checklist steps
 hands over the publish commands. Established rhythm since v0.1.0; the pre-publish doc-sync gate added
 2026-07-31 (v0.6.4) after earlier releases shipped with docs lagging a turn behind.
 
-## Status (2026-07-31)
+## Status (2026-08-03)
 
-- **Published through v0.6.6; v0.6.7 (threads/atomics) is prepped and awaiting the owner's publish.**
+- **Published through v0.6.6; v0.6.7 (threads/atomics) AND v0.6.8 (memory64) are prepped and awaiting the
+  owner's publish** — two releases are queued, so publish them **in version order** (0.6.7 then 0.6.8),
+  each in dependency order (`wasmrt-core` → `wasmrt-capi` → `wasmrt`). Note the working tree carries only
+  v0.6.8's version number; publishing v0.6.7's crates from HEAD is not possible, so if the intent is to
+  skip straight to v0.6.8, tag v0.6.7's commit for the GitHub release and publish v0.6.8 to crates.io.
   `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io through v0.6.6 (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
   WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6). The owner runs each publish; the rhythm (implement →
@@ -122,5 +126,5 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
   `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
   rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
   the published crates and add them on a future release if not.
-- **Next release after v0.6.7: v0.6.8 (T5 slice 9, memory64).** Per-release checklist above — full doc
-  sync before the publish handoff.
+- **Next release after v0.6.8: v0.6.9 (T5 slice 10, exception handling).** Per-release checklist above —
+  full doc sync before the publish handoff.

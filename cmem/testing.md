@@ -18,9 +18,18 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Current test state (2026-07-31, through T5 slice 8 / v0.6.7)
+## Current test state (2026-08-03, through T5 slice 9 / v0.6.8)
 
-**94 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+**112 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean. The
+memory64 slice added 18 — 12 execution vectors (i64-address store/load round-trip, `memory.size`/`grow`
+as i64, grow-past-max → −1, an i64 active data-segment offset, **an address of 2^32 trapping instead of
+wrapping** — the case that distinguishes a real 64-bit address from a truncated one — a `memarg` offset
+above `u32`, i64 bulk `fill`/`copy`, an i64 `memory.init` destination, i64 addresses through the `0xFE`
+atomic and `v128` families, a huge declared minimum hitting the instance budget, and a mixed 64/32-bit
+`memory.copy`) and 6 validator vectors (i32 address rejected / i64 accepted on a 64-bit memory,
+`memory.size` yielding i64, a `memarg` offset above `u32` rejected on a 32-bit memory but legal on a
+64-bit one, the data-segment offset's index type, limits above the 2^48 ceiling, and an `i64` table type
+rejected as malformed). The
 atomics slice added 5 — `i32.atomic.rmw.add`, `cmpxchg`, an unaligned-atomic trap, a `wait*`-on-non-shared
 trap, and a `wait32`-on-shared mismatch (returns 1). The
 SIMD slice added 10 hand-built vectors — splat+extract, `v128.const`+extract_lane_u, `i32x4.add`,

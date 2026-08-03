@@ -7,10 +7,10 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–8 (v0.6.0 integer,
+is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–9 (v0.6.0 integer,
 v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC, v0.6.5 SIMD,
-v0.6.6 multi-memory, v0.6.7 threads/atomics) DONE. Next: 0.6.x — memory64 → EH + host imports; + the
-deferred 0.5.x validation arms.**
+v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64) DONE. Next: 0.6.x — EH + host imports;
++ the deferred 0.5.x validation arms.**
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -137,7 +137,22 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     plain loads/stores) and **`ExpectedSharedMemory`** (`wait*` needs a shared memory). Ported from wazmrt
     `interp.zig execAtomic`. 94 core tests (5 new: rmw.add, cmpxchg, unaligned trap, wait-nonshared trap,
     wait-shared mismatch), clippy clean, native + wasm32 no_std. `[✅]`
-  - **0.6.x remaining slices (per the roadmap order below):** memory64 → EH. Also fold in host imports
+  - **Slice 9 — memory64. ✅ DONE 2026-08-03 (v0.6.8).** **Already-built infrastructure, now
+    conformance-tested + matrix-flipped** (the second such slice, after multi-memory). The 64-bit plumbing
+    landed with linear memory (0.6.2): `Limits.is64` (flag bit 2) decoded with `u64` min/max, the `memarg`
+    offset read as a full `u64`, `validate`'s `mem_addr_ty`/`check_mem_offset` typing each address per
+    memory, and the interpreter's `pop_mem(is64)` on every address/count. This slice proved it with **18
+    vectors** — 12 execution (i64 store/load, i64 `memory.size`/`grow` + grow-past-max → −1, i64 active
+    data offset, **address 2^32 traps instead of wrapping**, `memarg` offset > `u32`, i64 bulk
+    `fill`/`copy`, i64 `memory.init` dst, i64 addresses through the `0xFE` atomic and `v128` families,
+    huge declared minimum → `MemoryLimitExceeded`, mixed 64/32-bit `memory.copy`) and 6 validator (i32
+    address rejected / i64 accepted, `memory.size` → i64, offset > `u32` rejected on a 32-bit memory,
+    data-offset index type, limits above the 2^48 ceiling, `i64` table type malformed). **Scope
+    boundary held: tables stay 32-bit-indexed** — the proposal's 64-bit *table* extension has no oracle
+    (wazmrt `read_table_type` rejects it), so wasmrt rejects it identically. Verified end-to-end through
+    the CLI on a real memory64 module (`validation OK` → correct i64 result). No new engine code;
+    112 core tests, clippy clean, native + wasm32 no_std. `[✅]`
+  - **0.6.x remaining slices (per the roadmap order below):** EH. Also fold in host imports
     (WASI needs them) + the deferred 0.5.x validation arms.
     Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant
