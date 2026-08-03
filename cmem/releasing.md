@@ -110,14 +110,11 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-08-03)
 
-- **Published through v0.6.6; v0.6.7 (threads/atomics) AND v0.6.8 (memory64) are prepped and awaiting the
-  owner's publish** — two releases are queued, so publish them **in version order** (0.6.7 then 0.6.8),
-  each in dependency order (`wasmrt-core` → `wasmrt-capi` → `wasmrt`). Note the working tree carries only
-  v0.6.8's version number; publishing v0.6.7's crates from HEAD is not possible, so if the intent is to
-  skip straight to v0.6.8, tag v0.6.7's commit for the GitHub release and publish v0.6.8 to crates.io.
-  `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io through v0.6.6 (T0 v0.1.0 → T3 v0.4.0 →
+- **Published through v0.6.7; v0.6.8 (memory64) is prepped and awaiting the owner's publish.**
+  `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on crates.io through v0.6.7 (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
-  WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6). The owner runs each publish; the rhythm (implement →
+  WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6 → threads/atomics v0.6.7). The owner runs each publish;
+  the rhythm (implement →
   **full-doc prep** → owner publishes) holds. **v0.6.4 onward run under the pre-publish doc-sync gate, and
   each v0.6.4+ GitHub release was created automatically by the tag-triggered `.github/workflows/release.yml`**
   (push the `v*` tag → the release + notes publish themselves).
