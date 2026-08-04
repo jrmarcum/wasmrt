@@ -597,6 +597,36 @@ fn is_ref_type_form(s: &Sexpr) -> bool {
 
 // --- Module-level definitions -------------------------------------------------
 
+/// A GC field's storage: a value type, or one of the two packed integer widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Storage {
+    Val(V),
+    I8,
+    I16,
+}
+
+/// One GC struct field / array element type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GcField {
+    storage: Storage,
+    mutable: bool,
+}
+
+/// A type-section entry. Function types dominate, so they stay the common case; GC struct
+/// and array definitions carry their fields, and any of the three may declare a supertype.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeDef {
+    Func(Sig),
+    Struct(Vec<GcField>),
+    Array(GcField),
+}
+
+impl Default for TypeDef {
+    fn default() -> Self {
+        TypeDef::Func(Sig::default())
+    }
+}
+
 /// A function signature, interned in the type section.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Sig {
@@ -606,12 +636,21 @@ struct Sig {
 
 /// Intern a signature, returning its type index. An identical existing entry is reused, so
 /// inline `(param …)(result …)` annotations don't bloat the type section.
-fn intern_sig(sigs: &mut Vec<Sig>, sig: Sig) -> u32 {
-    if let Some(i) = sigs.iter().position(|s| *s == sig) {
+fn intern_sig(types: &mut Vec<TypeDef>, sig: Sig) -> u32 {
+    let want = TypeDef::Func(sig);
+    if let Some(i) = types.iter().position(|t| *t == want) {
         return i as u32;
     }
-    sigs.push(sig);
-    (sigs.len() - 1) as u32
+    types.push(want);
+    (types.len() - 1) as u32
+}
+
+/// The function signature at a type index, if that type is a function type.
+fn func_sig_at(types: &[TypeDef], ti: u32) -> Option<&Sig> {
+    match types.get(ti as usize) {
+        Some(TypeDef::Func(s)) => Some(s),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -720,7 +759,13 @@ struct ImportedTag {
 /// Everything collected from the module's fields, before section emission.
 #[derive(Default)]
 struct ModuleBuild {
-    sigs: Vec<Sig>,
+    types: Vec<TypeDef>,
+    /// Declared supertype of each type, index-aligned with `types`.
+    supers: Vec<Option<u32>>,
+    /// Field names of each struct type, index-aligned with `types` (empty for non-structs),
+    /// so `struct.get $T $field` can resolve a field by name — the form binaryen and
+    /// hand-written GC .wat actually emit.
+    field_names: Vec<Vec<Option<String>>>,
     type_names: Vec<Option<String>>,
 
     funcs: Vec<Func>,
@@ -813,7 +858,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
     }
     // Pre-pass B: the bodies, now that every type name resolves.
     for form in &type_forms {
-        parse_type_body(form, &b.type_names, &mut b.sigs)?;
+        parse_type_body(form, &b.type_names, &mut b.types, &mut b.supers, &mut b.field_names)?;
     }
 
     // Pass 1: the remaining definitions, in source order.
@@ -874,7 +919,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
             Some(ti) => ti,
             None => {
                 let sig = b.funcs[i].sig.clone();
-                intern_sig(&mut b.sigs, sig)
+                intern_sig(&mut b.types, sig)
             }
         };
         func_sigs.push(ti);
@@ -949,29 +994,134 @@ fn field_is_import(kw: &str, items: &[Sexpr]) -> bool {
     kw == "import" || (is_def_kind(kw) && items.iter().any(|s| eq_kw(s, "import")))
 }
 
-/// Parse a `(type …)` body into the shared signature table. Only function types are
-/// handled here; GC struct/array definitions land with the GC text forms.
+/// Parse a `(type …)` body into the type table: a function, struct or array definition,
+/// optionally wrapped in `(sub $super …)`.
+///
+/// A `(type …)` definition occupies its **own slot** even when an identical one already
+/// exists, so this pushes rather than interns — the declared index must match its position.
 fn parse_type_body(
     items: &[Sexpr],
     type_names: &[Option<String>],
-    sigs: &mut Vec<Sig>,
+    types: &mut Vec<TypeDef>,
+    supers: &mut Vec<Option<u32>>,
+    field_names: &mut Vec<Vec<Option<String>>>,
 ) -> Result<()> {
     let mut j = 1;
     if items.get(j).is_some_and(is_id) {
         j += 1;
     }
-    let l = want_list(nth(items, j)?)?;
-    match want_atom(nth(l, 0)?)? {
-        "func" => {
-            // A `(type …)` definition occupies its own slot even when an identical
-            // signature already exists, so push rather than intern — the declared index
-            // must match its position.
-            sigs.push(parse_sig(&l[1..], type_names, None)?);
-            Ok(())
+    let mut l = want_list(nth(items, j)?)?;
+    let mut super_ref = None;
+
+    // `(sub final? $super? <comptype>)` — the supertype list, then the real definition.
+    if want_atom(nth(l, 0)?)? == "sub" {
+        let mut k = 1;
+        if l.get(k).is_some_and(|s| eq_atom(s, "final")) {
+            k += 1;
         }
-        "struct" | "array" | "sub" => Err(Error::Unsupported("GC type definitions")),
-        _ => Err(Error::BadForm),
+        while let Some(s) = l.get(k) {
+            if s.as_list().is_some() {
+                break; // the composite type begins
+            }
+            super_ref = Some(resolve_by_name(type_names, s)?);
+            k += 1;
+        }
+        l = want_list(nth(l, k)?)?;
     }
+
+    let mut names: Vec<Option<String>> = Vec::new();
+    let def = match want_atom(nth(l, 0)?)? {
+        "func" => TypeDef::Func(parse_sig(&l[1..], type_names, None)?),
+        "struct" => {
+            let mut fields = Vec::new();
+            for f in &l[1..] {
+                parse_field_group(f, type_names, &mut fields, &mut names)?;
+            }
+            TypeDef::Struct(fields)
+        }
+        "array" => {
+            let mut fields = Vec::new();
+            parse_field_group(nth(l, 1)?, type_names, &mut fields, &mut names)?;
+            // An array has exactly one element type.
+            TypeDef::Array(*fields.first().ok_or(Error::BadForm)?)
+        }
+        _ => return Err(Error::BadForm),
+    };
+    types.push(def);
+    supers.push(super_ref);
+    field_names.push(names);
+    Ok(())
+}
+
+/// Parse one `(field …)` group — or a bare storage type, which the array and anonymous
+/// struct-field forms allow. `(field $x i32)` names one field; `(field i32 i64)` is an
+/// anonymous run.
+fn parse_field_group(
+    s: &Sexpr,
+    type_names: &[Option<String>],
+    out: &mut Vec<GcField>,
+    names: &mut Vec<Option<String>>,
+) -> Result<()> {
+    let Some(l) = s.as_list() else {
+        // A bare storage type: `(array i8)`.
+        out.push(parse_field_elem(s, type_names)?);
+        names.push(None);
+        return Ok(());
+    };
+    if l.first().map(|f| eq_atom(f, "field")) != Some(true) {
+        // `(array (mut i8))` — a `(mut …)` wrapper with no `field` keyword.
+        out.push(parse_field_elem(s, type_names)?);
+        names.push(None);
+        return Ok(());
+    }
+    if l.len() >= 3 && is_id(&l[1]) {
+        out.push(parse_field_elem(nth(l, 2)?, type_names)?);
+        names.push(l[1].as_atom().map(ToString::to_string));
+        return Ok(());
+    }
+    for f in &l[1..] {
+        out.push(parse_field_elem(f, type_names)?);
+        names.push(None);
+    }
+    Ok(())
+}
+
+/// A field element: an optional `(mut …)` wrapper around a storage type.
+fn parse_field_elem(s: &Sexpr, type_names: &[Option<String>]) -> Result<GcField> {
+    if eq_kw(s, "mut") {
+        return Ok(GcField {
+            storage: parse_storage(nth(want_list(s)?, 1)?, type_names)?,
+            mutable: true,
+        });
+    }
+    Ok(GcField {
+        storage: parse_storage(s, type_names)?,
+        mutable: false,
+    })
+}
+
+/// A storage type: the packed integer widths, else a value type.
+fn parse_storage(s: &Sexpr, type_names: &[Option<String>]) -> Result<Storage> {
+    if let Some(a) = s.as_atom() {
+        match a {
+            "i8" => return Ok(Storage::I8),
+            "i16" => return Ok(Storage::I16),
+            _ => {}
+        }
+    }
+    Ok(Storage::Val(parse_val_type(s, type_names)?))
+}
+
+/// Emit a GC field: its storage-type byte (packed `i8` = 0x78 / `i16` = 0x77, else the
+/// value type), then a mutability byte.
+fn emit_gc_field(out: &mut Vec<u8>, f: GcField) -> Result<()> {
+    match f.storage {
+        Storage::Val(v) => emit_val_type(out, v)?,
+        Storage::I8 => out.push(0x78),
+        Storage::I16 => out.push(0x77),
+    }
+    out.push(u8::from(f.mutable));
+    Ok(())
 }
 
 /// Parse `(param …)* (result …)*` into a signature. When `names` is given, each param's
@@ -1115,7 +1265,7 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     // referenced type, so locals resolve against the right param count.
     if let Some(ti) = type_ref {
         if sig.params.is_empty() && sig.results.is_empty() {
-            if let Some(s) = b.sigs.get(ti as usize) {
+            if let Some(s) = func_sig_at(&b.types, ti) {
                 sig = s.clone();
                 // The referenced type's params are unnamed here.
                 if local_names.is_empty() {
@@ -1126,7 +1276,7 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     }
 
     if let Some(r) = import {
-        let ti = type_ref.unwrap_or_else(|| intern_sig(&mut b.sigs, sig));
+        let ti = type_ref.unwrap_or_else(|| intern_sig(&mut b.types, sig));
         b.func_imports.push(ImportedFunc { r, type_index: ti });
         b.import_order.push(ImportKind::Func);
     } else {
@@ -1348,7 +1498,7 @@ fn parse_tag_type(items: &[Sexpr], b: &mut ModuleBuild) -> Result<u32> {
             _ => {}
         }
     }
-    Ok(type_ref.unwrap_or_else(|| intern_sig(&mut b.sigs, sig)))
+    Ok(type_ref.unwrap_or_else(|| intern_sig(&mut b.types, sig)))
 }
 
 fn parse_tag_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
@@ -1589,13 +1739,35 @@ fn emit_module(
     let mut out = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
     // 1 — types.
-    if !b.sigs.is_empty() {
+    if !b.types.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.sigs.len() as u64);
-        for s in &b.sigs {
-            c.push(0x60);
-            val_type_vec(&mut c, &s.params)?;
-            val_type_vec(&mut c, &s.results)?;
+        uleb(&mut c, b.types.len() as u64);
+        for (i, t) in b.types.iter().enumerate() {
+            // A declared supertype wraps the composite in `(sub …)`: 0x50 open, then a
+            // one-entry supertype vector.
+            if let Some(Some(sup)) = b.supers.get(i) {
+                c.push(0x50);
+                uleb(&mut c, 1);
+                uleb(&mut c, u64::from(*sup));
+            }
+            match t {
+                TypeDef::Func(s) => {
+                    c.push(0x60);
+                    val_type_vec(&mut c, &s.params)?;
+                    val_type_vec(&mut c, &s.results)?;
+                }
+                TypeDef::Struct(fields) => {
+                    c.push(0x5f);
+                    uleb(&mut c, fields.len() as u64);
+                    for f in fields {
+                        emit_gc_field(&mut c, *f)?;
+                    }
+                }
+                TypeDef::Array(f) => {
+                    c.push(0x5e);
+                    emit_gc_field(&mut c, *f)?;
+                }
+            }
         }
         push_section(&mut out, 1, &c);
     }
@@ -1808,8 +1980,10 @@ const MAX_CTRL_DEPTH: usize = 1024;
 /// borrows make that safe, and it is why bodies are encoded before any section is written.
 struct Ctx<'a> {
     out: Vec<u8>,
-    sigs: &'a mut Vec<Sig>,
+    types: &'a mut Vec<TypeDef>,
     type_names: &'a [Option<String>],
+    /// Per-type struct field names, so `struct.get $T $field` resolves by name.
+    field_names: &'a [Vec<Option<String>>],
     func_names: &'a [Option<String>],
     global_names: &'a [Option<String>],
     table_names: &'a [Option<String>],
@@ -1849,8 +2023,9 @@ macro_rules! ctx_for {
     ($b:expr, $locals:expr, $out:expr) => {
         Ctx {
             out: $out,
-            sigs: &mut $b.sigs,
+            types: &mut $b.types,
             type_names: &$b.type_names,
+            field_names: &$b.field_names,
             func_names: &$b.func_names,
             global_names: &$b.global_names,
             table_names: &$b.table_names,
@@ -1920,6 +2095,10 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     match kw.as_str() {
         "block" | "loop" => return emit_folded_block(ctx, &kw, l),
         "if" => return emit_folded_if(ctx, l),
+        "try_table" => return emit_try_table(ctx, l),
+        // The legacy folded `try` is structural — `(do …)` plus clause lists — so it is
+        // intercepted here rather than going through the opcode table.
+        "try" => return emit_folded_try(ctx, l),
         _ => {}
     }
     // The prefixed families are looked up before the single-byte table — their members
@@ -1933,8 +2112,28 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
         return Ok(());
     }
     let op = crate::opcode::Op::from_text_name(&kw).ok_or(Error::UnknownInstr)?;
-    if op == crate::opcode::Op::CallIndirect {
+    use crate::opcode::Op as O;
+    if op == O::CallIndirect {
         return emit_call_indirect(ctx, l, 1, true).map(|_| ());
+    }
+    // The cast ops take a **list** immediate — `(ref null? ht)` — which the atom/list split
+    // below would otherwise mistake for an operand and try to emit as an instruction.
+    match op {
+        O::RefTest | O::RefCastOp => {
+            let imm_end = 2.min(l.len());
+            for j in imm_end..l.len() {
+                emit_one(ctx, l, j)?;
+            }
+            return emit_op_with_immediates(ctx, op, &l[..imm_end], 1);
+        }
+        O::BrOnCast | O::BrOnCastFail => {
+            let imm_end = 4.min(l.len());
+            for j in imm_end..l.len() {
+                emit_one(ctx, l, j)?;
+            }
+            return emit_op_with_immediates(ctx, op, &l[..imm_end], 1);
+        }
+        _ => {}
     }
     // In a folded instruction the immediates are the **leading atoms** and the operands are
     // the parenthesized sub-expressions that follow — folded operands are always
@@ -2004,7 +2203,7 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool) ->
     }
     // An inline signature interns into the shared type table — bodies are encoded before
     // any section is written, so appending here is safe.
-    let ti = type_ref.unwrap_or_else(|| intern_sig(ctx.sigs, sig));
+    let ti = type_ref.unwrap_or_else(|| intern_sig(ctx.types, sig));
     if folded {
         for k in j..l.len() {
             emit_one(ctx, l, k)?;
@@ -2031,6 +2230,123 @@ fn emit_folded_block(ctx: &mut Ctx, kw: &str, l: &[Sexpr]) -> Result<()> {
     emit_seq(ctx, &l[j..])?;
     ctx.labels.pop();
     ctx.out.push(0x0b);
+    Ok(())
+}
+
+/// Emit a `try_table`'s catch vector: consume leading `(catch …)` / `(catch_ref …)` /
+/// `(catch_all …)` / `(catch_all_ref …)` clauses, then `count` followed by each clause
+/// (kind byte, tag index for the non-`all` kinds, label index). Advances `j` past them.
+fn emit_catch_clauses(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<()> {
+    let mut clauses: Vec<(u8, Option<u32>, u32)> = Vec::new();
+    while let Some(cl) = items.get(*j).and_then(Sexpr::as_list) {
+        let Some(kw) = cl.first().and_then(Sexpr::as_atom) else {
+            break;
+        };
+        let kind: u8 = match kw {
+            "catch" => 0,
+            "catch_ref" => 1,
+            "catch_all" => 2,
+            "catch_all_ref" => 3,
+            _ => break,
+        };
+        if kind < 2 {
+            let tag = resolve_by_name(ctx.tag_names, nth(cl, 1)?)?;
+            let label = ctx.resolve_label(nth(cl, 2)?)?;
+            clauses.push((kind, Some(tag), label));
+        } else {
+            let label = ctx.resolve_label(nth(cl, 1)?)?;
+            clauses.push((kind, None, label));
+        }
+        *j += 1;
+    }
+    uleb(&mut ctx.out, clauses.len() as u64);
+    for (kind, tag, label) in clauses {
+        ctx.out.push(kind);
+        if let Some(t) = tag {
+            uleb(&mut ctx.out, u64::from(t));
+        }
+        uleb(&mut ctx.out, u64::from(label));
+    }
+    Ok(())
+}
+
+/// `(try_table $l? blocktype? (catch …)* instr*)`
+fn emit_try_table(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
+    ctx.out.push(0x1f);
+    let mut j = 1;
+    let label = opt_name(l, &mut j);
+    let bt = parse_block_type(ctx, l, &mut j)?;
+    // Push the try_table's own label FIRST, so a `(catch … 0)` targeting it resolves to 0
+    // (label 0 = the try_table block) and outer labels are > 0.
+    if ctx.labels.len() >= MAX_CTRL_DEPTH {
+        return Err(Error::NestingTooDeep);
+    }
+    ctx.labels.push(label);
+    emit_block_type(ctx, bt)?;
+    emit_catch_clauses(ctx, l, &mut j)?;
+    emit_seq(ctx, &l[j..])?;
+    ctx.out.push(0x0b);
+    ctx.labels.pop();
+    Ok(())
+}
+
+/// The legacy folded `try` (older-LLVM exception handling):
+///   `(try $label? blocktype? (do instr*) (catch $tag instr*)* (catch_all instr*)?)`
+///
+/// Emits the flat legacy encoding the decoder consumes: `try bt … catch tag … catch_all …
+/// end`. The try's own label stays on the stack while the body and handlers are emitted, so
+/// a `$label` / `rethrow` operand resolves against the same depth model the interpreter
+/// uses at run time.
+fn emit_folded_try(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
+    let mut j = 1;
+    let label = opt_name(l, &mut j);
+    let bt = parse_block_type(ctx, l, &mut j)?;
+
+    let do_form = want_list(nth(l, j)?)?;
+    if do_form.first().map(|s| eq_atom(s, "do")) != Some(true) {
+        return Err(Error::BadImmediate);
+    }
+    j += 1;
+
+    ctx.out.push(0x06); // try
+    emit_block_type(ctx, bt)?;
+    if ctx.labels.len() >= MAX_CTRL_DEPTH {
+        return Err(Error::NestingTooDeep);
+    }
+    ctx.labels.push(label);
+    emit_seq(ctx, &do_form[1..])?;
+
+    // `(delegate $l)` forwards an exception to an enclosing try instead of running local
+    // handlers. The interpreter does not implement that routing and the validator rejects
+    // it, so assembling one would produce a module that validates yet silently mis-routes
+    // at run time — exactly the "bytes don't match the source" failure this assembler
+    // refuses everywhere else. Reject it here too, so all three agree.
+    if let Some(d) = l.get(j).and_then(Sexpr::as_list) {
+        if d.first().map(|s| eq_atom(s, "delegate")) == Some(true) {
+            return Err(Error::Unsupported("legacy `delegate` (rejected, matching the oracle)"));
+        }
+    }
+
+    while j < l.len() {
+        let cl = want_list(&l[j])?;
+        match cl.first().and_then(Sexpr::as_atom) {
+            Some("catch") => {
+                ctx.out.push(0x07);
+                let tag = resolve_by_name(ctx.tag_names, nth(cl, 1)?)?;
+                uleb(&mut ctx.out, u64::from(tag));
+                emit_seq(ctx, &cl[2..])?;
+            }
+            Some("catch_all") => {
+                ctx.out.push(0x19);
+                emit_seq(ctx, &cl[1..])?;
+            }
+            // Only catch / catch_all / delegate may follow `(do …)`.
+            _ => return Err(Error::BadImmediate),
+        }
+        j += 1;
+    }
+    ctx.out.push(0x0b);
+    ctx.labels.pop();
     Ok(())
 }
 
@@ -2084,6 +2400,50 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
                 return Err(Error::NestingTooDeep);
             }
             ctx.labels.push(label);
+            Ok(j)
+        }
+        O::TryLegacy => {
+            // Flat legacy `try $l? bt?` — the body, handlers and `end` follow as siblings.
+            let mut j = i + 1;
+            let label = opt_name(items, &mut j);
+            let bt = parse_block_type(ctx, items, &mut j)?;
+            ctx.out.push(0x06);
+            emit_block_type(ctx, bt)?;
+            if ctx.labels.len() >= MAX_CTRL_DEPTH {
+                return Err(Error::NestingTooDeep);
+            }
+            ctx.labels.push(label);
+            Ok(j)
+        }
+        O::CatchLegacy => {
+            ctx.out.push(0x07);
+            let tag = resolve_by_name(ctx.tag_names, nth(items, i + 1)?)?;
+            uleb(&mut ctx.out, u64::from(tag));
+            Ok(i + 2)
+        }
+        O::CatchAll => {
+            ctx.out.push(0x19);
+            Ok(i + 1)
+        }
+        // Rejected in the assembler, the validator and the interpreter alike — see
+        // `emit_folded_try`.
+        O::Delegate => Err(Error::Unsupported(
+            "legacy `delegate` (rejected, matching the oracle)",
+        )),
+        O::TryTable => {
+            // Flat: `try_table $l? blocktype? catch* … end`. Push the label before
+            // resolving the catch labels (label 0 = the try_table itself); the body
+            // instructions follow and the eventual `end` pops it.
+            let mut j = i + 1;
+            let label = opt_name(items, &mut j);
+            let bt = parse_block_type(ctx, items, &mut j)?;
+            ctx.out.push(0x1f);
+            if ctx.labels.len() >= MAX_CTRL_DEPTH {
+                return Err(Error::NestingTooDeep);
+            }
+            ctx.labels.push(label);
+            emit_block_type(ctx, bt)?;
+            emit_catch_clauses(ctx, items, &mut j)?;
             Ok(j)
         }
         O::Else => {
@@ -2207,6 +2567,56 @@ fn emit_op_with_immediates(
             };
             uleb(&mut ctx.out, sub);
         }
+        // The `0xFB` GC family. `ref.test`/`ref.cast` have separate non-null and nullable
+        // sub-opcodes; the decoder folds each pair into one `Op` and keeps nullability in
+        // the immediate, so the arm below re-selects the nullable sub-opcode.
+        O::StructNew
+        | O::StructNewDefault
+        | O::StructGet
+        | O::StructGetS
+        | O::StructGetU
+        | O::StructSet
+        | O::ArrayNew
+        | O::ArrayNewDefault
+        | O::ArrayNewFixed
+        | O::ArrayGet
+        | O::ArrayGetS
+        | O::ArrayGetU
+        | O::ArraySet
+        | O::ArrayLen
+        | O::RefTest
+        | O::RefCastOp
+        | O::BrOnCast
+        | O::BrOnCastFail
+        | O::RefI31
+        | O::I31GetS
+        | O::I31GetU => {
+            ctx.out.push(0xfb);
+            let sub: u64 = match op {
+                O::StructNew => 0x00,
+                O::StructNewDefault => 0x01,
+                O::StructGet => 0x02,
+                O::StructGetS => 0x03,
+                O::StructGetU => 0x04,
+                O::StructSet => 0x05,
+                O::ArrayNew => 0x06,
+                O::ArrayNewDefault => 0x07,
+                O::ArrayNewFixed => 0x08,
+                O::ArrayGet => 0x0b,
+                O::ArrayGetS => 0x0c,
+                O::ArrayGetU => 0x0d,
+                O::ArraySet => 0x0e,
+                O::ArrayLen => 0x0f,
+                O::RefTest => 0x14,
+                O::RefCastOp => 0x16,
+                O::BrOnCast => 0x18,
+                O::BrOnCastFail => 0x19,
+                O::RefI31 => 0x1c,
+                O::I31GetS => 0x1d,
+                _ => 0x1e,
+            };
+            uleb(&mut ctx.out, sub);
+        }
         _ => ctx.out.push(op as u8),
     }
 
@@ -2307,6 +2717,51 @@ fn emit_op_with_immediates(
                 .get(start)
                 .map_or(Ok(0), |s| resolve_by_name(ctx.mem_names, s))?;
             uleb(&mut ctx.out, u64::from(m));
+        }
+        // --- WasmGC ---
+        O::StructNew | O::StructNewDefault | O::ArrayNew | O::ArrayNewDefault | O::ArrayGet
+        | O::ArrayGetS | O::ArrayGetU | O::ArraySet => {
+            let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
+            uleb(&mut ctx.out, u64::from(ti));
+        }
+        O::ArrayNewFixed => {
+            let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
+            uleb(&mut ctx.out, u64::from(ti));
+            uleb(&mut ctx.out, u64::from(parse_index(imm(1)?)?));
+        }
+        O::StructGet | O::StructGetS | O::StructGetU | O::StructSet => {
+            let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
+            // A field may be named rather than numbered — `struct.get $T $field` is the
+            // form binaryen and hand-written GC `.wat` actually emit.
+            let names = ctx
+                .field_names
+                .get(ti as usize)
+                .map_or(&[][..], Vec::as_slice);
+            let fi = resolve_by_name(names, imm(1)?)?;
+            uleb(&mut ctx.out, u64::from(ti));
+            uleb(&mut ctx.out, u64::from(fi));
+        }
+        O::ArrayLen | O::RefI31 | O::I31GetS | O::I31GetU | O::RefEq => {}
+        O::RefTest | O::RefCastOp => {
+            let (nullable, code) = parse_ref_type_target(ctx, imm(0)?)?;
+            if nullable {
+                // Re-select the nullable sub-opcode (0x14→0x15 test, 0x16→0x17 cast); the
+                // prefix arm above wrote the non-null one.
+                let last = ctx.out.len() - 1;
+                ctx.out[last] = if op == O::RefTest { 0x15 } else { 0x17 };
+            }
+            sleb(&mut ctx.out, code);
+        }
+        O::BrOnCast | O::BrOnCastFail => {
+            let label = ctx.resolve_label(imm(0)?)?;
+            let (n1, c1) = parse_ref_type_target(ctx, imm(1)?)?;
+            let (n2, c2) = parse_ref_type_target(ctx, imm(2)?)?;
+            // Flags: bit 0 = source nullable, bit 1 = target nullable.
+            ctx.out
+                .push(u8::from(n1) | (u8::from(n2) << 1));
+            uleb(&mut ctx.out, u64::from(label));
+            sleb(&mut ctx.out, c1);
+            sleb(&mut ctx.out, c2);
         }
         O::RefNull => {
             let ht = want_atom(imm(0)?)?;
@@ -2949,6 +3404,62 @@ fn emit_atomic(
     Ok(j)
 }
 
+/// The binary code of an abstract heap type, as the `s33` a cast/`ref.null` immediate uses.
+fn abstract_heap_code(atom: &str) -> Option<i64> {
+    Some(match atom {
+        "nofunc" => -0x0d,
+        "noextern" => -0x0e,
+        "none" => -0x0f,
+        "func" => -0x10,
+        "extern" => -0x11,
+        "any" => -0x12,
+        "eq" => -0x13,
+        "i31" => -0x14,
+        "struct" => -0x15,
+        "array" => -0x16,
+        "exn" => -0x17,
+        "noexn" => -0x0c,
+        _ => return None,
+    })
+}
+
+/// Parse a `ref.test` / `ref.cast` / `br_on_cast` type target: `(ref null? ht)` or a bare
+/// heap type. Returns `(nullable, heap-type code)` — a concrete `$t` yields its type index
+/// as a non-negative code, an abstract head its negative one.
+fn parse_ref_type_target(ctx: &Ctx, s: &Sexpr) -> Result<(bool, i64)> {
+    // The list form `(ref null? ht)`.
+    if let Some(l) = s.as_list() {
+        if l.len() >= 2 && eq_atom(&l[0], "ref") {
+            let nullable = l.len() >= 3 && eq_atom(&l[1], "null");
+            let ht = &l[l.len() - 1];
+            let a = want_atom(ht)?;
+            if let Some(code) = abstract_heap_code(a) {
+                return Ok((nullable, code));
+            }
+            return Ok((nullable, i64::from(resolve_by_name(ctx.type_names, ht)?)));
+        }
+        return Err(Error::BadImmediate);
+    }
+    // A bare heap type: the `…ref` shorthands are nullable, bare heads are not.
+    let a = want_atom(s)?;
+    let (nullable, head) = match a {
+        "funcref" => (true, "func"),
+        "externref" => (true, "extern"),
+        "anyref" => (true, "any"),
+        "eqref" => (true, "eq"),
+        "i31ref" => (true, "i31"),
+        "structref" => (true, "struct"),
+        "arrayref" => (true, "array"),
+        "exnref" => (true, "exn"),
+        "nullref" => (true, "none"),
+        other => (false, other),
+    };
+    if let Some(code) = abstract_heap_code(head) {
+        return Ok((nullable, code));
+    }
+    Ok((false, i64::from(resolve_by_name(ctx.type_names, s)?)))
+}
+
 /// A block signature: either a type index or an inline result list.
 #[derive(Debug, Clone)]
 enum BlockTy {
@@ -2989,7 +3500,7 @@ fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<Blo
     }
     // Anything richer (params, or multiple results) needs a real type index. Interning is
     // safe because bodies are encoded before the type section is written.
-    Ok(BlockTy::TypeIndex(intern_sig(ctx.sigs, sig)))
+    Ok(BlockTy::TypeIndex(intern_sig(ctx.types, sig)))
 }
 
 fn emit_block_type(ctx: &mut Ctx, bt: BlockTy) -> Result<()> {
@@ -3524,6 +4035,218 @@ mod tests {
             Some(0x113)
         );
         assert_eq!(lookup_simd("i8x16.nope"), None);
+    }
+
+    // --- exception handling text forms ---
+
+    #[test]
+    fn runs_try_table_from_text() {
+        // The catch clause branches OUT of the try_table to the enclosing block, carrying
+        // the tag's payload. Label 0 is the try_table itself, so the block is label 1.
+        let src = r#"(module
+            (tag $e (param i32))
+            (func (export "f") (result i32)
+              (block $h (result i32)
+                (try_table (result i32) (catch $e $h)
+                  (i32.const 42)
+                  (throw $e)))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn runs_try_table_catch_all() {
+        // `catch_all` binds nothing, so its target label must be void; a local records
+        // which path ran.
+        let src = r#"(module
+            (tag $e (param i32))
+            (func (export "f") (result i32) (local $seen i32)
+              (local.set $seen (i32.const 7))
+              (block $h
+                (try_table (catch_all $h)
+                  (i32.const 1)
+                  (throw $e))
+                (local.set $seen (i32.const 99)))
+              (local.get $seen)))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 7);
+    }
+
+    #[test]
+    fn an_uncaught_throw_traps() {
+        let src = r#"(module
+            (tag $e (param i32))
+            (func (export "f") (result i32)
+              (i32.const 5)
+              (throw $e)))"#;
+        let bytes = asm_valid(src);
+        let md = crate::module::decode(&bytes).unwrap();
+        let mut inst = crate::interp::Instance::new(md).unwrap();
+        assert_eq!(
+            inst.invoke("f", &[]),
+            Err(crate::interp::Trap::UncaughtException)
+        );
+    }
+
+    #[test]
+    fn runs_the_legacy_folded_try() {
+        // `(try (do …) (catch $e …))` — the handler runs INSIDE the try and binds the
+        // payload, so the try's result comes from the handler.
+        let src = r#"(module
+            (tag $e (param i32))
+            (func (export "f") (result i32)
+              (try (result i32)
+                (do (i32.const 3) (throw $e))
+                (catch $e))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 3);
+    }
+
+    #[test]
+    fn runs_the_legacy_folded_catch_all() {
+        let src = r#"(module
+            (tag $e (param i32))
+            (func (export "f") (result i32)
+              (try (result i32)
+                (do (i32.const 1) (throw $e))
+                (catch_all (i32.const 55)))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 55);
+    }
+
+    #[test]
+    fn rejects_legacy_delegate_in_both_forms() {
+        // The assembler refuses `delegate` for the same reason the validator and the
+        // interpreter do — assembling it would yield a module that validates yet
+        // silently mis-routes at run time.
+        let folded = r#"(module
+            (tag $e (param i32))
+            (func (export "f")
+              (block
+                (try (do (i32.const 4) (throw $e)) (delegate 0)))))"#;
+        assert!(matches!(asm(folded), Err(Error::Unsupported(_))));
+
+        let flat = r#"(module
+            (tag $e (param i32))
+            (func (export "f")
+              block
+                try
+                  i32.const 4
+                  throw $e
+                delegate 0
+              end))"#;
+        assert!(matches!(asm(flat), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn runs_catch_ref_and_throw_ref() {
+        // `catch_ref` materializes an exnref alongside the payload; `throw_ref` re-raises
+        // it for the outer try_table to catch by value.
+        let src = r#"(module
+            (type $pair (func (result i32 exnref)))
+            (tag $e (param i32))
+            (func (export "f") (result i32)
+              (block $outer (result i32)
+                (try_table (catch $e $outer)
+                  (block $inner (type $pair)
+                    (try_table (catch_ref $e $inner)
+                      (i32.const 17)
+                      (throw $e))
+                    (unreachable))
+                  (throw_ref))
+                (i32.const 0))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 17);
+    }
+
+    // --- WasmGC text forms ---
+
+    #[test]
+    fn runs_a_gc_struct_from_text() {
+        let src = r#"(module
+            (type $point (struct (field $x (mut i32)) (field $y (mut i32))))
+            (func (export "f") (result i32) (local $p (ref null $point))
+              (local.set $p (struct.new $point (i32.const 40) (i32.const 2)))
+              (i32.add (struct.get $point $x (local.get $p))
+                       (struct.get $point $y (local.get $p)))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn resolves_struct_fields_by_name_or_number() {
+        let named = r#"(module
+            (type $t (struct (field $a i32) (field $b i32)))
+            (func (export "f") (result i32)
+              (struct.get $t $b (struct.new $t (i32.const 1) (i32.const 2)))))"#;
+        let numbered = r#"(module
+            (type $t (struct (field $a i32) (field $b i32)))
+            (func (export "f") (result i32)
+              (struct.get $t 1 (struct.new $t (i32.const 1) (i32.const 2)))))"#;
+        assert_eq!(asm(named).unwrap(), asm(numbered).unwrap());
+        assert_eq!(crate::interp::as_i32(run(named, "f", &[])[0]), 2);
+    }
+
+    #[test]
+    fn runs_a_gc_array_from_text() {
+        let src = r#"(module
+            (type $arr (array (mut i32)))
+            (func (export "f") (result i32) (local $a (ref null $arr))
+              (local.set $a (array.new $arr (i32.const 7) (i32.const 4)))
+              (array.set $arr (local.get $a) (i32.const 2) (i32.const 35))
+              (i32.add (array.get $arr (local.get $a) (i32.const 2))
+                       (array.len (local.get $a)))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 39); // 35 + length 4
+    }
+
+    #[test]
+    fn runs_a_packed_gc_array() {
+        // A packed `i8` element must be read with the sign-aware accessor.
+        let src = r#"(module
+            (type $bytes (array (mut i8)))
+            (func (export "f") (result i32) (local $a (ref null $bytes))
+              (local.set $a (array.new $bytes (i32.const 0) (i32.const 4)))
+              (array.set $bytes (local.get $a) (i32.const 0) (i32.const 200))
+              (array.get_u $bytes (local.get $a) (i32.const 0))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 200);
+    }
+
+    #[test]
+    fn runs_array_new_fixed() {
+        let src = r#"(module
+            (type $arr (array (mut i32)))
+            (func (export "f") (result i32)
+              (array.get $arr
+                (array.new_fixed $arr 3 (i32.const 10) (i32.const 20) (i32.const 30))
+                (i32.const 1))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 20);
+    }
+
+    #[test]
+    fn runs_i31_and_ref_test() {
+        let src = r#"(module
+            (func (export "f") (result i32)
+              (i32.add (i31.get_s (ref.i31 (i32.const 5)))
+                       (ref.test i31ref (ref.i31 (i32.const 1))))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 6); // 5 + test-true(1)
+    }
+
+    #[test]
+    fn runs_a_gc_subtype_declaration() {
+        // `(sub $base …)` emits the 0x50 wrapper, and a cast to the subtype succeeds.
+        let src = r#"(module
+            (type $base (sub (struct (field $x i32))))
+            (type $derived (sub $base (struct (field $x i32) (field $y i32))))
+            (func (export "f") (result i32)
+              (struct.get $derived $y
+                (ref.cast (ref $derived)
+                  (struct.new $derived (i32.const 1) (i32.const 41))))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 41);
     }
 
     #[test]
