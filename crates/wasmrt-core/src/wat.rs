@@ -1922,6 +1922,16 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
         "if" => return emit_folded_if(ctx, l),
         _ => {}
     }
+    // The prefixed families are looked up before the single-byte table — their members
+    // have no `Op` of their own.
+    if let Some((sub, imm)) = lookup_simd(&kw) {
+        emit_simd(ctx, sub, imm, l, 1, true)?;
+        return Ok(());
+    }
+    if let Some(sub) = lookup_atomic(&kw) {
+        emit_atomic(ctx, sub, l, 1, true)?;
+        return Ok(());
+    }
     let op = crate::opcode::Op::from_text_name(&kw).ok_or(Error::UnknownInstr)?;
     if op == crate::opcode::Op::CallIndirect {
         return emit_call_indirect(ctx, l, 1, true).map(|_| ());
@@ -2056,6 +2066,12 @@ fn emit_folded_if(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
 /// A flat instruction: `op imm*`, with the operands already on the stack.
 fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usize> {
     use crate::opcode::Op as O;
+    if let Some((sub, imm)) = lookup_simd(name) {
+        return emit_simd(ctx, sub, imm, items, i + 1, false);
+    }
+    if let Some(sub) = lookup_atomic(name) {
+        return emit_atomic(ctx, sub, items, i + 1, false);
+    }
     let op = O::from_text_name(name).ok_or(Error::UnknownInstr)?;
     match op {
         O::Block | O::Loop | O::If => {
@@ -2348,6 +2364,589 @@ fn emit_op_with_immediates(
         uleb(&mut ctx.out, offset);
     }
     Ok(())
+}
+
+// --- SIMD (`0xFD`) and atomics (`0xFE`) ---------------------------------------
+
+/// The immediate shape of a `0xFD` op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimdImm {
+    /// No immediate.
+    None,
+    /// A single lane index byte.
+    Lane,
+    /// 16 lane indices (`i8x16.shuffle`).
+    Shuffle,
+    /// A 16-byte literal (`v128.const`).
+    Const,
+    /// A memarg.
+    Mem,
+    /// A memarg followed by a lane index.
+    MemLane,
+}
+
+/// Map a `0xFD` mnemonic to its sub-opcode and immediate shape.
+///
+/// Kept as one table so a name and its sub-opcode cannot drift apart; the sub-opcodes are
+/// the same ones `decode_simd` reads and `simd_natural_align_log2` sizes.
+fn lookup_simd(name: &str) -> Option<(u32, SimdImm)> {
+    use SimdImm::{Const, Lane, Mem, MemLane, None as N, Shuffle};
+    const TBL: &[(&str, u32, SimdImm)] = &[
+        // loads / stores
+        ("v128.load", 0x00, Mem),
+        ("v128.load8x8_s", 0x01, Mem),
+        ("v128.load8x8_u", 0x02, Mem),
+        ("v128.load16x4_s", 0x03, Mem),
+        ("v128.load16x4_u", 0x04, Mem),
+        ("v128.load32x2_s", 0x05, Mem),
+        ("v128.load32x2_u", 0x06, Mem),
+        ("v128.load8_splat", 0x07, Mem),
+        ("v128.load16_splat", 0x08, Mem),
+        ("v128.load32_splat", 0x09, Mem),
+        ("v128.load64_splat", 0x0a, Mem),
+        ("v128.store", 0x0b, Mem),
+        ("v128.load32_zero", 0x5c, Mem),
+        ("v128.load64_zero", 0x5d, Mem),
+        ("v128.load8_lane", 0x54, MemLane),
+        ("v128.load16_lane", 0x55, MemLane),
+        ("v128.load32_lane", 0x56, MemLane),
+        ("v128.load64_lane", 0x57, MemLane),
+        ("v128.store8_lane", 0x58, MemLane),
+        ("v128.store16_lane", 0x59, MemLane),
+        ("v128.store32_lane", 0x5a, MemLane),
+        ("v128.store64_lane", 0x5b, MemLane),
+        // const / shuffle / swizzle / splat
+        ("v128.const", 0x0c, Const),
+        ("i8x16.shuffle", 0x0d, Shuffle),
+        ("i8x16.swizzle", 0x0e, N),
+        ("i8x16.splat", 0x0f, N),
+        ("i16x8.splat", 0x10, N),
+        ("i32x4.splat", 0x11, N),
+        ("i64x2.splat", 0x12, N),
+        ("f32x4.splat", 0x13, N),
+        ("f64x2.splat", 0x14, N),
+        // lane access
+        ("i8x16.extract_lane_s", 0x15, Lane),
+        ("i8x16.extract_lane_u", 0x16, Lane),
+        ("i8x16.replace_lane", 0x17, Lane),
+        ("i16x8.extract_lane_s", 0x18, Lane),
+        ("i16x8.extract_lane_u", 0x19, Lane),
+        ("i16x8.replace_lane", 0x1a, Lane),
+        ("i32x4.extract_lane", 0x1b, Lane),
+        ("i32x4.replace_lane", 0x1c, Lane),
+        ("i64x2.extract_lane", 0x1d, Lane),
+        ("i64x2.replace_lane", 0x1e, Lane),
+        ("f32x4.extract_lane", 0x1f, Lane),
+        ("f32x4.replace_lane", 0x20, Lane),
+        ("f64x2.extract_lane", 0x21, Lane),
+        ("f64x2.replace_lane", 0x22, Lane),
+        // comparisons
+        ("i8x16.eq", 0x23, N),
+        ("i8x16.ne", 0x24, N),
+        ("i8x16.lt_s", 0x25, N),
+        ("i8x16.lt_u", 0x26, N),
+        ("i8x16.gt_s", 0x27, N),
+        ("i8x16.gt_u", 0x28, N),
+        ("i8x16.le_s", 0x29, N),
+        ("i8x16.le_u", 0x2a, N),
+        ("i8x16.ge_s", 0x2b, N),
+        ("i8x16.ge_u", 0x2c, N),
+        ("i16x8.eq", 0x2d, N),
+        ("i16x8.ne", 0x2e, N),
+        ("i16x8.lt_s", 0x2f, N),
+        ("i16x8.lt_u", 0x30, N),
+        ("i16x8.gt_s", 0x31, N),
+        ("i16x8.gt_u", 0x32, N),
+        ("i16x8.le_s", 0x33, N),
+        ("i16x8.le_u", 0x34, N),
+        ("i16x8.ge_s", 0x35, N),
+        ("i16x8.ge_u", 0x36, N),
+        ("i32x4.eq", 0x37, N),
+        ("i32x4.ne", 0x38, N),
+        ("i32x4.lt_s", 0x39, N),
+        ("i32x4.lt_u", 0x3a, N),
+        ("i32x4.gt_s", 0x3b, N),
+        ("i32x4.gt_u", 0x3c, N),
+        ("i32x4.le_s", 0x3d, N),
+        ("i32x4.le_u", 0x3e, N),
+        ("i32x4.ge_s", 0x3f, N),
+        ("i32x4.ge_u", 0x40, N),
+        ("f32x4.eq", 0x41, N),
+        ("f32x4.ne", 0x42, N),
+        ("f32x4.lt", 0x43, N),
+        ("f32x4.gt", 0x44, N),
+        ("f32x4.le", 0x45, N),
+        ("f32x4.ge", 0x46, N),
+        ("f64x2.eq", 0x47, N),
+        ("f64x2.ne", 0x48, N),
+        ("f64x2.lt", 0x49, N),
+        ("f64x2.gt", 0x4a, N),
+        ("f64x2.le", 0x4b, N),
+        ("f64x2.ge", 0x4c, N),
+        ("i64x2.eq", 0xd6, N),
+        ("i64x2.ne", 0xd7, N),
+        ("i64x2.lt_s", 0xd8, N),
+        ("i64x2.gt_s", 0xd9, N),
+        ("i64x2.le_s", 0xda, N),
+        ("i64x2.ge_s", 0xdb, N),
+        // bitwise
+        ("v128.not", 0x4d, N),
+        ("v128.and", 0x4e, N),
+        ("v128.andnot", 0x4f, N),
+        ("v128.or", 0x50, N),
+        ("v128.xor", 0x51, N),
+        ("v128.bitselect", 0x52, N),
+        ("v128.any_true", 0x53, N),
+        // i8x16
+        ("i8x16.abs", 0x60, N),
+        ("i8x16.neg", 0x61, N),
+        ("i8x16.popcnt", 0x62, N),
+        ("i8x16.all_true", 0x63, N),
+        ("i8x16.bitmask", 0x64, N),
+        ("i8x16.narrow_i16x8_s", 0x65, N),
+        ("i8x16.narrow_i16x8_u", 0x66, N),
+        ("i8x16.shl", 0x6b, N),
+        ("i8x16.shr_s", 0x6c, N),
+        ("i8x16.shr_u", 0x6d, N),
+        ("i8x16.add", 0x6e, N),
+        ("i8x16.add_sat_s", 0x6f, N),
+        ("i8x16.add_sat_u", 0x70, N),
+        ("i8x16.sub", 0x71, N),
+        ("i8x16.sub_sat_s", 0x72, N),
+        ("i8x16.sub_sat_u", 0x73, N),
+        ("i8x16.min_s", 0x76, N),
+        ("i8x16.min_u", 0x77, N),
+        ("i8x16.max_s", 0x78, N),
+        ("i8x16.max_u", 0x79, N),
+        ("i8x16.avgr_u", 0x7b, N),
+        // extadd / q15 / dot
+        ("i16x8.extadd_pairwise_i8x16_s", 0x7c, N),
+        ("i16x8.extadd_pairwise_i8x16_u", 0x7d, N),
+        ("i32x4.extadd_pairwise_i16x8_s", 0x7e, N),
+        ("i32x4.extadd_pairwise_i16x8_u", 0x7f, N),
+        ("i16x8.q15mulr_sat_s", 0x82, N),
+        ("i32x4.dot_i16x8_s", 0xba, N),
+        // extmul
+        ("i16x8.extmul_low_i8x16_s", 0x9c, N),
+        ("i16x8.extmul_high_i8x16_s", 0x9d, N),
+        ("i16x8.extmul_low_i8x16_u", 0x9e, N),
+        ("i16x8.extmul_high_i8x16_u", 0x9f, N),
+        ("i32x4.extmul_low_i16x8_s", 0xbc, N),
+        ("i32x4.extmul_high_i16x8_s", 0xbd, N),
+        ("i32x4.extmul_low_i16x8_u", 0xbe, N),
+        ("i32x4.extmul_high_i16x8_u", 0xbf, N),
+        ("i64x2.extmul_low_i32x4_s", 0xdc, N),
+        ("i64x2.extmul_high_i32x4_s", 0xdd, N),
+        ("i64x2.extmul_low_i32x4_u", 0xde, N),
+        ("i64x2.extmul_high_i32x4_u", 0xdf, N),
+        // i16x8
+        ("i16x8.abs", 0x80, N),
+        ("i16x8.neg", 0x81, N),
+        ("i16x8.all_true", 0x83, N),
+        ("i16x8.bitmask", 0x84, N),
+        ("i16x8.narrow_i32x4_s", 0x85, N),
+        ("i16x8.narrow_i32x4_u", 0x86, N),
+        ("i16x8.extend_low_i8x16_s", 0x87, N),
+        ("i16x8.extend_high_i8x16_s", 0x88, N),
+        ("i16x8.extend_low_i8x16_u", 0x89, N),
+        ("i16x8.extend_high_i8x16_u", 0x8a, N),
+        ("i16x8.shl", 0x8b, N),
+        ("i16x8.shr_s", 0x8c, N),
+        ("i16x8.shr_u", 0x8d, N),
+        ("i16x8.add", 0x8e, N),
+        ("i16x8.add_sat_s", 0x8f, N),
+        ("i16x8.add_sat_u", 0x90, N),
+        ("i16x8.sub", 0x91, N),
+        ("i16x8.sub_sat_s", 0x92, N),
+        ("i16x8.sub_sat_u", 0x93, N),
+        ("i16x8.mul", 0x95, N),
+        ("i16x8.min_s", 0x96, N),
+        ("i16x8.min_u", 0x97, N),
+        ("i16x8.max_s", 0x98, N),
+        ("i16x8.max_u", 0x99, N),
+        ("i16x8.avgr_u", 0x9b, N),
+        // i32x4
+        ("i32x4.abs", 0xa0, N),
+        ("i32x4.neg", 0xa1, N),
+        ("i32x4.all_true", 0xa3, N),
+        ("i32x4.bitmask", 0xa4, N),
+        ("i32x4.extend_low_i16x8_s", 0xa7, N),
+        ("i32x4.extend_high_i16x8_s", 0xa8, N),
+        ("i32x4.extend_low_i16x8_u", 0xa9, N),
+        ("i32x4.extend_high_i16x8_u", 0xaa, N),
+        ("i32x4.shl", 0xab, N),
+        ("i32x4.shr_s", 0xac, N),
+        ("i32x4.shr_u", 0xad, N),
+        ("i32x4.add", 0xae, N),
+        ("i32x4.sub", 0xb1, N),
+        ("i32x4.mul", 0xb5, N),
+        ("i32x4.min_s", 0xb6, N),
+        ("i32x4.min_u", 0xb7, N),
+        ("i32x4.max_s", 0xb8, N),
+        ("i32x4.max_u", 0xb9, N),
+        // i64x2
+        ("i64x2.abs", 0xc0, N),
+        ("i64x2.neg", 0xc1, N),
+        ("i64x2.all_true", 0xc3, N),
+        ("i64x2.bitmask", 0xc4, N),
+        ("i64x2.extend_low_i32x4_s", 0xc7, N),
+        ("i64x2.extend_high_i32x4_s", 0xc8, N),
+        ("i64x2.extend_low_i32x4_u", 0xc9, N),
+        ("i64x2.extend_high_i32x4_u", 0xca, N),
+        ("i64x2.shl", 0xcb, N),
+        ("i64x2.shr_s", 0xcc, N),
+        ("i64x2.shr_u", 0xcd, N),
+        ("i64x2.add", 0xce, N),
+        ("i64x2.sub", 0xd1, N),
+        ("i64x2.mul", 0xd5, N),
+        // f32x4
+        ("f32x4.ceil", 0x67, N),
+        ("f32x4.floor", 0x68, N),
+        ("f32x4.trunc", 0x69, N),
+        ("f32x4.nearest", 0x6a, N),
+        ("f32x4.abs", 0xe0, N),
+        ("f32x4.neg", 0xe1, N),
+        ("f32x4.sqrt", 0xe3, N),
+        ("f32x4.add", 0xe4, N),
+        ("f32x4.sub", 0xe5, N),
+        ("f32x4.mul", 0xe6, N),
+        ("f32x4.div", 0xe7, N),
+        ("f32x4.min", 0xe8, N),
+        ("f32x4.max", 0xe9, N),
+        ("f32x4.pmin", 0xea, N),
+        ("f32x4.pmax", 0xeb, N),
+        ("f32x4.convert_i32x4_s", 0xfa, N),
+        ("f32x4.convert_i32x4_u", 0xfb, N),
+        ("f32x4.demote_f64x2_zero", 0x5e, N),
+        // f64x2
+        ("f64x2.ceil", 0x74, N),
+        ("f64x2.floor", 0x75, N),
+        ("f64x2.trunc", 0x7a, N),
+        ("f64x2.nearest", 0x94, N),
+        ("f64x2.abs", 0xec, N),
+        ("f64x2.neg", 0xed, N),
+        ("f64x2.sqrt", 0xef, N),
+        ("f64x2.add", 0xf0, N),
+        ("f64x2.sub", 0xf1, N),
+        ("f64x2.mul", 0xf2, N),
+        ("f64x2.div", 0xf3, N),
+        ("f64x2.min", 0xf4, N),
+        ("f64x2.max", 0xf5, N),
+        ("f64x2.pmin", 0xf6, N),
+        ("f64x2.pmax", 0xf7, N),
+        ("f64x2.promote_low_f32x4", 0x5f, N),
+        ("f64x2.convert_low_i32x4_s", 0xfe, N),
+        ("f64x2.convert_low_i32x4_u", 0xff, N),
+        // trunc_sat
+        ("i32x4.trunc_sat_f32x4_s", 0xf8, N),
+        ("i32x4.trunc_sat_f32x4_u", 0xf9, N),
+        ("i32x4.trunc_sat_f64x2_s_zero", 0xfc, N),
+        ("i32x4.trunc_sat_f64x2_u_zero", 0xfd, N),
+        // relaxed SIMD (sub-opcodes >= 0x100)
+        ("i8x16.relaxed_swizzle", 0x100, N),
+        ("i32x4.relaxed_trunc_f32x4_s", 0x101, N),
+        ("i32x4.relaxed_trunc_f32x4_u", 0x102, N),
+        ("i32x4.relaxed_trunc_f64x2_s_zero", 0x103, N),
+        ("i32x4.relaxed_trunc_f64x2_u_zero", 0x104, N),
+        ("f32x4.relaxed_madd", 0x105, N),
+        ("f32x4.relaxed_nmadd", 0x106, N),
+        ("f64x2.relaxed_madd", 0x107, N),
+        ("f64x2.relaxed_nmadd", 0x108, N),
+        ("i8x16.relaxed_laneselect", 0x109, N),
+        ("i16x8.relaxed_laneselect", 0x10a, N),
+        ("i32x4.relaxed_laneselect", 0x10b, N),
+        ("i64x2.relaxed_laneselect", 0x10c, N),
+        ("f32x4.relaxed_min", 0x10d, N),
+        ("f32x4.relaxed_max", 0x10e, N),
+        ("f64x2.relaxed_min", 0x10f, N),
+        ("f64x2.relaxed_max", 0x110, N),
+        ("i16x8.relaxed_q15mulr_s", 0x111, N),
+        ("i16x8.relaxed_dot_i8x16_i7x16_s", 0x112, N),
+        ("i32x4.relaxed_dot_i8x16_i7x16_add_s", 0x113, N),
+    ];
+    TBL.iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|&(_, s, i)| (s, i))
+}
+
+/// Map a `0xFE` mnemonic to its sub-opcode.
+///
+/// The rmw/cmpxchg families are **generated** from their layout rather than transcribed:
+/// groups of 7 from `0x1e`, ordered add/sub/and/or/xor/xchg/cmpxchg, each laid out
+/// `[i32.full, i64.full, i32.8, i32.16, i64.8, i64.16, i64.32]`. That is the same layout
+/// `atomic_natural_align_log2` and `atomic_val_type` encode, so describing it once keeps
+/// the three in step.
+fn lookup_atomic(name: &str) -> Option<u32> {
+    const FIXED: &[(&str, u32)] = &[
+        ("memory.atomic.notify", 0x00),
+        ("memory.atomic.wait32", 0x01),
+        ("memory.atomic.wait64", 0x02),
+        ("atomic.fence", 0x03),
+        ("i32.atomic.load", 0x10),
+        ("i64.atomic.load", 0x11),
+        ("i32.atomic.load8_u", 0x12),
+        ("i32.atomic.load16_u", 0x13),
+        ("i64.atomic.load8_u", 0x14),
+        ("i64.atomic.load16_u", 0x15),
+        ("i64.atomic.load32_u", 0x16),
+        ("i32.atomic.store", 0x17),
+        ("i64.atomic.store", 0x18),
+        ("i32.atomic.store8", 0x19),
+        ("i32.atomic.store16", 0x1a),
+        ("i64.atomic.store8", 0x1b),
+        ("i64.atomic.store16", 0x1c),
+        ("i64.atomic.store32", 0x1d),
+    ];
+    if let Some(&(_, s)) = FIXED.iter().find(|(n, _)| *n == name) {
+        return Some(s);
+    }
+    // `<ty>.atomic.rmw<width>.<op>[_u]`
+    let (ty, rest) = match name.strip_prefix("i32.atomic.rmw") {
+        Some(r) => (0u32, r),
+        None => (1u32, name.strip_prefix("i64.atomic.rmw")?),
+    };
+    let (width, rest) = if let Some(r) = rest.strip_prefix('8') {
+        (8u32, r)
+    } else if let Some(r) = rest.strip_prefix("16") {
+        (16, r)
+    } else if let Some(r) = rest.strip_prefix("32") {
+        (32, r)
+    } else {
+        (0, rest) // the full-width form
+    };
+    let op_name = rest.strip_prefix('.')?;
+    // A sub-width op is spelled with a `_u` suffix; the full-width one is not.
+    let op_name = if width == 0 {
+        op_name
+    } else {
+        op_name.strip_suffix("_u")?
+    };
+    let group = match op_name {
+        "add" => 0u32,
+        "sub" => 1,
+        "and" => 2,
+        "or" => 3,
+        "xor" => 4,
+        "xchg" => 5,
+        "cmpxchg" => 6,
+        _ => return None,
+    };
+    // Position within the group.
+    let idx = match (ty, width) {
+        (0, 0) => 0u32,
+        (1, 0) => 1,
+        (0, 8) => 2,
+        (0, 16) => 3,
+        (1, 8) => 4,
+        (1, 16) => 5,
+        (1, 32) => 6,
+        _ => return None, // e.g. `i32.atomic.rmw32.*` does not exist
+    };
+    Some(0x1e + group * 7 + idx)
+}
+
+/// Parse a lane / shuffle index atom into a byte. `(i32x4.extract_lane 999)` must be a
+/// clean `BadImmediate`, not a wrapping cast — the decoder range-checks the lane against
+/// the op's lane count, but only if the byte it sees is the one the source wrote.
+fn simd_lane_byte(s: &Sexpr) -> Result<u8> {
+    let v = parse_i64_str(want_atom(s)?)?;
+    u8::try_from(v as u32).map_err(|_| Error::BadImmediate)
+}
+
+/// Parse a `v128.const` literal: a shape keyword then its lanes.
+fn parse_v128_const(items: &[Sexpr], mut j: usize, out: &mut [u8; 16]) -> Result<usize> {
+    let shape = want_atom(nth(items, j)?)?;
+    j += 1;
+    let lanes: usize = match shape {
+        "i8x16" => 16,
+        "i16x8" => 8,
+        "i32x4" | "f32x4" => 4,
+        "i64x2" | "f64x2" => 2,
+        _ => return Err(Error::BadImmediate),
+    };
+    for k in 0..lanes {
+        let s = nth(items, j)?;
+        let a = want_atom(s)?;
+        match shape {
+            "f32x4" => {
+                let bits = parse_f32_bits(a).ok_or(Error::BadNumber)?;
+                out[k * 4..k * 4 + 4].copy_from_slice(&bits.to_le_bytes());
+            }
+            "f64x2" => {
+                let bits = parse_f64_bits(a).ok_or(Error::BadNumber)?;
+                out[k * 8..k * 8 + 8].copy_from_slice(&bits.to_le_bytes());
+            }
+            "i8x16" => out[k] = parse_i64_str(a)? as u8,
+            "i16x8" => {
+                let v = parse_i64_str(a)? as u16;
+                out[k * 2..k * 2 + 2].copy_from_slice(&v.to_le_bytes());
+            }
+            "i32x4" => {
+                let v = parse_i64_str(a)? as u32;
+                out[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            _ => unreachable!(),
+        }
+        j += 1;
+    }
+    Ok(j)
+}
+
+/// Emit a memarg's alignment + optional memory index + offset.
+fn emit_memarg_bytes(out: &mut Vec<u8>, align_log2: u32, mem: u32, offset: u64) {
+    if mem == 0 {
+        uleb(out, u64::from(align_log2));
+    } else {
+        uleb(out, u64::from(align_log2 | 0x40));
+        uleb(out, u64::from(mem));
+    }
+    uleb(out, offset);
+}
+
+/// Collect the leading memarg-ish atom run: `memidx? offset=? align=?`, plus a trailing
+/// lane index for the `*_lane` ops.
+///
+/// Only `offset=`/`align=` atoms and index-like atoms are taken. Stopping at anything else
+/// matters in the FLAT form, where `items` is the whole sibling instruction sequence: a
+/// following mnemonic (`drop`, `i32.const`) is not index-like and must NOT be swallowed as
+/// a memory or lane index.
+fn parse_simd_memarg(
+    ctx: &Ctx,
+    items: &[Sexpr],
+    mut j: usize,
+    want_lane: bool,
+    default_align: u32,
+) -> Result<(usize, u32, u32, u64, u8)> {
+    let mut atoms: Vec<&Sexpr> = Vec::new();
+    while let Some(s) = items.get(j) {
+        let Some(a) = s.as_atom() else { break };
+        let is_memarg = a.starts_with("offset=") || a.starts_with("align=");
+        if !is_memarg && !is_index_or_id(a) {
+            break;
+        }
+        atoms.push(s);
+        j += 1;
+    }
+    let mut lane = 0u8;
+    if want_lane {
+        let last = atoms.pop().ok_or(Error::BadImmediate)?;
+        lane = simd_lane_byte(last)?;
+    }
+    let mut align = default_align;
+    let mut offset = 0u64;
+    let mut mem = 0u32;
+    for (k, s) in atoms.iter().enumerate() {
+        let a = s.as_atom().unwrap_or_default();
+        if let Some(v) = a.strip_prefix("offset=") {
+            offset = parse_u64_str(v)?;
+        } else if let Some(v) = a.strip_prefix("align=") {
+            let bytes = parse_u64_str(v)?;
+            if bytes == 0 || !bytes.is_power_of_two() {
+                return Err(Error::BadImmediate);
+            }
+            align = bytes.trailing_zeros();
+        } else if k == 0 {
+            mem = resolve_by_name(ctx.mem_names, s)?; // memidx precedes the memarg
+        } else {
+            return Err(Error::BadImmediate);
+        }
+    }
+    Ok((j, align, mem, offset, lane))
+}
+
+/// Emit a `0xFD` SIMD op: parse its immediate, emit operand sub-expressions (folded form
+/// only), then `0xFD sub imm`. Returns the index just past the instruction's forms.
+fn emit_simd(
+    ctx: &mut Ctx,
+    sub: u32,
+    imm: SimdImm,
+    items: &[Sexpr],
+    start: usize,
+    folded: bool,
+) -> Result<usize> {
+    let mut j = start;
+    let mut lane = 0u8;
+    let mut cbytes = [0u8; 16];
+    let mut align = crate::opcode::simd_natural_align_log2(sub);
+    let mut offset = 0u64;
+    let mut mem = 0u32;
+    match imm {
+        SimdImm::None => {}
+        SimdImm::Lane => {
+            lane = simd_lane_byte(nth(items, j)?)?;
+            j += 1;
+        }
+        SimdImm::Shuffle => {
+            for slot in &mut cbytes {
+                *slot = simd_lane_byte(nth(items, j)?)?;
+                j += 1;
+            }
+        }
+        SimdImm::Const => j = parse_v128_const(items, j, &mut cbytes)?,
+        SimdImm::Mem | SimdImm::MemLane => {
+            let want_lane = imm == SimdImm::MemLane;
+            let r = parse_simd_memarg(ctx, items, j, want_lane, align)?;
+            j = r.0;
+            align = r.1;
+            mem = r.2;
+            offset = r.3;
+            lane = r.4;
+        }
+    }
+    if folded {
+        while j < items.len() {
+            j = emit_one(ctx, items, j)?;
+        }
+    }
+    ctx.out.push(0xfd);
+    uleb(&mut ctx.out, u64::from(sub));
+    match imm {
+        SimdImm::None => {}
+        SimdImm::Lane => ctx.out.push(lane),
+        SimdImm::Shuffle | SimdImm::Const => ctx.out.extend_from_slice(&cbytes),
+        SimdImm::Mem => emit_memarg_bytes(&mut ctx.out, align, mem, offset),
+        SimdImm::MemLane => {
+            emit_memarg_bytes(&mut ctx.out, align, mem, offset);
+            ctx.out.push(lane);
+        }
+    }
+    Ok(j)
+}
+
+/// Emit a `0xFE` atomic op. Every member except `atomic.fence` carries a memarg, and its
+/// alignment must be **exactly** natural — so an omitted `align=` defaults to that, and a
+/// wrong explicit one is the validator's to reject.
+fn emit_atomic(
+    ctx: &mut Ctx,
+    sub: u32,
+    items: &[Sexpr],
+    start: usize,
+    folded: bool,
+) -> Result<usize> {
+    let mut j = start;
+    let natural = crate::opcode::atomic_natural_align_log2(sub);
+    if sub == 0x03 {
+        // `atomic.fence` carries a reserved zero byte, no memarg.
+        if folded {
+            while j < items.len() {
+                j = emit_one(ctx, items, j)?;
+            }
+        }
+        ctx.out.push(0xfe);
+        uleb(&mut ctx.out, u64::from(sub));
+        ctx.out.push(0x00);
+        return Ok(j);
+    }
+    let (mut j, align, mem, offset, _) = parse_simd_memarg(ctx, items, j, false, natural)?;
+    if folded {
+        while j < items.len() {
+            j = emit_one(ctx, items, j)?;
+        }
+    }
+    ctx.out.push(0xfe);
+    uleb(&mut ctx.out, u64::from(sub));
+    emit_memarg_bytes(&mut ctx.out, align, mem, offset);
+    Ok(j)
 }
 
 /// A block signature: either a type index or an inline result list.
@@ -2811,6 +3410,120 @@ mod tests {
               (call_indirect (param i32) (result i32) (i32.const 21) (i32.const 0))))"#;
         let r = run(src, "go", &[]);
         assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    // --- SIMD / atomics text forms ---
+
+    #[test]
+    fn runs_simd_from_text() {
+        let src = r#"(module
+            (func (export "f") (result i32)
+              (i32x4.extract_lane 0
+                (i32x4.add (i32x4.splat (i32.const 20)) (i32x4.splat (i32.const 22))))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn runs_a_v128_const() {
+        let src = r#"(module
+            (func (export "f") (result i32)
+              (i32x4.extract_lane 2 (v128.const i32x4 1 2 3 4))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 3);
+    }
+
+    #[test]
+    fn runs_a_v128_const_of_floats() {
+        let src = r#"(module
+            (func (export "f") (result f32)
+              (f32x4.extract_lane 1 (v128.const f32x4 1.5 2.5 3.5 4.5))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_f32(r[0]), 2.5);
+    }
+
+    #[test]
+    fn runs_a_simd_shuffle() {
+        // Take lane 0 of the second operand (indices 16..31 select from it).
+        let src = r#"(module
+            (func (export "f") (result i32)
+              (i8x16.extract_lane_u 0
+                (i8x16.shuffle 16 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+                  (i8x16.splat (i32.const 1))
+                  (i8x16.splat (i32.const 9))))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 9);
+    }
+
+    #[test]
+    fn runs_simd_load_and_store() {
+        let src = r#"(module
+            (memory 1)
+            (func (export "f") (result i32)
+              (v128.store (i32.const 0) (i32x4.splat (i32.const 7)))
+              (i32x4.extract_lane 3 (v128.load (i32.const 0)))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 7);
+    }
+
+    #[test]
+    fn runs_a_simd_load_lane() {
+        // `v128.load8_lane` takes a memarg AND a trailing lane index.
+        let src = r#"(module
+            (memory 1)
+            (data (i32.const 0) "\2a")
+            (func (export "f") (result i32)
+              (i8x16.extract_lane_u 5
+                (v128.load8_lane 0 5 (i32.const 0) (i8x16.splat (i32.const 0))))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn runs_atomics_from_text() {
+        let src = r#"(module
+            (memory 1)
+            (func (export "f") (result i32)
+              (i32.store (i32.const 0) (i32.const 10))
+              (drop (i32.atomic.rmw.add (i32.const 0) (i32.const 5)))
+              (i32.atomic.load (i32.const 0))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 15);
+    }
+
+    #[test]
+    fn atomic_names_cover_the_generated_families() {
+        // The rmw/cmpxchg names are generated from the layout, so spot-check the corners
+        // of every group against the sub-opcodes the decoder reads.
+        assert_eq!(lookup_atomic("i32.atomic.rmw.add"), Some(0x1e));
+        assert_eq!(lookup_atomic("i64.atomic.rmw.add"), Some(0x1f));
+        assert_eq!(lookup_atomic("i32.atomic.rmw8.add_u"), Some(0x20));
+        assert_eq!(lookup_atomic("i64.atomic.rmw32.add_u"), Some(0x24));
+        assert_eq!(lookup_atomic("i32.atomic.rmw.sub"), Some(0x25));
+        assert_eq!(lookup_atomic("i32.atomic.rmw.and"), Some(0x2c));
+        assert_eq!(lookup_atomic("i32.atomic.rmw.or"), Some(0x33));
+        assert_eq!(lookup_atomic("i32.atomic.rmw.xor"), Some(0x3a));
+        assert_eq!(lookup_atomic("i32.atomic.rmw.xchg"), Some(0x41));
+        assert_eq!(lookup_atomic("i32.atomic.rmw.cmpxchg"), Some(0x48));
+        assert_eq!(lookup_atomic("i64.atomic.rmw32.cmpxchg_u"), Some(0x4e));
+        assert_eq!(lookup_atomic("atomic.fence"), Some(0x03));
+        // Forms that do not exist must not be invented.
+        assert_eq!(lookup_atomic("i32.atomic.rmw32.add_u"), None);
+        assert_eq!(lookup_atomic("i32.atomic.rmw.add_u"), None);
+        assert_eq!(lookup_atomic("i32.atomic.rmw8.add"), None);
+        assert_eq!(lookup_atomic("i32.atomic.rmw.frob"), None);
+    }
+
+    #[test]
+    fn simd_names_resolve_to_their_sub_opcodes() {
+        assert_eq!(lookup_simd("v128.load").map(|(s, _)| s), Some(0x00));
+        assert_eq!(lookup_simd("i32x4.add").map(|(s, _)| s), Some(0xae));
+        assert_eq!(lookup_simd("f64x2.pmax").map(|(s, _)| s), Some(0xf7));
+        assert_eq!(
+            lookup_simd("i32x4.relaxed_dot_i8x16_i7x16_add_s").map(|(s, _)| s),
+            Some(0x113)
+        );
+        assert_eq!(lookup_simd("i8x16.nope"), None);
     }
 
     #[test]
