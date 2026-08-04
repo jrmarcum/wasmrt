@@ -13,10 +13,10 @@ v0.6.9 exception handling) completed the interpreter's wasm-proposal coverage; *
 now assembles, decodes, type-checks and runs WebAssembly, scoring **98.4% on the official spec
 testsuite**. **Next: T7 — host imports + WASI preview 1.**
 
-## ✅ v0.7.0 is COMPLETE and prepped for publish (2026-08-03)
+## ✅ v0.7.0 — SHIPPED and published (2026-08-03)
 
-T6 landed in full, so the hold is lifted. **v0.7.0 = the text toolchain (T6) + the validator's deferred
-typing arms (completing T4).** Commits: `8a37795` validator arms · `5e82d08` sexpr · `5fd58bd` opcode
+**v0.7.0 = the text toolchain (T6) + the validator's deferred typing arms (completing T4).** Live on
+crates.io; tag `v0.7.0` pushed. Commits: `8a37795` validator arms · `5e82d08` sexpr · `5fd58bd` opcode
 name map · `523ad3d` assembler core · `6d8d56c` floats + block types · `4e4b4de` SIMD/atomics ·
 `0a7dc7e` GC/EH text forms · the `.wast` runner · the conformance runner + its findings.
 

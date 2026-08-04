@@ -116,15 +116,15 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-08-03)
 
-- **Published through v0.6.9; v0.7.0 is COMPLETE and prepped, awaiting the owner's publish.** The hold is
-  lifted: 0.7.0 ships the validator completion **and all of T6** (the text toolchain), as the owner
-  decided on 2026-08-03. Spec-suite conformance at release: **98.4%** (54,509 passing). The remaining
-  punch-list is deliberately deferred to after T7 — see `known-issues.md`.
+- **Published through v0.7.0 — no release is pending.** 0.7.0 shipped the validator completion **and all
+  of T6** (the text toolchain) together, as the owner decided on 2026-08-03. Spec-suite conformance at
+  release: **98.4%** (54,509 passing); the remaining punch-list is deliberately deferred to after T7 —
+  see `known-issues.md`.
   `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
-  crates.io through v0.6.9 (T0 v0.1.0 → T3 v0.4.0 →
+  crates.io through v0.7.0 (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
   WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6 → threads/atomics v0.6.7 → memory64 v0.6.8 →
-  exception handling v0.6.9). The owner
+  exception handling v0.6.9 → **text toolchain + validator completion v0.7.0**). The owner
   runs each publish; the rhythm (implement →
   **full-doc prep** → owner publishes) holds. **v0.6.4 onward run under the pre-publish doc-sync gate, and
   each v0.6.4+ GitHub release was created automatically by the tag-triggered `.github/workflows/release.yml`**
