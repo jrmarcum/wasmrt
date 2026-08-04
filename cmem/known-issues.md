@@ -34,6 +34,17 @@ Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirr
   add two stricter-than-normal traps: `UnalignedAtomic` (the effective address must be naturally aligned
   to the access width) and `ExpectedSharedMemory` (`wait*` requires a `shared` memory). The `shared` flag
   is decoded (limits bit 1) and now threaded onto the runtime `Memory`.
+- **A DEBUG build can overflow the native stack before the 512-frame recursion cap fires**
+  (found 2026-08-03 while building the `.wast` runner, via `assert_exhaustion` on a self-recursive
+  function). `MAX_CALL_DEPTH = 512` matches the frozen oracle exactly, and **release builds are fine** —
+  the guard fires and yields `CallStackExhausted` as it should. But the interpreter recurses on the host
+  stack (`call_function` → `run` → `call_function`), and an un-inlined debug `run` frame is large enough
+  that 512 of them can exhaust a default 8 MB thread stack first, aborting the process.
+  **Deliberately NOT "fixed" by lowering the cap** — that would diverge from the oracle on legal
+  deeply-recursive programs, and the release profile (what ships) behaves correctly. The runner's own
+  test spawns a 32 MB-stack thread. **Revisit at T8**: an embedder linking the debug cdylib is exposed,
+  so the real fix is either a configurable depth limit on the C ABI or shrinking the per-frame footprint.
+  Worth re-measuring once the spec suite runs, since it has deeper recursion cases than the hand vectors.
 - **`delegate` is rejected, inherited from the oracle** (`interp.rs throw_exception`, v0.6.9). `delegate l`
   re-raises an exception "at label `l`", routing that can SKIP handlers an ordinary outward unwind would
   run. wazmrt does not implement that label arithmetic (no reference impl remained to verify it against)
