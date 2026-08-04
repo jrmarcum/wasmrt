@@ -36,6 +36,45 @@ assembler-in-reverse. Interpreter, **not** JIT/AOT (smallest-binary + wasm-frees
 Perf ladder: A → A.5 (superinstructions / partial-eval) → B (register machine) → JIT (native-only,
 later). Decide A→B with benchmarks, not upfront.
 
+## 🔒 Safety directive — no unsafe constructs migrated from Zig (owner, 2026-08-04)
+
+**The rule.** The Rust codebase shall carry **no unsafe constructs inherited from the Zig oracle.** A
+boundary-faithful port must reproduce wazmrt's *observable behavior*, never its *memory-safety posture* —
+Zig's manual allocation, raw pointers, arena lifetimes and `@intCast` (UB in ReleaseFast) have no
+business surviving translation.
+
+**The sequencing constraint, equally binding: prove the concept first.** Do **not** refactor for safety
+on unproven code. A hardening pass over behavior that isn't yet demonstrated correct trades one unknown
+for two — you can no longer tell a safety regression from a behavior bug. Establish provability
+(conformance + parity green), *then* harden. Hence the order: finish **T7**, review the known issues,
+*then* take this on before/with **T8**.
+
+**Baseline as of 2026-08-04 (measured, v0.7.0):** **zero `unsafe` blocks or `unsafe fn` in the whole
+workspace.** The only two occurrences of the token are `#[unsafe(no_mangle)]` in `wasmrt-capi` (an
+Edition 2024 *attribute syntax* asserting symbol-name uniqueness — not an unsafe block) and the word
+"unsafely" in an `interp.rs` comment. The property currently holds **by discipline, not by enforcement**:
+there is no `unsafe_code` lint in `[workspace.lints]`. Making it structural is the cheap win.
+
+**What "unsafe constructs from Zig" actually means in a Rust port** — the literal `unsafe` keyword is the
+*least* of it, and today's spec-suite run proved the point. The real inherited-hazard surface is:
+
+1. **Panic on guest-controlled input.** Rust turns Zig's UB into a panic, which for an embedder is a
+   process abort — a denial-of-service, not a safety win. The suite found exactly this: `unreachable!()`
+   on `v128.const i64x2`, and an `item[0]` index on an empty `(item)`. **A library must reject a module,
+   never abort its host.** `unwrap`/`expect`/`unreachable!`/direct indexing on any guest-derived path are
+   all in scope.
+2. **Silent truncation where Zig used `@intCast`.** `as u8` / `as u32` quietly discard bits where the
+   oracle would have hit UB. Also found by the suite: out-of-range `i32.const` becoming 0, and
+   `v128.const i8x16 0x100` becoming all-zero lanes. Wrong values are worse than rejections.
+3. **Unchecked index/length arithmetic** that happens to be in-bounds today.
+
+**The T8 nuance to settle before starting.** The C ABI *cannot* be zero-unsafe: `extern "C"` entry points
+receive raw pointers from C callers and must dereference them. So the realistic target is
+**`unsafe_code = "forbid"` in `wasmrt-core` (achievable today) and `deny` + narrowly-scoped, individually
+justified `allow` in `wasmrt-capi`**, with every such site documented as to what the caller must
+guarantee. "Zero unsafe everywhere" would be a promise the FFI boundary makes impossible to keep;
+"zero unsafe in the engine, confined and audited at the boundary" is both achievable and honest.
+
 ## Invariants that must survive the port (easy to get wrong)
 
 - **`ValType` = a `u32` newtype**, concrete refs bit-packed (bit31 concrete, bit30 nullable, bits28-29
