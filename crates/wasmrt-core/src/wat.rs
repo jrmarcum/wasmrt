@@ -200,14 +200,30 @@ fn opt_name(items: &[Sexpr], j: &mut usize) -> Option<String> {
 
 // --- Numeric literals ---------------------------------------------------------
 
-/// Strip `_` digit separators, which the text format allows inside a number.
-fn strip_seps(s: &str) -> String {
-    s.chars().filter(|&c| c != '_').collect()
+/// Strip `_` digit separators.
+///
+/// The text format allows a separator only **between two digits** — `1_000` is a number,
+/// but `_100`, `99_`, `1__000` and `1_.0` are all malformed. Blindly filtering `_` out
+/// accepts every one of those, which is how the first conformance run passed a pile of
+/// `assert_malformed` literals it should have rejected.
+fn strip_seps(s: &str) -> Result<String> {
+    let b = s.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        if c != b'_' {
+            continue;
+        }
+        let prev_ok = i > 0 && b[i - 1].is_ascii_alphanumeric();
+        let next_ok = i + 1 < b.len() && b[i + 1].is_ascii_alphanumeric();
+        if !prev_ok || !next_ok {
+            return Err(Error::BadNumber);
+        }
+    }
+    Ok(s.chars().filter(|&c| c != '_').collect())
 }
 
 /// Parse an unsigned integer literal: decimal, or `0x`-prefixed hex.
 fn parse_u64_str(s: &str) -> Result<u64> {
-    let t = strip_seps(s);
+    let t = strip_seps(s)?;
     let (digits, radix) = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         Some(rest) => (rest, 16),
         None => (t.as_str(), 10),
@@ -221,7 +237,7 @@ fn parse_u64_str(s: &str) -> Result<u64> {
 /// Parse a signed integer literal, accepting the unsigned spelling of the same bit
 /// pattern (`i32.const 0xffffffff` is `-1`).
 fn parse_i64_str(s: &str) -> Result<i64> {
-    let t = strip_seps(s);
+    let t = strip_seps(s)?;
     let (neg, body) = match t.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, t.strip_prefix('+').unwrap_or(t.as_str())),
@@ -340,6 +356,10 @@ fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
         return Some(bits);
     }
 
+    // Validate separator placement for BOTH the decimal and hex paths up front — the hex
+    // mantissa loop below skips `_` as it goes, so it would otherwise accept `_1.0`.
+    strip_seps(lit).ok()?;
+
     let mut s = lit;
     let mut neg = false;
     if let Some(rest) = s.strip_prefix('-') {
@@ -352,7 +372,7 @@ fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
     // Not hex → decimal (and `inf` / `nan`), which Rust rounds correctly.
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"));
     let Some(body) = hex else {
-        let cleaned = strip_seps(s);
+        let cleaned = strip_seps(s).ok()?;
         let v: f64 = if f.mant_bits == 23 {
             f64::from(cleaned.parse::<f32>().ok()?)
         } else {
@@ -497,6 +517,25 @@ pub(crate) fn parse_f32_bits(lit: &str) -> Option<u32> {
 /// Parse a WAT `f64` literal to its bit pattern.
 pub(crate) fn parse_f64_bits(lit: &str) -> Option<u64> {
     parse_float_bits(lit, F64_FMT)
+}
+
+/// Parse an integer literal and check it fits `bits` wide.
+///
+/// The text format lets a constant be written signed **or** unsigned, so the accepted
+/// range is `-2^(bits-1) ..= 2^bits - 1`. Anything outside is "constant out of range" — a
+/// rejection, not a silent truncation: `(i32.const 0x100000000)` must not quietly become 0,
+/// and `(v128.const i8x16 0x100 …)` must not become all-zero lanes.
+fn parse_int_fit(a: &str, bits: u32) -> Result<i64> {
+    let v = parse_i64_str(a)?;
+    if bits >= 64 {
+        return Ok(v);
+    }
+    let min = -(1i64 << (bits - 1));
+    let max = (1i64 << bits) - 1;
+    if v < min || v > max {
+        return Err(Error::BadNumber);
+    }
+    Ok(v)
 }
 
 fn parse_index(s: &Sexpr) -> Result<u32> {
@@ -716,6 +755,11 @@ struct ElemDef {
     /// Each entry is a const-expr producing a reference.
     items: Vec<Vec<Sexpr>>,
     declarative: bool,
+    /// Does this segment need the **expression** encoding (flags 4–7: a reftype plus
+    /// const-exprs) rather than the **index** encoding (flags 0–3: an elemkind byte plus
+    /// bare function indices)? True when the source used `(item …)` / folded expressions
+    /// or a non-funcref element type, false for the bare `func $a $b` shorthand.
+    use_exprs: bool,
 }
 
 /// Which kind an import declares. Recorded in source order so the import section can be
@@ -1463,6 +1507,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             elem_type,
             items: entries,
             declarative: false,
+            use_exprs: false,
         });
         b.elem_names.push(None);
         return Ok(());
@@ -1644,11 +1689,16 @@ fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         j += 1;
     }
     let mut entries: Vec<Vec<Sexpr>> = Vec::new();
+    // A bare atom entry is the `func $a $b` index shorthand; anything else is an
+    // expression, which forces the expression encoding for the whole segment.
+    let mut use_exprs = elem_type != V::FUNCREF;
     for s in &items[j..] {
         if eq_kw(s, "item") {
             entries.push(want_list(s)?[1..].to_vec());
+            use_exprs = true;
         } else if s.as_list().is_some() {
             entries.push(vec![s.clone()]);
+            use_exprs = true;
         } else {
             entries.push(vec![Sexpr::List(vec![
                 Sexpr::Atom("ref.func".to_string()),
@@ -1662,6 +1712,7 @@ fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         elem_type,
         items: entries,
         declarative,
+        use_exprs,
     });
     b.elem_names.push(name);
     Ok(())
@@ -2622,10 +2673,10 @@ fn emit_op_with_immediates(
 
     match op {
         O::I32Const => {
-            let v = parse_i64_str(want_atom(imm(0)?)?)?;
+            let v = parse_int_fit(want_atom(imm(0)?)?, 32)?;
             sleb(&mut ctx.out, i64::from(v as i32));
         }
-        O::I64Const => sleb(&mut ctx.out, parse_i64_str(want_atom(imm(0)?)?)?),
+        O::I64Const => sleb(&mut ctx.out, parse_int_fit(want_atom(imm(0)?)?, 64)?),
         O::F32Const => {
             let bits = parse_f32_bits(want_atom(imm(0)?)?).ok_or(Error::BadNumber)?;
             ctx.out.extend_from_slice(&bits.to_le_bytes());
@@ -3231,16 +3282,23 @@ fn parse_v128_const(items: &[Sexpr], mut j: usize, out: &mut [u8; 16]) -> Result
                 let bits = parse_f64_bits(a).ok_or(Error::BadNumber)?;
                 out[k * 8..k * 8 + 8].copy_from_slice(&bits.to_le_bytes());
             }
-            "i8x16" => out[k] = parse_i64_str(a)? as u8,
+            "i8x16" => out[k] = parse_int_fit(a, 8)? as u8,
             "i16x8" => {
-                let v = parse_i64_str(a)? as u16;
+                let v = parse_int_fit(a, 16)? as u16;
                 out[k * 2..k * 2 + 2].copy_from_slice(&v.to_le_bytes());
             }
             "i32x4" => {
-                let v = parse_i64_str(a)? as u32;
+                let v = parse_int_fit(a, 32)? as u32;
                 out[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes());
             }
-            _ => unreachable!(),
+            "i64x2" => {
+                let v = parse_int_fit(a, 64)? as u64;
+                out[k * 8..k * 8 + 8].copy_from_slice(&v.to_le_bytes());
+            }
+            // Never `unreachable!()`: a shape the lane-count match accepts but this one
+            // forgets would panic the whole embedder rather than reject one module. That
+            // is exactly how `v128.const i64x2` aborted the first conformance run.
+            _ => return Err(Error::BadImmediate),
         }
         j += 1;
     }
@@ -3512,37 +3570,60 @@ fn emit_block_type(ctx: &mut Ctx, bt: BlockTy) -> Result<()> {
     Ok(())
 }
 
+/// Emit one element segment (§5.5.12). The eight flag forms split into two families, and
+/// mixing them produces bytes no decoder can read:
+///
+/// | flag | mode | selector | entries |
+/// | --- | --- | --- | --- |
+/// | 0 | active, table 0 | offset | func indices |
+/// | 1 | passive | **elemkind byte** | func indices |
+/// | 2 | active, explicit table | tableidx, offset, **elemkind byte** | func indices |
+/// | 3 | declarative | **elemkind byte** | func indices |
+/// | 4 | active, table 0 | offset | const-exprs |
+/// | 5 | passive | **reftype** | const-exprs |
+/// | 6 | active, explicit table | tableidx, offset, **reftype** | const-exprs |
+/// | 7 | declarative | **reftype** | const-exprs |
+///
+/// The index family carries a one-byte *elemkind* (`0x00` = funcref); the expression family
+/// carries a full *reftype*. Emitting flag 2 with a reftype and const-exprs — the bug the
+/// first conformance run caught — made every `table_copy`/`table_init` module undecodable.
 fn emit_elem_segment(c: &mut Vec<u8>, e: &ElemDef, b: &mut ModuleBuild) -> Result<()> {
-    let uses_exprs = e.elem_type != V::FUNCREF;
-    match (&e.offset, e.declarative) {
-        (Some(off), _) => {
-            if e.table_index == 0 && !uses_exprs {
-                uleb(c, 0); // active, table 0, funcref, ref.func entries
-                emit_const_expr(c, off, b)?;
-            } else {
-                uleb(c, 2); // active with an explicit table index
-                uleb(c, u64::from(e.table_index));
-                emit_const_expr(c, off, b)?;
+    let explicit_table = e.table_index != 0;
+    let flag: u64 = match (&e.offset, e.declarative, e.use_exprs) {
+        (Some(_), _, false) => u64::from(explicit_table) * 2, // 0 or 2
+        (Some(_), _, true) => 4 + u64::from(explicit_table) * 2, // 4 or 6
+        (None, false, false) => 1,
+        (None, true, false) => 3,
+        (None, false, true) => 5,
+        (None, true, true) => 7,
+    };
+    uleb(c, flag);
+    if let Some(off) = &e.offset {
+        if explicit_table {
+            uleb(c, u64::from(e.table_index));
+        }
+        emit_const_expr(c, off, b)?;
+        // Forms 0 and 4 (table 0) carry no selector at all.
+        if explicit_table {
+            if e.use_exprs {
                 emit_val_type(c, e.elem_type)?;
+            } else {
+                c.push(0x00); // elemkind: funcref
             }
         }
-        (None, true) => {
-            uleb(c, 3); // declarative
-            c.push(0x00); // elemkind: funcref
-        }
-        (None, false) => {
-            uleb(c, 1); // passive
-            c.push(0x00); // elemkind: funcref
-        }
+    } else if e.use_exprs {
+        emit_val_type(c, e.elem_type)?;
+    } else {
+        c.push(0x00); // elemkind: funcref
     }
+
     uleb(c, e.items.len() as u64);
     for item in &e.items {
-        if e.offset.is_some() && e.table_index == 0 && !uses_exprs {
-            // The `ref.func $f` shorthand encodes as a bare function index.
-            let l = want_list(&item[0])?;
-            uleb(c, u64::from(resolve_by_name(&b.func_names, nth(l, 1)?)?));
+        if e.use_exprs {
+            emit_const_expr(c, item, b)?;
         } else {
-            let l = want_list(&item[0])?;
+            // The `ref.func $f` shorthand encodes as just the function index.
+            let l = want_list(nth(item, 0)?)?;
             uleb(c, u64::from(resolve_by_name(&b.func_names, nth(l, 1)?)?));
         }
     }
@@ -4247,6 +4328,67 @@ mod tests {
                   (struct.new $derived (i32.const 1) (i32.const 41))))))"#;
         let r = run(src, "f", &[]);
         assert_eq!(crate::interp::as_i32(r[0]), 41);
+    }
+
+    // --- regressions the first spec-suite run found ---
+
+    #[test]
+    fn v128_const_i64x2_does_not_panic() {
+        // The lane-count match accepted `i64x2` but the lane-writing match forgot it and
+        // fell into `unreachable!()`, aborting the whole conformance run on the first
+        // `v128.const i64x2`. A library must reject a module, never panic the embedder.
+        let src = r#"(module (func (export "f") (result i64)
+              (i64x2.extract_lane 1 (v128.const i64x2 7 42))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i64(r[0]), 42);
+        // An unknown shape is a clean rejection, not a panic.
+        assert!(asm(r#"(module (func (v128.const i9x9 1) drop))"#).is_err());
+    }
+
+    #[test]
+    fn active_elem_with_an_explicit_table_uses_the_index_encoding() {
+        // Element segments split into two families: flags 0-3 carry an elemkind BYTE and
+        // bare function indices, flags 4-7 a reftype and const-exprs. Emitting flag 2 with
+        // a reftype and exprs produced bytes the decoder could not read — every
+        // table_copy/table_init module in the suite failed to build.
+        let src = r#"(module
+            (type $v (func (result i32)))
+            (table $t0 4 funcref)
+            (table $t1 4 funcref)
+            (func $a (type $v) (i32.const 11))
+            (func $b (type $v) (i32.const 22))
+            (elem (table $t1) (i32.const 1) func $a $b)
+            (func (export "f") (result i32)
+              (call_indirect $t1 (type $v) (i32.const 2))))"#;
+        let r = run(src, "f", &[]);
+        assert_eq!(crate::interp::as_i32(r[0]), 22); // slot 2 holds $b
+    }
+
+    #[test]
+    fn digit_separators_must_sit_between_digits() {
+        // `1_000` is a number; `_100`, `99_`, `1__000` and `1_.0` are malformed. Blindly
+        // filtering `_` accepted all of them.
+        assert_eq!(parse_u64_str("1_000").unwrap(), 1000);
+        for bad in ["_100", "99_", "1__000", "_1"] {
+            assert!(parse_u64_str(bad).is_err(), "should reject `{bad}`");
+        }
+        assert!(parse_f64_bits("1_000.5").is_some());
+        for bad in ["_100", "1.0_", "1_.0", "1__000", "+_100"] {
+            assert!(parse_f64_bits(bad).is_none(), "should reject `{bad}`");
+        }
+    }
+
+    #[test]
+    fn constants_out_of_range_are_rejected_not_truncated() {
+        // The text format allows a constant signed OR unsigned, so the range is
+        // -2^(n-1) ..= 2^n - 1; outside that is "constant out of range". Truncating
+        // instead would quietly turn `(i32.const 0x100000000)` into 0.
+        assert!(asm(r#"(module (func (i32.const 0x100000000) drop))"#).is_err());
+        assert!(asm(r#"(module (func (i32.const -0x80000001) drop))"#).is_err());
+        assert!(asm(r#"(module (func (i32.const 0xffffffff) drop))"#).is_ok()); // unsigned spelling
+        assert!(asm(r#"(module (func (v128.const i8x16 256 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0) drop))"#).is_err());
+        assert!(asm(r#"(module (func (v128.const i8x16 -129 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0) drop))"#).is_err());
+        assert!(asm(r#"(module (func (v128.const i8x16 255 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0) drop))"#).is_ok());
     }
 
     #[test]

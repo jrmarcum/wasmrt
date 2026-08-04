@@ -396,15 +396,24 @@ enum Rejection {
 }
 
 impl Rejection {
+    /// Which rejections satisfy this assertion. `is_unsupported` cases are filtered out by
+    /// the caller before this is consulted, so anything reaching here is a real verdict on
+    /// the module.
+    ///
+    /// Both kinds accept an **assembler** rejection: for a text module, failing to
+    /// assemble *is* the text format rejecting it. wasmrt also resolves statically some
+    /// things the spec defers to validation (an unknown `$name`, say), so an
+    /// `assert_invalid` module may be turned away a stage earlier than the spec's
+    /// pipeline would — still a correct "rejected" outcome.
     fn accepts(self, e: &BuildErr) -> bool {
         match self {
-            // A malformed binary can also be caught by the validator's decode step, so
-            // accept either rejection for `assert_invalid`.
-            Rejection::Invalid => matches!(e, BuildErr::Validate(_) | BuildErr::Decode(_)),
-            Rejection::Malformed => matches!(
+            Rejection::Invalid => matches!(
                 e,
-                BuildErr::Decode(_) | BuildErr::Assemble(wat::Error::Parse(_))
+                BuildErr::Validate(_) | BuildErr::Decode(_) | BuildErr::Assemble(_)
             ),
+            Rejection::Malformed => {
+                matches!(e, BuildErr::Decode(_) | BuildErr::Assemble(_))
+            }
         }
     }
 }

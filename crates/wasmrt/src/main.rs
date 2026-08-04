@@ -26,7 +26,131 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("run") => run_export(&args[2..]),
+        Some("wat") => assemble_wat(&args[2..]),
+        Some("wast") => run_wast(&args[2..]),
         Some(path) => summarize(path),
+    }
+}
+
+/// `wasmrt wat <file.wat> [-o out.wasm]` — assemble text to a binary.
+fn assemble_wat(rest: &[String]) -> ExitCode {
+    let Some(path) = rest.first() else {
+        eprintln!("wasmrt: usage: wasmrt wat <file.wat> [-o <out.wasm>]");
+        return ExitCode::FAILURE;
+    };
+    let src = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("wasmrt: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let bytes = match wasmrt_core::wat::assemble(&src) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("wasmrt: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let out = rest
+        .iter()
+        .position(|a| a == "-o")
+        .and_then(|i| rest.get(i + 1));
+    match out {
+        Some(o) => {
+            if let Err(e) = std::fs::write(o, &bytes) {
+                eprintln!("wasmrt: cannot write {o}: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!("{o}: {} bytes", bytes.len());
+        }
+        None => println!("{path}: assembled {} bytes", bytes.len()),
+    }
+    ExitCode::SUCCESS
+}
+
+/// `wasmrt wast <file.wast | dir>...` — run spec scripts and report the pass profile.
+fn run_wast(rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!("wasmrt: usage: wasmrt wast <file.wast | directory>...");
+        return ExitCode::FAILURE;
+    }
+    let verbose = rest.iter().any(|a| a == "-v");
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for a in rest.iter().filter(|a| !a.starts_with('-')) {
+        let p = std::path::Path::new(a);
+        if p.is_dir() {
+            collect_wast(p, &mut files);
+        } else {
+            files.push(p.to_path_buf());
+        }
+    }
+    files.sort();
+
+    let (mut passed, mut failed, mut skipped, mut errored) = (0usize, 0usize, 0usize, 0usize);
+    let mut worst: Vec<(String, usize)> = Vec::new();
+    for f in &files {
+        let Ok(src) = std::fs::read(f) else {
+            eprintln!("wasmrt: cannot read {}", f.display());
+            errored += 1;
+            continue;
+        };
+        let name = f.file_name().unwrap_or_default().to_string_lossy();
+        match wasmrt_core::wast::run_script(&src) {
+            Ok(s) => {
+                passed += s.passed;
+                failed += s.failed;
+                skipped += s.skipped;
+                if s.failed > 0 {
+                    worst.push((name.to_string(), s.failed));
+                }
+                if verbose || s.failed > 0 {
+                    println!("{name}: {s}");
+                    if verbose {
+                        for m in s.failures.iter().take(3) {
+                            println!("    {m}");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // The file did not even parse — a runner-level problem, kept separate from
+                // assertion failures so it cannot hide in the totals.
+                errored += 1;
+                println!("{name}: PARSE ERROR: {e}");
+            }
+        }
+    }
+
+    worst.sort_by_key(|(_, c)| core::cmp::Reverse(*c));
+    println!("\n=== conformance summary ===");
+    println!("files      {} ({errored} unparseable)", files.len());
+    println!("passed     {passed}");
+    println!("failed     {failed}");
+    println!("skipped    {skipped}  (constructs this build cannot put to the test)");
+    let adjudicated = passed + failed;
+    if adjudicated > 0 {
+        let pct = (passed as f64) * 100.0 / (adjudicated as f64);
+        println!("pass rate  {pct:.1}% of {adjudicated} adjudicated assertions");
+    }
+    if !worst.is_empty() {
+        println!("\nworst files:");
+        for (n, c) in worst.iter().take(15) {
+            println!("  {c:>6}  {n}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn collect_wast(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_wast(&p, out);
+        } else if p.extension().is_some_and(|x| x == "wast") {
+            out.push(p);
+        }
     }
 }
 
