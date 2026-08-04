@@ -4,14 +4,15 @@ The Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate
 pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
 `00-synthesis.md`, `02-decode-core.md`, `03-validate-interp.md`, `06-build-docs-licensing.md`).
 
-**Realized so far (through T5 slice 10 / v0.6.9):** the workspace + all three crates exist; `wasmrt-core`
+**Realized so far (through T6 / v0.7.0):** the workspace + all three crates exist; `wasmrt-core`
 has `types`, `reader`, `opcode`, `module` (decode), `validate` (core-language type-checker), and `interp`
 (switch interpreter — integer + float compute + linear memory incl. **multi-memory** and **memory64** +
 tables/`call_indirect`/reference types + **WasmGC** structs/arrays/`i31`/casts over a `Store`-owned GC heap +
 **SIMD** the full `v128` fixed-width + relaxed set + **threads/atomics** the `0xFE` family, single-threaded
 semantics + **exception handling** in both encodings) implemented and parity-tested — the interpreter's
-proposal coverage is complete; `text` / `wasi` / `pin` are still stubs, filled in bottom-up
-per `roadmap.md`. The CLI does summarize + validate + `run`. **A memory's index type is a property of the
+proposal coverage is complete — plus the **text toolchain**: `sexpr` (the shared front-end), `wat` (the
+`.wat` assembler, every opcode family) and `wast` (the spec-script runner). `wasi` / `pin` remain stubs.
+The CLI does summarize + validate + `run` + `wat` (assemble) + `wast` (conformance). **A memory's index type is a property of the
 memory, not the engine:** `Memory.is64` drives one `pop_mem(is64)` on the address/count path and one
 `mem_addr_ty(index)` in the validator, so every memory op (incl. the `0xFE` atomic and `v128` families)
 is memory64-aware through a single choke point rather than duplicated 32/64 opcode arms. **Exceptions

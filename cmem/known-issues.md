@@ -1,11 +1,30 @@
 # Known Issues
 
-Issue tracker. Gate open (2026-07-27); decode → validate → run all working (T0–T3 + T4-core + T5 slices
-1–10 done, v0.1.0–v0.6.9). This records the **inherited concerns** from the frozen wazmrt oracle, the
-**port notes / intentional divergences** logged so far, and the **open decisions** (now task-list gates).
-Log real wasmrt bugs here (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
+Issue tracker. Gate open (2026-07-27); **assemble → decode → validate → run all working** (T0–T6 done,
+v0.1.0–v0.7.0). This records the **inherited concerns** from the frozen wazmrt oracle, the **port notes /
+intentional divergences**, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
+(file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
-## Port notes / intentional divergences (T0–T5)
+## Spec-suite punch-list (2026-08-03, v0.7.0 — 98.4%, 871 failing)
+
+Deliberately **not** chased before T7 (owner's call): most of the 9,608 skips need host imports, so the
+picture will change substantially once those land. Re-run `wasmrt wast <testsuite>` after T7 before
+triaging further. Worst files as of the v0.7.0 run:
+
+| file | failing | likely cause |
+| --- | --- | --- |
+| `simd_const.wast` | 47 | remaining malformed-literal forms the assembler still accepts |
+| `binary.wast` (×2) | 43 each | `(module binary …)` edge cases — some rejected at the wrong stage |
+| `type-subtyping.wast` | 36 | GC subtyping depth the validator does not model yet |
+| `table_copy64.wast` | 33 | 64-bit table indices — out of scope (tables stay 32-bit, matching the oracle) |
+| `i31.wast` | 30 | i31 edge semantics |
+| `const.wast` / `float_literals.wast` | 26 each | literal forms still over-accepted |
+
+Two are known-and-intended rather than bugs: **`table_copy64`** exercises 64-bit tables, which wasmrt
+rejects on purpose (the oracle does too), and **`legacy/try_delegate.wast`** exercises `delegate`, which
+all three of assembler/validator/interpreter reject on purpose.
+
+## Port notes / intentional divergences (T0–T6)
 
 - **Owned `Vec`/`String` data model instead of wazmrt's arena** (`module.rs` T3, `interp.rs` T5). Frees
   on drop — no `deinit`, no allocator-error threading. `Instance` **owns** its `Module` (the retain-invariant,

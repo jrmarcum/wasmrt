@@ -22,8 +22,11 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-**Progress (2026-08-03): T0–T5 DONE + T4 completed; published v0.1.0 → v0.6.9. 🚧 CURRENTLY MID-T6 (text
-toolchain) in an unreleased v0.7.0 — start at the "Resume here" block in [roadmap.md](roadmap.md).** `wasmrt-core` has `types` + `reader` + `opcode` (shared IR +
+**Progress (2026-08-03): T0–T6 DONE; published v0.1.0 → v0.6.9, and v0.7.0 is prepped awaiting publish.**
+v0.7.0 ships the **text toolchain** (T6: `.wat` assembler + `.wast` runner) **and the validator's
+deferred typing arms** (completing T4). `wasmrt` now assembles, decodes, type-checks and runs
+WebAssembly, and scores **98.4% on the official spec testsuite** (54,509 assertions). **Next: T7 — host
+imports + WASI preview 1**, which also unblocks most of the suite's remaining skips. `wasmrt-core` has `types` + `reader` + `opcode` (shared IR +
 `decode_body`) + `module` (decode) + `validate` (spec §3 type-checker, core language; SIMD/atomics/GC/EH
 typing deferred to 0.5.x) + `interp` (switch interpreter; integer + float compute + linear memory incl.
 multi-memory and memory64 + tables/`call_indirect`/reference types + WasmGC structs/arrays/`i31`/casts +

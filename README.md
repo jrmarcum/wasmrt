@@ -7,15 +7,17 @@ which already runs the full WebAssembly spec testsuite and a large WASI corpus. 
 **reference oracle**; wasmrt is finished when it reproduces the oracle feature-for-feature, verified by
 parity testing at every step.
 
-> **Status: early — `0.7.0`.** wasmrt can now **decode**, **type-check**, and **run** a WebAssembly
-> module — `wasmrt run fac.wasm fac 10` → `3628800`. Execution currently covers integer + floating-point
-> compute, linear memory (incl. **multi-memory** and **memory64**), tables / `call_indirect` / reference
-> types, **WasmGC** (structs, arrays, `i31`, casts), **SIMD** (the full `v128` set, incl. relaxed),
-> **atomics** (the threads proposal, single-threaded semantics), and **exception handling** (both the
-> `exnref` and legacy encodings) — that completes the interpreter's proposal coverage. **The type-checker
-> now covers all of it too**, so `wasmrt <file.wasm>` gives a real verdict on any module wasmrt can run.
-> The text toolchain (`.wat`/`.wast`) and host imports come next. See **[ROADMAP.md](ROADMAP.md)** for the
-> live use-case matrix (what actually works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
+> **Status: early — `0.7.0`.** wasmrt can **assemble**, **decode**, **type-check**, and **run**
+> WebAssembly — `wasmrt run fac.wasm fac 10` → `3628800`, `wasmrt wat mod.wat -o mod.wasm`. Execution
+> covers integer + floating-point compute, linear memory (incl. **multi-memory** and **memory64**),
+> tables / `call_indirect` / reference types, **WasmGC**, **SIMD** (the full `v128` set, incl. relaxed),
+> **atomics**, and **exception handling** — and the type-checker covers all of it, so
+> `wasmrt <file.wasm>` gives a real verdict on any module wasmrt can run.
+>
+> It now reads and writes the **text format** and runs the **official spec testsuite**:
+> `wasmrt wast <dir>` scores **98.4% (54,509 assertions passing)**. Most of what remains needs **host
+> imports**, which arrive with WASI next. See **[ROADMAP.md](ROADMAP.md)** for the live use-case matrix
+> (what actually works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
 
 ## Goals
 

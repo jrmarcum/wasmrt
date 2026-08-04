@@ -11,18 +11,59 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-**0.7.0 is in progress and unreleased.** It ships the validator completion (below) *together with* stage
-T6, the text toolchain — the release is deliberately held until the whole toolchain lands.
+_Next: T7 — host imports + WASI preview 1, which also unblocks the spec suite's `register` /
+import-linking cases (the bulk of the current conformance skips)._
 
-Landed so far toward it: the **`.wat` assembler** (module fields across every index space with
-forward-referencing name resolution, sections 1–13, flat and folded instruction forms, `call_indirect`,
-memargs, named labels, correctly-rounded float literals including hex, multi-value block types) and its
-**s-expression front-end**.
+## [0.7.0] — Text toolchain (stage T6) + the validator's deferred typing arms (completes stage T4)
 
-Still to come before release: the SIMD / WasmGC / exception-handling text forms, the `.wast` script
-runner, and the spec-testsuite conformance run. Host imports (for WASI) follow at T7.
+Two stages in one release: wasmrt can now read and write the **WebAssembly text format**, run the
+official **spec testsuite**, and type-check every construct it executes.
 
-## [0.7.0] — Validator: the deferred typing arms (completes stage T4)
+### Added — the text toolchain (stage T6)
+
+- **`.wat` assembler** (`wasmrt::wat`, and `wasmrt wat <file.wat> [-o out.wasm]`). Assembles the text
+  format to a binary: every module field, inline import/export clauses, the `(memory (data …))` and
+  `(table … (elem …))` shorthands, sections 1–13, and both the flat and folded instruction forms.
+  Multi-pass name resolution means names may point forward — a concrete `(ref $t)` can name a type
+  declared later, and a module-level `(export …)` can name a function declared further down (the order
+  binaryen emits).
+- **Full opcode coverage**: the core language, bulk memory and table ops, **SIMD** (the whole `0xFD`
+  fixed-width + relaxed set, including `v128.const`, shuffles and lane-carrying loads/stores),
+  **atomics** (`0xFE`), **WasmGC** (`(type (struct …))` / `(array …)` / `(sub …)` definitions with
+  packed `i8`/`i16` fields, struct fields resolvable **by name**, and the cast ops), and **exception
+  handling** in both encodings.
+- **Correctly-rounded float literals**, including hexadecimal (`0x1.abcp+3`) and the wasm
+  `nan:canonical` / `nan:arithmetic` / `nan:0x…` spellings. Rust parses no hex floats at all, and a
+  truncating parser emits a constant one ULP low — a *wrong value*, not a rejected one, so the same
+  number written in decimal and in hex would compile to different modules.
+- **`.wast` script runner** (`wasmrt::wast`, and `wasmrt wast <file|dir>…`): `assert_return`,
+  `assert_trap`, `assert_exhaustion`, `assert_invalid`, `assert_malformed`, `assert_unlinkable`, plus
+  the `invoke` / `get` / `register` actions, named modules, and the `binary` and `quote` module forms.
+- **`wasmrt wast <dir>`** walks a testsuite and prints a pass profile with the worst files.
+
+### Added — the validator's deferred typing arms (completes stage T4)
+
+- **SIMD**, **atomics**, **WasmGC** and **exception-handling** typing. The validator now covers every
+  construct the interpreter executes, so `wasmrt <file.wasm>` never reports `validation SKIPPED`.
+  Atomics must be **exactly** naturally aligned (unlike a scalar or SIMD access, where a smaller
+  alignment is a valid hint); struct and array references are checked at their **concrete** type rather
+  than the family head, so `struct.get $b` cannot be applied to a `(ref $a)`.
+
+### Conformance
+
+First run against the official spec testsuite (284 files): **98.4% — 54,509 assertions passing**, 871
+failing, 9,608 skipped. Skips are counted and reported **separately from passes** on purpose: a
+construct this build cannot put to the test is not a pass, and most of them are modules needing host
+imports, which arrive at T7. The remaining failures are tracked in the project's known-issues list.
+
+### Notes
+
+- **`delegate` is rejected by the assembler, the validator and the interpreter alike**, matching the
+  frozen oracle. Assembling it would produce a module that type-checks yet silently mis-routes at run
+  time.
+- A **debug** build can overflow the native stack before the 512-frame recursion cap fires (release is
+  correct). The cap deliberately matches the oracle rather than being tuned to one profile; see the
+  project's known-issues list.
 
 ### Added
 - **SIMD typing** (the `0xFD` family): a full signature table for the fixed-width and relaxed sets, plus

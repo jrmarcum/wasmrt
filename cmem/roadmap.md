@@ -14,7 +14,23 @@ interpreter's wasm-proposal coverage is COMPLETE — **and T4 finished too (the 
 validation arms). CURRENTLY MID-T6 (text toolchain), all of it landing in an unreleased v0.7.0 — see the
 resume block below and the T6 entry in the task list.**
 
-## ⏸️ Resume here (2026-08-03) — v0.7.0 is IN PROGRESS, not released
+## ✅ v0.7.0 is COMPLETE and prepped for publish (2026-08-03)
+
+T6 landed in full, so the hold is lifted. **v0.7.0 = the text toolchain (T6) + the validator's deferred
+typing arms (completing T4).** Commits: `8a37795` validator arms · `5e82d08` sexpr · `5fd58bd` opcode
+name map · `523ad3d` assembler core · `6d8d56c` floats + block types · `4e4b4de` SIMD/atomics ·
+`0a7dc7e` GC/EH text forms · the `.wast` runner · the conformance runner + its findings.
+
+**Spec-suite conformance: 98.4%** — 54,509 passing, 871 failing, 9,608 skipped (284 files). Owner's call
+(2026-08-03): **stop T6 here and re-check after T7**, since most skips need host imports. Do not grind
+the remaining assembler edges first.
+
+**Next: T7 — host imports + WASI preview 1.** `Instance::new` still rejects any module with imports
+(`Trap::ImportsUnsupported`), which is also what blocks the suite's `register` / import-linking cases.
+
+_(Historical — the mid-T6 resume block that preceded this:)_
+
+## ⏸️ Resume block (2026-08-03, superseded) — v0.7.0 was in progress
 
 `Cargo.toml` is already at **0.7.0** and `CHANGELOG.md` has a `## [0.7.0]` section covering the validator
 work. **Nothing is published past v0.6.9.** The owner's decision (2026-08-03) was to **hold 0.7.0 until
@@ -235,7 +251,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   **SIMD (full 0xFD + relaxed)** → **multi-memory** → **threads/atomics (0xFE)** → **memory64** →
   **exception handling (exnref + legacy)**. Gate per slice: golden-vector parity Rust↔wazmrt + the
   relevant `.wast` files. `[ ]`
-- **T6 — Text toolchain (`sexpr` → `wat` → `wast`). 🚧 IN PROGRESS (2026-08-03).** S-expr parser →
+- **T6 — Text toolchain (`sexpr` → `wat` → `wast`). ✅ DONE 2026-08-03 (v0.7.0), at 98.4% of the suite.** S-expr parser →
   WAT→binary assembler (reuse the opcode table in reverse) → WAST script runner. Gate: run the official
   spec testsuite; match wazmrt's ~60k-assertion pass profile (the assembler has no gaps in the oracle —
   hold that bar). **Scale note: the oracle's text toolchain is 6,465 lines** (`sexpr.zig` 276, **`wat.zig`
@@ -285,15 +301,36 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     section is written**, since interning a block signature appends to the type table (the oracle's order
     too). That also let `call_indirect` intern an inline signature. `Ctx` borrows the name tables
     field-by-field alongside a mutable `sigs`; disjoint field borrows make interning-during-encoding sound.
-  - **T6b-5 — SIMD / GC / EH text forms. ⬜ NEXT.** The `0xFD` and `0xFE` name tables + their immediate
-    shapes; GC `(type (struct …))` / `(array …)` / `(sub …)` definitions with field names (currently a
-    loud `Error::Unsupported`), `struct.get $T $field` by name, `ref.test`/`ref.cast`/`br_on_cast` ref-type
-    targets; EH `try_table` catch clauses + the folded legacy `try`. `[ ]`
-  - **T6c — the `.wast` script runner. ⬜.** `assert_return` / `assert_trap` / `assert_invalid` /
-    `assert_malformed` / `register` / `invoke`, sharing the float parser. `[ ]`
-  - **T6 gate — the conformance run. ⬜.** Walk the vendored testsuite (see `testing.md` for the path);
-    expect the first full run to produce a **punch-list against the interpreter and validator too**, not
-    just the assembler — the suite is far broader than the hand-built vectors. `[ ]`
+  - **T6b-5 — SIMD / atomics / GC / EH text forms. ✅ DONE (commits `4e4b4de`, `0a7dc7e`).** The `0xFD`
+    name table (~230 entries) with each op's immediate shape; the `0xFE` names **generated** from their
+    layout (groups of 7 from `0x1e`, the same layout `atomic_natural_align_log2`/`atomic_val_type`
+    encode — described once, so the three cannot drift, and the non-existent spellings fall out as
+    errors for free). GC: the type table became `Vec<TypeDef>` (func | struct | array) with parallel
+    supertype and field-name tables, so `(sub …)`, packed `i8`/`i16` and `struct.get $T $field` by name
+    all work. EH: `try_table` in both forms with all four clause kinds, and the folded legacy
+    `(try (do …) (catch …))`. **`delegate` is rejected here too**, so assembler, validator and
+    interpreter agree. **Gotcha:** the cast ops take a **list** immediate `(ref null? ht)`, which the
+    folded-form atom/list rule mistook for an operand — they join `call_indirect` as forms whose leading
+    lists are immediates. `[x]`
+  - **T6c — the `.wast` script runner. ✅ DONE (commit `0a7dc7e`+).** All the assert commands, the
+    invoke/get/register actions, named modules, and the `binary`/`quote` module forms. **The honesty
+    rule is the design:** never count "we couldn't build it" as a pass — `assert_invalid` needs a
+    *validation* rejection and `assert_malformed` a *decode/parse* one, while an assembler gap is a
+    **skip**; skips are reported separately so the conformance number cannot be inflated by what we
+    don't handle. Shares the assembler's float parser, so an expectation and the module it checks can
+    never disagree about a literal. **Payoff from the u128 slot:** a `v128` result is ONE slot, so the
+    arity check compares directly — the oracle needs a slot-vs-form adjustment that had silently
+    disabled every SIMD assertion in its suite until found. `[x]`
+  - **T6 gate — the conformance run. ✅ DONE.** `wasmrt wast <file|dir>…` walks the vendored testsuite.
+    **First run 96.7% → 98.4% after four fixes** (54,509 passing / 871 failing / 9,608 skipped, 284
+    files). The prediction held: the suite found bugs the hand vectors could not. **What it caught:**
+    (1) a **panic** — `v128.const i64x2` fell into an `unreachable!()`, aborting the run; a library must
+    reject a module, never abort the embedder, so that catch-all is now a rejection; (2) **element
+    segments emitted in a form no decoder can read** — the eight flag forms split into two families
+    (0–3 elemkind byte + bare func indices, 4–7 reftype + const-exprs) and we mixed them, so every
+    `table_copy`/`table_init` module failed to build; (3) **out-of-range constants truncated instead of
+    rejected** (`(i32.const 0x100000000)` quietly became 0); (4) **digit separators accepted anywhere**
+    (`_` is legal only *between* digits). All four are pinned by regression tests. `[x]`
 - **T7 — WASI preview 1 + CLI.** Native host imports (stdio/args/environ/clocks/`poll_oneoff`/random/
   `proc_exit`) + the sandboxed filesystem. ⛔ *Decision-gates:* **`random_get`** (parity ≈ wazmrt's
   ChaCha CSPRNG) and **zero-dep vs `cap-std`/`openat2`** for the secure path resolver (`walkFull`

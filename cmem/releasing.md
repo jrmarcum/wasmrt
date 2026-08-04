@@ -22,11 +22,10 @@ interp line: v0.6.9 (exception handling) was its last slice, so the next release
 line fills up, the remaining stage→version map shifts down by one rather than growing a two-digit patch.
 
 **Stage → version map** (the ladder lives in `ROADMAP.md`; the port tasks in `roadmap.md`) — *shifted by
-one from 0.8 onward when 0.7.0 was consumed by the validator completion*:
+one from 0.8 onward when the 0.6 line filled up; T6 and the T4 completion then shipped together in 0.7.0*:
 0.1 T0 scaffold · 0.2 T1 types+reader · 0.3 T2 opcode · 0.4 T3 decode · 0.5 T4 validate (core) ·
-0.6.x T5 interp (patch per feature slice, 0.6.0–0.6.9) · **0.7 T4 completion (the deferred SIMD/atomics/
-GC/EH typing arms)** · 0.8 T6 text · 0.9 T7 wasi+cli · 0.10 T8 C-ABI · 0.11 T9 hardening ·
-**1.0 = parity**.
+0.6.x T5 interp (patch per feature slice, 0.6.0–0.6.9) · **0.7 T6 text toolchain + T4 completion (the deferred SIMD/atomics/GC/EH typing arms)** ·
+0.8 T7 wasi+cli · 0.9 T8 C-ABI · 0.10 T9 hardening · **1.0 = parity**.
 
 ## Crates & names (owner decision: CLI takes the bare `wasmrt` name)
 
@@ -117,12 +116,10 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-08-03)
 
-- **Published through v0.6.9. v0.7.0 is IN PROGRESS and deliberately HELD — do not hand it over yet.**
-  The owner decided (2026-08-03) that 0.7.0 ships the validator completion **and all of T6** (the text
-  toolchain) together, so the release commit + publish handoff wait until the `.wast` runner and the
-  conformance run are done. `Cargo.toml` is already bumped to 0.7.0 and the CHANGELOG has a `[0.7.0]`
-  section covering only the validator half — **its T6 half still needs writing** before the release
-  commit. See the "Resume here" block at the top of `roadmap.md` for the committed layers and next steps.
+- **Published through v0.6.9; v0.7.0 is COMPLETE and prepped, awaiting the owner's publish.** The hold is
+  lifted: 0.7.0 ships the validator completion **and all of T6** (the text toolchain), as the owner
+  decided on 2026-08-03. Spec-suite conformance at release: **98.4%** (54,509 passing). The remaining
+  punch-list is deliberately deferred to after T7 — see `known-issues.md`.
   `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
   crates.io through v0.6.9 (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
@@ -137,9 +134,8 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
   `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
   rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
   the published crates and add them on a future release if not.
-- **Next release after v0.6.9: host imports + the deferred 0.5.x validation arms** (version to be chosen
-  when the shape is clear — a 0.6.x patch if it stays interp-side, else 0.7.0 with T6). Per-release
-  checklist above — full doc sync before the publish handoff.
+- **Next release after v0.7.0: T7 — host imports + WASI preview 1** (0.8.0). Per-release checklist above
+  — full doc sync before the publish handoff.
 - **PowerShell note (owner's shell):** Windows PowerShell 5.1 has no `&&`. Chain the publishes with
   `cargo publish -p wasmrt-core; if ($LASTEXITCODE -eq 0) { cargo publish -p wasmrt-capi }; …` — not
   `; if ($?) {…}`, which reports the *`if` statement's* success after a skipped block and would run

@@ -23,7 +23,7 @@ The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the 
 released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
 **memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
 
-**Done — T0–T5-slices-1–10 (v0.1.0 → v0.6.9):**
+**Done — T0–T6 (v0.1.0 → v0.7.0):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
   surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
 - **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`
@@ -51,9 +51,13 @@ released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope a
   encodings** — `try_table` (all four clause kinds) + `throw`/`throw_ref`, and legacy `try`/`catch`/
   `catch_all`/`rethrow` — unwinding across call frames; **`delegate` is rejected, matching the oracle**.
 
-**With EH the interpreter's wasm-proposal coverage is complete. Next: host imports (WASI needs them) +
-the deferred 0.5.x validation arms, then T6 (text toolchain).**
-See the task list in [roadmap.md](roadmap.md). **123 core unit tests** green; clippy clean; native +
+**T4 and T6 are complete too (v0.7.0): the validator covers every construct the interpreter runs, and
+the text toolchain assembles `.wat`, runs `.wast`, and scores 98.4% on the official spec testsuite
+(54,509 assertions).**
+
+**Next: T7 — host imports + WASI preview 1.** `Instance::new` still rejects any module with imports,
+which is also what blocks most of the suite's remaining skips.
+See the task list in [roadmap.md](roadmap.md). **218 core unit tests** green; clippy clean; native +
 `wasm32` no_std all build.
 
 ## Planned repo / crate layout

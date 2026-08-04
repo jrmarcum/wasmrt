@@ -18,11 +18,39 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Current test state (2026-08-03, mid-T6 / unreleased v0.7.0)
+## Spec-suite conformance — the T6 gate result (2026-08-03, v0.7.0)
 
-**176 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean.
+First full run of `wasmrt wast <testsuite>` over the 284 vendored files:
 
-**The T6 layers added 53.** The **validator completion** added 12 (SIMD alignment + missing-memory +
+| | count |
+| --- | --- |
+| **passed** | **54,509** |
+| failed | 871 |
+| skipped | 9,608 |
+| **pass rate** | **98.4%** of 55,380 adjudicated assertions |
+
+**Skips are never folded into passes.** A construct this build cannot put to the test is not a pass —
+that is the runner's honesty rule (`wast.rs`), and it is why the number is trustworthy. The skip count is
+dominated by modules needing **host imports**, which `Instance::new` still rejects; expect it to fall
+sharply at T7.
+
+Worst remaining files: `simd_const` 47, `binary` 43 (×2 copies), `type-subtyping` 36, `table_copy64` 33,
+`i31` 30, `const` 26, `float_literals` 26. **Owner's call (2026-08-03): stop here and re-check after
+T7** rather than grinding the assembler edges first.
+
+The first run scored 96.7% and surfaced four bugs the hand vectors could not — a panic, an element-segment
+encoding no decoder could read, truncated out-of-range constants, and mis-placed digit separators (all in
+`roadmap.md`'s T6-gate entry, all pinned by regression tests). **That is the argument for the suite:** it
+tests the assembler against the decoder, validator and interpreter at a scale hand vectors cannot reach.
+
+## Current test state (2026-08-03, v0.7.0)
+
+**218 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean.
+
+**The T6 layers added 95.** The **`.wast` runner** added 15 (including the one that pins the honesty
+rule: an unknown mnemonic inside an `assert_invalid` must **skip**, not pass). The **assembler** added 55
+across its layers, plus 4 regressions for the bugs the spec suite found. The **validator completion**
+added 12 (SIMD alignment + missing-memory +
 operand typing, exact atomic alignment vs. the scalar hint, GC field/mutability/packing, EH try_table
 clause-vs-label, throw tag checks, legacy catch framing, `delegate` rejected). **`sexpr`** added 10
 (comments, escapes, the lone-`;` hang regression, depth cap). **The opcode name table** added 3, incl. a
