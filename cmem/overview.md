@@ -33,8 +33,9 @@ released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope a
 - **T3 (v0.4.0)** — `module` (full binary decode of every core section; owned data model). **`wasmrt
   <file.wasm>` decodes + summarizes.**
 - **T4 core (v0.5.0)** — `validate` (spec §3 type-checker: value/control stacks, module-level checks,
-  const-expr, C.refs). **Core language done; SIMD/atomics/GC-objects/EH typing deferred to 0.5.x**
-  (deferred ops reject loudly). CLI prints a validation verdict.
+  const-expr, C.refs). Core language only at the time — SIMD/atomics/GC-objects/EH typing was deferred
+  and **landed later, in v0.7.0** (see below); until then those ops rejected loudly rather than
+  silent-accepting. CLI prints a validation verdict.
 - **T5 slices 1–10 (v0.6.0 integer, v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types,
   v0.6.4 WasmGC, v0.6.5 SIMD, v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64, v0.6.9
   exception handling)** — `interp`

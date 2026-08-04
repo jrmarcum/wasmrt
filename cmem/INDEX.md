@@ -11,7 +11,7 @@ and revised without wading through one giant file. Keep files small and single-t
 repo `../wazmrt`), built to **replace wasmtime** as the engine beneath the owner's
 `universalWasmLoader-*` projects. See [overview.md](overview.md).
 
-## ✅ GATE — OPEN (2026-07-27). Port in progress — decode → validate → run all working. (read first)
+## ✅ GATE — OPEN (2026-07-27). Port in progress — assemble → decode → validate → run all working. (read first)
 
 The gate is **open**: `wazmrt` reached **full parity** and **`zig build test` passes** (489/493, 4 skip;
 Debug + ReleaseSafe green), so the passing Zig build is now a **frozen** reference oracle at
@@ -26,18 +26,18 @@ scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 v0.7.0 ships the **text toolchain** (T6: `.wat` assembler + `.wast` runner) **and the validator's
 deferred typing arms** (completing T4). `wasmrt` now assembles, decodes, type-checks and runs
 WebAssembly, and scores **98.4% on the official spec testsuite** (54,509 assertions). **Next: T7 — host
-imports + WASI preview 1**, which also unblocks most of the suite's remaining skips. `wasmrt-core` has `types` + `reader` + `opcode` (shared IR +
-`decode_body`) + `module` (decode) + `validate` (spec §3 type-checker, core language; SIMD/atomics/GC/EH
-typing deferred to 0.5.x) + `interp` (switch interpreter; integer + float compute + linear memory incl.
-multi-memory and memory64 + tables/`call_indirect`/reference types + WasmGC structs/arrays/`i31`/casts +
-the full `v128` SIMD set incl. relaxed + threads/atomics `0xFE` family single-threaded + **exception
-handling in both encodings**). **`wasmrt <file>`
-summarizes + validates; `wasmrt run <file> <fn> [args]` runs compute + multi-memory + memory64 +
-indirect-call + GC + SIMD + atomics + EH functions** (incl. recursion). The interp value slot is 128-bit
-(`Value = u128`) so a `v128` is one slot; a memory carries its own index type (`i64` addresses on a 64-bit
-memory) while **tables stay 32-bit**; `delegate` is rejected (oracle-faithful). 123 core tests green,
-clippy clean, all four build surfaces. **The interpreter's proposal coverage is COMPLETE — next: host
-imports + the deferred 0.5.x validation arms, then T6.** Each task ships a crates.io
+imports + WASI preview 1**, which also unblocks most of the suite's remaining skips.
+
+`wasmrt-core` has `types` + `reader` + `opcode` (the shared IR + `decode_body` + the text-name reverse
+map) + `module` (decode) + `validate` (spec §3 type-checker — **complete**, incl. SIMD/atomics/GC/EH) +
+`interp` (switch interpreter: integer + float compute, linear memory incl. multi-memory and memory64,
+tables/`call_indirect`/reference types, WasmGC, the full `v128` SIMD set incl. relaxed, threads/atomics
+single-threaded, and exception handling in both encodings) + the text toolchain `sexpr` / `wat` / `wast`.
+`wasi` and `pin` remain stubs (T7/T8). **CLI: `wasmrt <file>` summarizes + validates; `run` executes an
+export; `wat` assembles `.wat`; `wast` runs spec scripts.** The interp value slot is 128-bit
+(`Value = u128`) so a `v128` is one slot; a memory carries its own index type (`i64` addresses on a
+64-bit memory) while **tables stay 32-bit**; `delegate` is rejected everywhere (oracle-faithful).
+**218 core tests** green, clippy clean, all four build surfaces. Each task ships a crates.io
 release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix — with the full `cmem/`
 sync committed **before** the publish handoff (owner directive, 2026-07-31; see `releasing.md`).
 
@@ -93,12 +93,12 @@ and **keep the suite green — diff the OUTPUT (N passed / N failed), not exit c
 | [architecture.md](architecture.md) | Planned Rust architecture — `wasmrt-core` (no_std-friendly) + `wasmrt-capi` (cdylib/staticlib, the `wasmrt.h` surface) + `wasmrt` CLI; decode→validate→instantiate→execute; the dual-target contract; the shared opcode IR seam |
 | [design-decisions.md](design-decisions.md) | Load-bearing decisions + invariants NOT to drift — boundary-faithful/idiomatic-Rust; **public API = own `wasmrt.h`** (clean `wasmrt_*` + native Rust crate, NOT wasm-c-api/wasmtime symbols); **feature scope = full wasmtime browser-standard parity + memory64, WASI p1 only**; Option-A interpreter; the ValType/slot/opcode/trap invariants; size levers; the collapsed oracle split (tail-calls only); the 4 open decisions now as task-list gates |
 | [loaders.md](loaders.md) | **The consumers.** How `universalWasmLoader-*` work (hand-rolled Canonical ABI over core modules + WIT sidecar), the ~38-fn engine surface that drives `wasmrt.h`, the caller-based host-callback requirement, the 3 substrates + 10 targets (phased), the `wasmrt.h` v0 draft (held for review) |
-| [testing.md](testing.md) | Parity/oracle strategy — Rust↔wazmrt golden vectors for shared features; **wasmtime + official spec testsuite** for extended proposals; `wasmrt-capi` under Miri + a lifecycle fuzz; a wasi-gate compiling real guests; bench cold vs steady; DoD = full parity on both targets |
+| [testing.md](testing.md) | Parity/oracle strategy — Rust↔wazmrt golden vectors for shared features; **the vendored spec testsuite + its live conformance numbers (98.4% at v0.7.0) and where it lives**; `wasmrt-capi` under Miri + a lifecycle fuzz; a wasi-gate compiling real guests; bench cold vs steady; DoD = full parity on both targets |
 | [security-model.md](security-model.md) | Carry wazmrt's design to replicate — sandbox **secure by construction** (`walkFull` handle-stack; Rust may use cap-std/openat2 to close the #17 residual TOCTOU); rights-narrowing preopens; pin verify (hash the in-memory bytes you run; root-owned DB; enforce denies before opt-out); authenticity vs authority |
 | [licensing.md](licensing.md) | **License = `MIT OR Apache-2.0`** (dual). Carry `LICENSE-MIT`/`LICENSE-APACHE`/`NOTICE`/`third_party/LICENSES.md` verbatim, name wazmrt→wasmrt, "Jon Marcum" 2026. Vendored-`wasm.h` attribution only if that code is reused (it is NOT — we ship our own `wasmrt.h`) |
 | [reference-projects.md](reference-projects.md) | The runtimes evaluated (same set as wazmrt) + **wasmtime is the feature-parity target** ("run what it runs") and the thing being replaced under the loaders. 100% original |
 | [roadmap.md](roadmap.md) | Current status (**PORT phase; gate OPEN, oracle frozen @dadc727**) + the **conversion task list** T0–T9 (scaffold → types/reader → opcode → decode → validate → interp slices → text → wasi → C-ABI → licensing/size), parity-gated, with the 4 decision-gates inlined. Loader phases 1–4 |
-| [known-issues.md](known-issues.md) | Issue tracker — the wazmrt residuals relevant to the port (#17/#18/#23 Zig-std-specific → Rust does the clean version), the **collapsed scope gap (only tail-calls lack a wazmrt oracle)**, and the open decisions (now task-list gates) |
+| [known-issues.md](known-issues.md) | Issue tracker — the **spec-suite punch-list** (deferred until after T7 by owner call), the port's intentional divergences (single-threaded atomics, `delegate` rejected everywhere, the debug-build stack-depth finding), the wazmrt residuals (#17/#18/#23), and the open decisions |
 | [releasing.md](releasing.md) | **Versioning + publishing.** Port-progress ladder (`0.x` → `1.0` = full oracle parity); the 3 crates share one version, CLI is published as `wasmrt`; per-task manual releases; the per-release checklist + the 🔒 binding **pre-publish doc-sync gate** (full `cmem/` + ROADMAP/CHANGELOG/README committed BEFORE the owner is notified to publish — owner directive 2026-07-31); crates.io names reserved |
 
 ## Related files outside cmem

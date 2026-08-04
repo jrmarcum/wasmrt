@@ -32,8 +32,8 @@ all three of assembler/validator/interpreter reject on purpose.
 - **Interpreter borrow split** (`interp.rs`, T5): immutable `module`/`func_bodies` are threaded separately
   from `&mut globals`, so a recursive `call` reborrows cleanly — no `RefCell`, no self-referential borrow.
 - **Two slices were split core-first, exotic-later** because they're a correctness promise AND their
-  exotic tests need the WAT assembler (T6): **T4 validate** (core language now; SIMD/atomics/GC-objects/EH
-  typing → 0.5.x) and **T5 interp** (integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes
+  exotic tests needed the WAT assembler (T6): **T4 validate** (core language first; SIMD/atomics/GC-objects/EH
+  typing landed in v0.7.0) and **T5 interp** (integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes
   v0.6.3 → GC v0.6.4 → SIMD v0.6.5 → threads/memory64/EH in later 0.6.x). Deferred ops in both **reject loudly** (`UnsupportedValidation` / `UnsupportedInstruction`),
   never silent-accept — so a verdict/result is always trustworthy.
 - **The interpreter value slot is 128-bit (`Value = u128`)** since the SIMD slice (`interp.rs`, T5 slice 6
@@ -70,8 +70,8 @@ all three of assembler/validator/interpreter reject on purpose.
   and its **validator rejects `delegate` outright**; its interpreter traps loudly as the defense for the
   unvalidated run path. wasmrt matches exactly: reaching a delegating `try` while unwinding yields
   `UnsupportedInstruction` rather than silently mis-routing. Every other legacy construct
-  (`try`/`catch`/`catch_all`/`rethrow`) is fully supported. **When the deferred 0.5.x EH validation arm
-  lands it must also reject `delegate`**, so the text and binary paths agree as they do in the oracle.
+  (`try`/`catch`/`catch_all`/`rethrow`) is fully supported. **As of v0.7.0 the validator AND the assembler
+  reject it too**, so all three agree and no module can validate yet mis-route.
 - **EH has two structurally different unwind paths, and conflating them is the bug to avoid** (v0.6.9).
   A `try_table` clause branches **out of** the try_table to its target label (label popped); a legacy
   `catch` runs **inside** the try, whose label stays live so `rethrow` can name it. Two consequences are
@@ -129,9 +129,9 @@ all three of assembler/validator/interpreter reject on purpose.
 - **Raw single-byte `0xC5`–`0xCC` accepted as saturating-truncation ops** (`opcode.rs`, T2), mirroring the
   wazmrt oracle (canonical encoding is `0xFC 0x00`–`0x07`). Kept for parity; re-examine against the spec
   suite at T6.
-- **Deferred, tracked** (land with their consumer): the `fc`/`gc` reverse maps + SIMD/atomic natural-align
-  tables (assembler T6 / the 0.5.x validation arms); `decode_body_tracked` byte-offsets for trap
-  backtraces (T8). `natural_align_log2` already landed (T4).
+- **Deferred, tracked** (land with their consumer): only `decode_body_tracked` byte-offsets for trap
+  backtraces remains (T8). The `fc`/`gc` reverse maps landed with the assembler and the SIMD/atomic
+  natural-align tables with the validation arms, both in v0.7.0; `natural_align_log2` landed at T4.
 - No real wasmrt *bugs* logged yet. Each release is parity-gated (ported oracle vectors) + clippy-clean.
 
 ## Inherited from wazmrt — relevant to the port

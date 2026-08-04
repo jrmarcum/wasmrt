@@ -7,12 +7,11 @@ The conversion has **begun**. The `wazmrt` oracle reached full parity and is **f
 2026-07-27. `scripts/check-wazmrt.sh` now watches for **oracle drift**, not freeze-readiness. The oracle
 covers **every wasm proposal wasmrt targets except tail calls** (`return_call`/`return_call_indirect`),
 so the oracle split has collapsed to that one item (see `design-decisions.md`, `testing.md`). **memory64
-is in scope** (owner, 2026-07-27). **T0–T3 DONE + T4 core (v0.5.0) + T5 slices 1–9 (v0.6.0 integer,
-v0.6.1 float, v0.6.2 linear memory, v0.6.3 tables + reference types, v0.6.4 WasmGC, v0.6.5 SIMD,
-v0.6.6 multi-memory, v0.6.7 threads/atomics, v0.6.8 memory64, v0.6.9 exception handling) DONE — the
-interpreter's wasm-proposal coverage is COMPLETE — **and T4 finished too (the deferred SIMD/atomic/GC/EH
-validation arms). CURRENTLY MID-T6 (text toolchain), all of it landing in an unreleased v0.7.0 — see the
-resume block below and the T6 entry in the task list.**
+is in scope** (owner, 2026-07-27). **T0–T6 ALL DONE.** T5's ten interpreter slices (v0.6.0 integer →
+v0.6.9 exception handling) completed the interpreter's wasm-proposal coverage; **v0.7.0 then finished T4
+(the deferred SIMD/atomic/GC/EH validation arms) and all of T6 (the text toolchain) together.** wasmrt
+now assembles, decodes, type-checks and runs WebAssembly, scoring **98.4% on the official spec
+testsuite**. **Next: T7 — host imports + WASI preview 1.**
 
 ## ✅ v0.7.0 is COMPLETE and prepped for publish (2026-08-03)
 
@@ -27,39 +26,6 @@ the remaining assembler edges first.
 
 **Next: T7 — host imports + WASI preview 1.** `Instance::new` still rejects any module with imports
 (`Trap::ImportsUnsupported`), which is also what blocks the suite's `register` / import-linking cases.
-
-_(Historical — the mid-T6 resume block that preceded this:)_
-
-## ⏸️ Resume block (2026-08-03, superseded) — v0.7.0 was in progress
-
-`Cargo.toml` is already at **0.7.0** and `CHANGELOG.md` has a `## [0.7.0]` section covering the validator
-work. **Nothing is published past v0.6.9.** The owner's decision (2026-08-03) was to **hold 0.7.0 until
-ALL of T6 lands**, so the release commit + publish handoff happen only once the text toolchain is done.
-
-**Committed toward 0.7.0 so far** — all pushed, tree clean, **176 tests green**, clippy clean, native +
-`wasm32` no_std + release all building:
-
-| Commit | Layer |
-| --- | --- |
-| `8a37795` | T4 complete — the deferred SIMD/atomics/GC/EH validation arms |
-| `5e82d08` | T6a — `sexpr` front-end |
-| `5fd58bd` | T6b-1 — opcode text-name table + reverse map |
-| `523ad3d` | T6b-2/3 — assembler: module fields, index spaces, sections, core instructions |
-| `6d8d56c` | T6b-4 — float literals (correct hex rounding) + multi-value block types |
-
-**Next actions, in order:** T6b-5 (SIMD/GC/EH text forms) → T6c (`.wast` runner) → the conformance run →
-final doc sync + the v0.7.0 release commit. Before that release commit, the `## [0.7.0]` CHANGELOG section
-needs its **T6 half written** (it currently documents only the validator work), and README + `ROADMAP.md`
-need the text-toolchain rows flipped.
-
-**Version cadence (owner, 2026-08-03): the patch component stays a single digit** — the release after
-`0.y.9` is `0.(y+1).0`, never `0.y.10`. That is why v0.6.9 closed the 0.6 line and this one is 0.7.0; the
-stage→version map in `releasing.md` shifted by one from 0.8 onward.
-
-**How the assembler is tested (keep this discipline):** its tests **assemble → decode → validate →
-instantiate → invoke**. Byte-level assertions would only prove the assembler agrees with itself; running
-what it produced proves it agrees with the decoder, the type-checker and the interpreter. Both bugs found
-in the core layer surfaced as failed *executions*, not mismatched bytes.
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -240,8 +206,8 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     123 core tests, clippy clean, native + wasm32 no_std. **EH *typing* stays deferred to the 0.5.x
     validator arm** (per-slice precedent: SIMD/atomics/GC also landed exec-first); `wasmrt <file>` prints
     `validation SKIPPED` for an EH body. `[✅]`
-  - **0.6.x remaining work:** host imports (WASI needs them) + the deferred 0.5.x validation arms —
-    **including EH typing, where the validator must also reject `delegate`** (the oracle does).
+  - **0.6.x remaining work — RESOLVED.** The deferred validation arms (incl. EH typing, which rejects
+    `delegate` as the oracle does) landed in v0.7.0. Host imports remain, and move to **T7**.
     Original T5 detail:
 - **T5 (original spec) — `interp`.** Untyped `u64` slots; the slot-encoding order invariant
   (`null_ref` before `i31_tag`); `#[cold]`/`#[inline(never)]` trap path with lazy byte-offset resolve;
