@@ -10,8 +10,7 @@ so the oracle split has collapsed to that one item (see `design-decisions.md`, `
 is in scope** (owner, 2026-07-27). **T0–T6 ALL DONE.** T5's ten interpreter slices (v0.6.0 integer →
 v0.6.9 exception handling) completed the interpreter's wasm-proposal coverage; **v0.7.0 then finished T4
 (the deferred SIMD/atomic/GC/EH validation arms) and all of T6 (the text toolchain) together.** wasmrt
-now assembles, decodes, type-checks and runs WebAssembly. **ALL of T7 is DONE (2026-08-05) and shipped as
-v0.8.0** — host imports, module linking on the shared store, and WASI preview 1 including the sandboxed
+now assembles, decodes, type-checks and runs WebAssembly. **ALL of T7 is DONE (2026-08-05), published as v0.8.0** — host imports, module linking on the shared store, and WASI preview 1 including the sandboxed
 filesystem — together with the **safety pass** (`#![forbid(unsafe_code)]` in core and the CLI) and the
 **literal/text edges**, scoring **98.8% on the official spec testsuite** (61,013 / 751 / 3,094) with all
 284 files parsing. The pre-T8 known-issues review is **done** (`known-issues.md`) and the resolver's

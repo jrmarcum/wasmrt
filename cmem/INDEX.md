@@ -22,8 +22,7 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-**Progress (2026-08-05): T0–T7 DONE. v0.8.0 is PREPARED and awaiting the owner's publish** (published
-through v0.7.0).
+**Progress (2026-08-05): T0–T7 DONE; published through v0.8.0** (release commit `81d1c24`, tag `v0.8.0`).
 v0.7.0 shipped the **text toolchain** (T6) **and the validator's deferred typing arms** (completing T4).
 Since then **T7 landed in full**: host imports, module linking on a **shared store** (wasmtime-style),
 and **WASI preview 1 including the sandboxed filesystem**. The suite is at **98.8%** (61,013 passed / 751 failed / 3,094 skipped). **Known-issues review DONE (2026-08-05)**, and with it the safety pass (`#![forbid(unsafe_code)]` in core
