@@ -143,11 +143,17 @@ These four were "raise before/at scaffolding." At the freeze the owner chose to 
 decision-gates at the relevant task-list step** (see [roadmap.md](roadmap.md)) rather than resolve them
 all now — each is decided when the port reaches the task that needs it.
 
-- `random_get`: keep wazmrt's non-crypto PRNG (exact parity) or upgrade to an OS CSPRNG in Rust?
-  → **gate at the WASI task.** (Note: wazmrt itself moved `random_get` to a real ChaCha CSPRNG on
-  2026-07-20 — so "exact parity" now *means* a CSPRNG; confirm the wazmrt behavior when we get there.)
-- Zero-dep (wazmrt has zero deps) vs. allow `cap-std`/`openat2` to close the #17 TOCTOU on the Rust side?
-  → **gate at the WASI-sandbox task.**
+- ~~`random_get`: non-crypto PRNG vs. an OS CSPRNG?~~ **✅ RESOLVED (owner, 2026-08-04): a ChaCha20
+  CSPRNG seeded once from the OS**, matching the oracle (wazmrt moved to ChaCha on 2026-07-20, so parity
+  *means* a CSPRNG). Zero dependencies, no `unsafe`, auditable, and it still works on the freestanding
+  `wasm32` self-embed target where a syscall has nothing to call. **If OS entropy is unavailable, fail
+  loudly — never emit predictable bytes**, the one failure mode that turns a CSPRNG into a security hole.
+- ~~Zero-dep vs. `cap-std`/`openat2` for the sandbox path resolver?~~ **✅ RESOLVED (owner, 2026-08-04):
+  the zero-dep handle-stack walker** (wazmrt's `walkFull`). Resolve a path **component-by-component
+  against open directory handles, never re-opening by full path** — that removes the TOCTOU window
+  rather than checking for it, which is how wazmrt's **#17** gets closed *by construction*. Rejected
+  `cap-std`/`openat2`: a large dependency tree against the smallest-binary goal, strongest on Linux and
+  uneven elsewhere, and it would be wasmrt's first runtime dependency.
 - `wasmrt.h` review (naming, the store simplification, the `{id}`-handle model). The "held until wazmrt
   finalizes" condition is now **met** (oracle frozen) → **gate at the start of the C-ABI task** (finalize
   the draft with the owner before writing `wasmrt-capi`).

@@ -30,7 +30,7 @@ wazmrt's `#17/#18/#23` are **Zig-0.16-std-specific** workarounds (a Windows `ope
 host-crash forces a stat-then-open-with-follow, leaving a narrow **final-component** TOCTOU residual on
 `path_open`). Rust's std / `cap-std` / `openat2(RESOLVE_BENEATH)` can do the atomic no-follow open and
 **close that residual for free.** The invariant "resolve through held handles, never a full path string"
-is what carries over — not the Zig workarounds. (Open decision: zero-dep vs. adding `cap-std` — see
+is what carries over — not the Zig workarounds. (**Decided 2026-08-04: zero-dep handle-stack walker**; see
 `design-decisions.md`.)
 
 ## Authenticity — pin verification (reproduce; signatures still design-only)

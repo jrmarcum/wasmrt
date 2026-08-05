@@ -297,11 +297,34 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     `table_copy`/`table_init` module failed to build; (3) **out-of-range constants truncated instead of
     rejected** (`(i32.const 0x100000000)` quietly became 0); (4) **digit separators accepted anywhere**
     (`_` is legal only *between* digits). All four are pinned by regression tests. `[x]`
-- **T7 — WASI preview 1 + CLI.** Native host imports (stdio/args/environ/clocks/`poll_oneoff`/random/
-  `proc_exit`) + the sandboxed filesystem. ⛔ *Decision-gates:* **`random_get`** (parity ≈ wazmrt's
-  ChaCha CSPRNG) and **zero-dep vs `cap-std`/`openat2`** for the secure path resolver (`walkFull`
-  equivalent; close wazmrt's #17 TOCTOU cleanly). Gate: **wasi-gate** compiles real Zig/C/Rust guests and
-  matches stdout; run the wasmtk WASI corpus (400 runnable) to wazmrt's result. `[ ]`
+- **T7 — Host imports + WASI preview 1 + CLI. 🚧 IN PROGRESS (2026-08-04).** Gate: **wasi-gate** compiles
+  real Zig/C/Rust guests and matches stdout; run the wasmtk WASI corpus (400 runnable) to wazmrt's
+  result. `[🚧]`
+  - **✅ Both decision-gates RESOLVED (owner, 2026-08-04) — both the zero-dependency option, which keeps
+    the safety directive and the smallest-binary goal intact:**
+    - **`random_get` = a ChaCha20 CSPRNG seeded once from the OS** (oracle parity). No dependency, no
+      `unsafe`, auditable, and it still works on the freestanding `wasm32` self-embed target where a
+      syscall has nothing to call. **If OS entropy is unavailable, fail loudly — never emit predictable
+      bytes**, which is the one failure mode that turns a CSPRNG into a security hole.
+    - **Secure path resolver = the zero-dep handle-stack walker** (wazmrt's `walkFull` design): resolve a
+      path **component-by-component against open directory handles, never re-opening by full path**, so
+      there is no TOCTOU window to lose — that is what closes wazmrt's **#17** by construction rather
+      than by checking. Rejected `cap-std`/`openat2`: a large dependency tree against the smallest-binary
+      goal, strongest on Linux and uneven elsewhere, and it would be wasmrt's first runtime dependency.
+  - **T7a — host imports. ✅ DONE (commit `981c6b6`).** `Instance::new_with_imports` links host backings
+    per kind in declaration order; `HostFunc` is a **boxed closure, not a fn-pointer + `void*` ctx** —
+    the context-pointer shape cannot be expressed without `unsafe`, so this is the safety directive's
+    first real application, and the C ABI (T8) will need the same treatment. `Caller` gives
+    **bounds-checked** `read`/`write`/`memory_len` over guest memory (every accessor returns `Option`, so
+    a wild guest pointer yields `None` rather than panicking the embedder). **Imported functions occupy
+    the LOW function indices**, so `call_function` subtracts the import count — a test pins that `call 0`
+    reaches the host rather than re-entering the export. Imported globals precede defined ones, so a
+    defined initializer may read an imported global. **Imported memories/tables reject loudly**
+    (`UnsupportedImportKind`) pending T7b's shared-ownership model. `[x]`
+  - **T7b — module linking** (wasm→wasm imports; shared memories/tables). Unblocks the `.wast` runner's
+    `register` and `assert_unlinkable`. `[ ]`
+  - **T7c — WASI preview 1:** stdio, args, environ, clocks, `random_get`, `proc_exit`, `poll_oneoff`,
+    then the sandboxed filesystem on the handle-stack resolver. `[ ]`
 - **T8 — `wasmrt.h` C ABI (redesign, not transliteration).** ⛔ *Decision-gate (block lifted):*
   **finalize `wasmrt.h`** with the owner first (naming, store simplification, `{id}`-handle model) —
   from `docs/port/wasmrt.h.draft`. Then implement `#[no_mangle] extern "C"` over core: lightweight `{id}`
