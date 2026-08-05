@@ -435,7 +435,9 @@ impl BuildErr {
             BuildErr::Assemble(
                 wat::Error::Unsupported(_) | wat::Error::UnknownInstr | wat::Error::NotAModule
             ) | BuildErr::Validate(crate::validate::ValidateError::UnsupportedValidation)
-                | BuildErr::Instantiate(Trap::ImportsUnsupported | Trap::UnsupportedInstruction)
+                | BuildErr::Instantiate(
+                    Trap::MissingImport | Trap::UnsupportedImportKind | Trap::UnsupportedInstruction
+                )
         )
     }
 }

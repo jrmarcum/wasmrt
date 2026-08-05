@@ -11,7 +11,8 @@
 //! enough to run a compute module (`fib`, `factorial`, `add`). Float arithmetic and linear
 //! memory land in 0.6.1; tables, reference types, GC, SIMD, threads, and exception handling in
 //! later 0.6.x slices. **Anything not yet executed traps loudly** ([`Trap::UnsupportedInstruction`]),
-//! never silent-wrong. Modules with imports are rejected for now ([`Trap::ImportsUnsupported`]).
+//! never silent-wrong. Host imports link through [`Imports`]; imported memories and tables still
+//! need the module-linking model and reject loudly ([`Trap::UnsupportedImportKind`]).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -239,8 +240,13 @@ pub enum Trap {
     ConstantExpr,
     /// An opcode this interpreter slice does not execute yet (float/memory/tables/GC/SIMD/EH).
     UnsupportedInstruction,
-    /// This release runs only import-free modules.
-    ImportsUnsupported,
+    /// The host supplied fewer (or more) imports than the module declares.
+    MissingImport,
+    /// An imported memory or table — those must be *shared* with the exporting instance,
+    /// which needs the module-linking model (T7b). Loud rather than silently private.
+    UnsupportedImportKind,
+    /// A host function signalled failure. Hosts may also return any other [`Trap`].
+    HostTrap,
     /// A body failed to decode at instantiation.
     Decode(DecodeError),
 }
@@ -290,7 +296,11 @@ impl fmt::Display for Trap {
             Trap::UnsupportedInstruction => {
                 f.write_str("instruction not executed in this release (float/memory/tables/GC/SIMD/EH)")
             }
-            Trap::ImportsUnsupported => f.write_str("modules with imports are not runnable yet"),
+            Trap::MissingImport => f.write_str("import count does not match the module"),
+            Trap::UnsupportedImportKind => {
+                f.write_str("imported memories and tables are not linkable yet")
+            }
+            Trap::HostTrap => f.write_str("host function trapped"),
             Trap::Decode(e) => write!(f, "decode error at instantiation: {e}"),
         }
     }
@@ -316,11 +326,114 @@ struct FuncBody {
     try_info: Vec<Option<LegacyTry>>,
 }
 
+/// What a host function can reach while it runs: the calling instance's linear memories, so
+/// it can read arguments out of guest memory and write results back (how every WASI call
+/// works). Handed to the callback for the duration of the call and no longer.
+pub struct Caller<'a> {
+    store: &'a mut Store,
+}
+
+impl Caller<'_> {
+    /// Byte length of memory `index`, or `None` if the instance has no such memory.
+    #[must_use]
+    pub fn memory_len(&self, index: u32) -> Option<usize> {
+        self.store.memories.get(index as usize).map(|m| m.bytes.len())
+    }
+
+    /// Read `len` bytes of guest memory at `addr`. `None` if the range is out of bounds —
+    /// a host function must treat that as the guest's error, not panic on it.
+    #[must_use]
+    pub fn read(&self, index: u32, addr: u64, len: usize) -> Option<&[u8]> {
+        let m = self.store.memories.get(index as usize)?;
+        let start = usize::try_from(addr).ok()?;
+        let end = start.checked_add(len)?;
+        m.bytes.get(start..end)
+    }
+
+    /// Mutable view of `len` bytes of guest memory at `addr`, bounds-checked as [`read`].
+    #[must_use]
+    pub fn write(&mut self, index: u32, addr: u64, len: usize) -> Option<&mut [u8]> {
+        let m = self.store.memories.get_mut(index as usize)?;
+        let start = usize::try_from(addr).ok()?;
+        let end = start.checked_add(len)?;
+        m.bytes.get_mut(start..end)
+    }
+}
+
+/// The backing for one imported function.
+///
+/// A boxed closure rather than a raw function pointer plus a `void*` context: the context
+/// pointer is what a Zig-style host-callback ABI would use, and it cannot be expressed
+/// without `unsafe`. A closure carries its state safely and costs one indirection at a call
+/// boundary that is already the slow path (see the safety directive in
+/// `cmem/design-decisions.md`).
+pub struct HostFunc {
+    call: alloc::boxed::Box<HostFnBody>,
+}
+
+/// The callback shape behind a [`HostFunc`]: arguments in, a results slice sized to the
+/// import's declared arity out, `Err` to trap the guest.
+type HostFnBody = dyn Fn(&mut Caller<'_>, &[Value], &mut [Value]) -> Result<()>;
+
+impl HostFunc {
+    /// Wrap a host callback. It receives the call's arguments and a results slice already
+    /// sized to the import's declared result arity; returning `Err` traps the guest.
+    pub fn new(
+        f: impl Fn(&mut Caller<'_>, &[Value], &mut [Value]) -> Result<()> + 'static,
+    ) -> HostFunc {
+        HostFunc {
+            call: alloc::boxed::Box::new(f),
+        }
+    }
+}
+
+impl fmt::Debug for HostFunc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HostFunc(..)")
+    }
+}
+
+/// Host-supplied backing for a module's imports, in **per-kind import order**: each vector
+/// aligns with the module's imports of that kind, which occupy the low indices of their
+/// index space.
+#[derive(Default)]
+pub struct Imports {
+    pub funcs: Vec<HostFunc>,
+    pub globals: Vec<Value>,
+}
+
+impl Imports {
+    #[must_use]
+    pub fn new() -> Imports {
+        Imports::default()
+    }
+
+    /// Append a host function, in the order the module declares its function imports.
+    #[must_use]
+    pub fn with_func(
+        mut self,
+        f: impl Fn(&mut Caller<'_>, &[Value], &mut [Value]) -> Result<()> + 'static,
+    ) -> Imports {
+        self.funcs.push(HostFunc::new(f));
+        self
+    }
+
+    /// Append an imported global's value, in declaration order.
+    #[must_use]
+    pub fn with_global(mut self, v: Value) -> Imports {
+        self.globals.push(v);
+        self
+    }
+}
+
 /// An instantiated module ready to run. Owns its `Module` (so it outlives the input and the
 /// "instance retains its module" invariant holds by construction).
 pub struct Instance {
     module: Module,
     func_bodies: Vec<FuncBody>,
+    /// Backing for the module's imported functions, index-aligned with the low end of the
+    /// function index space.
+    host_funcs: Vec<HostFunc>,
     store: Store,
 }
 
@@ -329,20 +442,60 @@ pub struct Instance {
 struct Ctx<'a> {
     module: &'a Module,
     func_bodies: &'a [FuncBody],
+    host_funcs: &'a [HostFunc],
 }
 
 impl Instance {
-    /// Instantiate a decoded module. This slice runs import-free modules only.
+    /// Instantiate a decoded module with no imports.
+    ///
+    /// # Errors
+    /// Returns [`Trap::MissingImport`] if the module declares any import — use
+    /// [`Instance::new_with_imports`] to supply them.
     pub fn new(module: Module) -> Result<Instance> {
-        if !module.imports.is_empty() {
-            return Err(Trap::ImportsUnsupported);
-        }
+        Instance::new_with_imports(module, Imports::default())
+    }
+
+    /// Instantiate a decoded module, linking `imports` against its declared imports.
+    ///
+    /// The vectors are matched **per kind, in declaration order** — imports occupy the low
+    /// indices of their index space, so `imports.funcs[0]` backs function 0.
+    ///
+    /// # Errors
+    /// [`Trap::MissingImport`] if a count does not match what the module declares, or
+    /// [`Trap::UnsupportedImportKind`] for an imported memory/table (module linking, T7b).
+    pub fn new_with_imports(module: Module, imports: Imports) -> Result<Instance> {
         if module.functions.len() != module.code.len() {
             return Err(Trap::UndefinedFunc);
         }
 
-        // Evaluate defined-global initializers (imported globals are rejected above).
-        let mut globals: Vec<Value> = Vec::with_capacity(module.global_inits.len());
+        // Count the declared imports per kind. Each kind's imports occupy the low indices of
+        // its space, so these are also the offsets between an index and its defined slot.
+        let (mut n_funcs, mut n_globals, mut n_mems, mut n_tables) = (0usize, 0, 0, 0);
+        for imp in &module.imports {
+            match imp.ty.kind() {
+                crate::types::ExternKind::Func => n_funcs += 1,
+                crate::types::ExternKind::Global => n_globals += 1,
+                crate::types::ExternKind::Memory => n_mems += 1,
+                crate::types::ExternKind::Table => n_tables += 1,
+                // A tag import needs no host backing — its type is all the engine uses.
+                crate::types::ExternKind::Tag => {}
+            }
+        }
+        // Imported memories and tables must be SHARED with the exporting instance, which
+        // needs the shared-ownership model that lands with module linking. Reject loudly
+        // rather than silently allocating a private one the exporter cannot see.
+        if n_mems > 0 || n_tables > 0 {
+            return Err(Trap::UnsupportedImportKind);
+        }
+        if imports.funcs.len() != n_funcs || imports.globals.len() != n_globals {
+            return Err(Trap::MissingImport);
+        }
+
+        // Globals: the imported values occupy the low indices, then each defined
+        // initializer is evaluated against everything already in scope (so a defined global
+        // may read an imported one, which is exactly what the spec allows).
+        let mut globals: Vec<Value> = imports.globals;
+        globals.reserve(module.global_inits.len());
         for init in &module.global_inits {
             let v = eval_const_expr(init, &globals)?;
             globals.push(v);
@@ -449,6 +602,7 @@ impl Instance {
         Ok(Instance {
             module,
             func_bodies,
+            host_funcs: imports.funcs,
             store: Store {
                 globals,
                 memories,
@@ -498,6 +652,7 @@ impl Instance {
         let ctx = Ctx {
             module: &self.module,
             func_bodies: &self.func_bodies,
+            host_funcs: &self.host_funcs,
         };
         let r = call_function(&ctx, &mut self.store, func_index, args, 1);
         // Drop an escaping exception's payload rather than pinning it until the next invoke.
@@ -880,8 +1035,21 @@ fn call_function(
     if depth > MAX_CALL_DEPTH {
         return Err(Trap::CallStackExhausted);
     }
-    // Import-free (checked at instantiation), so every function is defined.
-    let defined = func_index as usize;
+    // Imported functions occupy the LOW indices of the function space, so an index below
+    // the import count is a host call and everything above it shifts down by that count.
+    let imported = ctx.module.imported_func_count();
+    if func_index < imported {
+        let hf = ctx
+            .host_funcs
+            .get(func_index as usize)
+            .ok_or(Trap::MissingImport)?;
+        let ft = ctx.module.func_type(func_index).ok_or(Trap::UndefinedFunc)?;
+        let mut results = vec![0 as Value; ft.results.len()];
+        let mut caller = Caller { store };
+        (hf.call)(&mut caller, args, &mut results)?;
+        return Ok(results);
+    }
+    let defined = (func_index - imported) as usize;
     let body = ctx.func_bodies.get(defined).ok_or(Trap::UndefinedFunc)?;
 
     let mut locals = vec![0 as Value; body.num_locals];
@@ -5012,6 +5180,186 @@ mod tests {
         let mut inst = Instance::new(md).unwrap();
         assert_eq!(inst.invoke("e", &[]), Err(Trap::UncaughtException));
         assert_eq!(inst.invoke("e", &[]), Err(Trap::UncaughtException));
+    }
+
+    // --- host imports (T7a) ---
+
+    /// A module importing `(func (param i32 i32) (result i32))` from `"env" "h"`, exporting
+    /// `call_host` which forwards its two arguments.
+    fn host_import_module() -> Vec<u8> {
+        asm(&[
+            (
+                1,
+                vec![
+                    0x01, // 1 type
+                    0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // (i32 i32) -> i32
+                ],
+            ),
+            // import: "env" "h" func type 0
+            (
+                2,
+                vec![
+                    0x01, 0x03, b'e', b'n', b'v', 0x01, b'h', 0x00, 0x00,
+                ],
+            ),
+            (3, vec![0x01, 0x00]), // one defined func, type 0
+            (7, vec![0x01, 0x01, b'c', 0x00, 0x01]), // export "c" = func 1 (the DEFINED one)
+            // body: local.get 0 ; local.get 1 ; call 0  (func 0 is the import)
+            (10, code1(&[0x00, 0x20, 0x00, 0x20, 0x01, 0x10, 0x00, 0x0b])),
+        ])
+    }
+
+    #[test]
+    fn calls_an_imported_host_function() {
+        let md = decode(&host_import_module()).unwrap();
+        let imports = Imports::new().with_func(|_caller, args, results| {
+            results[0] = i32_value(as_i32(args[0]) * as_i32(args[1]));
+            Ok(())
+        });
+        let mut inst = Instance::new_with_imports(md, imports).unwrap();
+        let r = inst
+            .invoke("c", &[i32_value(6), i32_value(7)])
+            .unwrap();
+        assert_eq!(as_i32(r[0]), 42);
+    }
+
+    #[test]
+    fn a_host_function_can_trap_the_guest() {
+        let md = decode(&host_import_module()).unwrap();
+        let imports = Imports::new().with_func(|_c, _a, _r| Err(Trap::HostTrap));
+        let mut inst = Instance::new_with_imports(md, imports).unwrap();
+        assert_eq!(
+            inst.invoke("c", &[i32_value(1), i32_value(2)]),
+            Err(Trap::HostTrap)
+        );
+    }
+
+    #[test]
+    fn the_import_count_must_match() {
+        // Too few: the module declares one function import, the host supplies none.
+        let md = decode(&host_import_module()).unwrap();
+        assert_eq!(Instance::new(md).err(), Some(Trap::MissingImport));
+        // Too many is equally wrong — a silent extra would mis-align every later index.
+        let md = decode(&host_import_module()).unwrap();
+        let two = Imports::new()
+            .with_func(|_c, _a, _r| Ok(()))
+            .with_func(|_c, _a, _r| Ok(()));
+        assert_eq!(
+            Instance::new_with_imports(md, two).err(),
+            Some(Trap::MissingImport)
+        );
+    }
+
+    #[test]
+    fn an_import_shifts_the_defined_function_indices() {
+        // The regression this design invites: with one import, defined function 0 lives at
+        // function-space index 1. Calling `c` proves the offset is applied — before the
+        // fix, `call 0` would have re-entered the exported function instead of the host.
+        let md = decode(&host_import_module()).unwrap();
+        let calls = core::cell::Cell::new(0u32);
+        // The closure borrows nothing outside itself, so count via an owned cell.
+        let imports = Imports::new().with_func(move |_c, args, results| {
+            calls.set(calls.get() + 1);
+            results[0] = i32_value(as_i32(args[0]) + as_i32(args[1]) + calls.get() as i32);
+            Ok(())
+        });
+        let mut inst = Instance::new_with_imports(md, imports).unwrap();
+        assert_eq!(
+            as_i32(inst.invoke("c", &[i32_value(10), i32_value(1)]).unwrap()[0]),
+            12 // 10 + 1 + first call
+        );
+        assert_eq!(
+            as_i32(inst.invoke("c", &[i32_value(10), i32_value(1)]).unwrap()[0]),
+            13 // the same host closure, called a second time
+        );
+    }
+
+    #[test]
+    fn a_host_function_reads_and_writes_guest_memory() {
+        // How every WASI call works: the guest passes a pointer, the host reads/writes it.
+        let m = asm(&[
+            (1, vec![0x02, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x01, 0x7f]),
+            (
+                2,
+                vec![0x01, 0x03, b'e', b'n', b'v', 0x01, b'h', 0x00, 0x00],
+            ),
+            (3, vec![0x01, 0x01]), // defined func of type 1: () -> i32
+            (5, vec![0x01, 0x00, 0x01]), // one memory, min 1
+            (7, vec![0x01, 0x01, b'c', 0x00, 0x01]),
+            // i32.const 16 ; call 0 (host writes at 16) ; i32.load offset=16
+            (
+                10,
+                code1(&[
+                    0x00, 0x41, 0x10, 0x10, 0x00, 0x41, 0x00, 0x28, 0x02, 0x10, 0x0b,
+                ]),
+            ),
+        ]);
+        let md = decode(&m).unwrap();
+        let imports = Imports::new().with_func(|caller: &mut Caller<'_>, args, _r| {
+            let addr = as_i32(args[0]) as u64;
+            let dst = caller.write(0, addr, 4).ok_or(Trap::MemoryOutOfBounds)?;
+            dst.copy_from_slice(&1234i32.to_le_bytes());
+            Ok(())
+        });
+        let mut inst = Instance::new_with_imports(md, imports).unwrap();
+        assert_eq!(as_i32(inst.invoke("c", &[]).unwrap()[0]), 1234);
+    }
+
+    #[test]
+    fn an_out_of_bounds_host_access_is_rejected_not_panicked() {
+        // A host function handed a bad guest pointer must get `None`, not a panic — the
+        // library-must-not-abort-its-embedder rule.
+        let md = decode(&host_import_module()).unwrap();
+        let imports = Imports::new().with_func(|caller: &mut Caller<'_>, _a, r| {
+            // No memory at all in this module, and a wild address.
+            assert!(caller.read(0, u64::MAX, 8).is_none());
+            assert!(caller.write(7, 0, 1).is_none());
+            assert!(caller.memory_len(0).is_none());
+            r[0] = i32_value(0);
+            Ok(())
+        });
+        let mut inst = Instance::new_with_imports(md, imports).unwrap();
+        assert_eq!(as_i32(inst.invoke("c", &[i32_value(0), i32_value(0)]).unwrap()[0]), 0);
+    }
+
+    #[test]
+    fn imported_globals_are_visible_to_defined_initializers() {
+        // Global 0 is imported; the defined global 1 initializes from it.
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x01, 0x7f]),
+            // import "env" "g" (global i32, immutable)
+            (
+                2,
+                vec![0x01, 0x03, b'e', b'n', b'v', 0x01, b'g', 0x03, 0x7f, 0x00],
+            ),
+            (3, vec![0x01, 0x00]),
+            // defined global 1 : i32 = global.get 0
+            (6, vec![0x01, 0x7f, 0x00, 0x23, 0x00, 0x0b]),
+            (7, vec![0x01, 0x01, b'c', 0x00, 0x00]),
+            (10, code1(&[0x00, 0x23, 0x01, 0x0b])), // global.get 1
+        ]);
+        let md = decode(&m).unwrap();
+        let imports = Imports::new().with_global(i32_value(99));
+        let mut inst = Instance::new_with_imports(md, imports).unwrap();
+        assert_eq!(as_i32(inst.invoke("c", &[]).unwrap()[0]), 99);
+    }
+
+    #[test]
+    fn imported_memories_reject_loudly() {
+        // Sharing a memory with the exporting instance needs the module-linking model, so
+        // this must fail visibly rather than quietly allocating a private memory the
+        // exporter cannot see.
+        let m = asm(&[
+            (1, vec![0x01, 0x60, 0x00, 0x00]),
+            (
+                2,
+                vec![0x01, 0x03, b'e', b'n', b'v', 0x01, b'm', 0x02, 0x00, 0x01],
+            ),
+            (3, vec![0x01, 0x00]),
+            (10, code1(&[0x00, 0x0b])),
+        ]);
+        let md = decode(&m).unwrap();
+        assert_eq!(Instance::new(md).err(), Some(Trap::UnsupportedImportKind));
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {
