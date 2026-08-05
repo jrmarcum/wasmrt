@@ -753,6 +753,36 @@ mod tests {
         assert_eq!((s.passed, s.failed, s.skipped), (1, 0, 0));
     }
 
+    // The shared store gives every instance a slot in one global pool, so an instruction that
+    // indexes a pool with its raw module-local immediate silently reads the *first* module's
+    // resource. With one instance per store the two indices coincide and the bug is invisible;
+    // these tests keep a second instance around so they cannot coincide.
+
+    #[test]
+    fn call_indirect_uses_the_callers_own_table() {
+        let s = run(
+            r#"(module (table 1 funcref) (elem (i32.const 0) $a) (func $a (result i32) (i32.const 11)))
+               (module (type $t (func (result i32)))
+                 (table 1 funcref) (elem (i32.const 0) $b) (func $b (result i32) (i32.const 22))
+                 (func (export "f") (result i32) (call_indirect (type $t) (i32.const 0))))
+               (assert_return (invoke "f") (i32.const 22))"#,
+        );
+        assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
+    }
+
+    #[test]
+    fn memory_init_reads_the_instances_own_data_segment() {
+        let s = run(
+            r#"(module (memory 1) (data "\aa\aa\aa\aa"))
+               (module (memory 1) (data $d "\01\02\03\04")
+                 (func (export "f") (result i32)
+                   (memory.init $d (i32.const 0) (i32.const 0) (i32.const 4))
+                   (i32.load (i32.const 0))))
+               (assert_return (invoke "f") (i32.const 0x04030201))"#,
+        );
+        assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
+    }
+
     #[test]
     fn reports_a_mismatch_as_a_failure() {
         let s = run(

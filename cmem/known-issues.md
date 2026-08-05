@@ -5,7 +5,46 @@ v0.1.0–v0.7.0). This records the **inherited concerns** from the frozen wazmrt
 intentional divergences**, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
 (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
-## Spec-suite punch-list (2026-08-04, post-linking — 97.4%, 1,521 failing)
+## Spec-suite punch-list (2026-08-05, post shared-store fixes — 98.6%, 851 failing)
+
+The table/memory family below is **FIXED**. Three defects, all one root cause plus one assembler gap:
+
+1. **`Op::CallIndirect` indexed `store.tables` with the raw module-local immediate** — it never went
+   through `ctx.maps.table()`. `interp.rs` ~1708. With one instance per store the two indices coincide,
+   so this was invisible until `register` put 52 modules in one store; then module N's `call_indirect`
+   read module 0's table ("got 5, expected 3"). This is the same class clippy caught earlier via the
+   `unused variable: maps` warning, but at a site the compiler could not flag, because `ci.table` is a
+   different expression from `table_imm(instr)`.
+2. **`exec_memory_init` indexed `ctx.module.data` with the *store* index `di`** — the mirror image of
+   (1): the drop flags are store-wide, but the segment bytes live in the module's own list, so that one
+   needs the module-local index. `interp.rs` ~2386.
+3. **The assembler rejected the `table.copy` / `table.init` index shorthands** (both table indices may
+   be omitted, defaulting to 0). Flat form needed a matching fix so a bare `table.copy` does not eat the
+   next instruction's two atoms — `has_optional_indices()` in `wat.rs`.
+
+| file | before | after |
+| --- | --- | --- |
+| `table_copy` | 216 | **0** |
+| `table_init` | 68 | **0** |
+| `memory_init` | 27 | **0** |
+| `linking` | 23 | 16 |
+| suite total | 1,521 failing / 97.4% | **851 failing / 98.6%** |
+
+Suite now: **59,261 passed, 851 failed, 4,720 skipped** (284 files, 1 unparseable).
+
+Regression tests added for all three (`wast.rs`: `call_indirect_uses_the_callers_own_table`,
+`memory_init_reads_the_instances_own_data_segment` — both keep a *second* instance alive so the store
+and module indices cannot coincide; `wat.rs`: `assembles_the_table_index_shorthands`). Workspace: 254.
+
+**Standing lesson:** with a shared store, every pool access must route through `IndexMaps`, and every
+`ctx.module.*` access must use the module-local index. A test with one instance per store proves
+nothing about either — the indices are equal. New tests in this area must instantiate two modules.
+
+Remaining after the fix: `table_copy64` 22 / `table_init64` 3 are the 64-bit **table index type**
+(`(table $t i64 30 30 funcref)`), still out of scope per the recorded invariant. The rest of the
+worst-file list is the T6-era literal/binary punch-list, unchanged.
+
+## Superseded punch-list (2026-08-04, post-linking — 97.4%, 1,521 failing)
 
 **The pass RATE fell while the capability rose, and that is the honest reading.** Wiring `register` + a
 `spectest` provider into the `.wast` runner moved **2,784 assertions out of "skipped"**: 2,032 became

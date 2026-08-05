@@ -10,8 +10,10 @@ so the oracle split has collapsed to that one item (see `design-decisions.md`, `
 is in scope** (owner, 2026-07-27). **T0–T6 ALL DONE.** T5's ten interpreter slices (v0.6.0 integer →
 v0.6.9 exception handling) completed the interpreter's wasm-proposal coverage; **v0.7.0 then finished T4
 (the deferred SIMD/atomic/GC/EH validation arms) and all of T6 (the text toolchain) together.** wasmrt
-now assembles, decodes, type-checks and runs WebAssembly, scoring **98.4% on the official spec
-testsuite**. **Next: T7 — host imports + WASI preview 1.**
+now assembles, decodes, type-checks and runs WebAssembly. **T7a (host imports), T7b (module linking on
+the shared store) and T7c-1 (WASI p1 minus the filesystem) are DONE (2026-08-05)**, scoring **98.6% on
+the official spec testsuite** (59,261 / 851 / 4,720). **Next: T7c-2 — the sandboxed filesystem on the
+handle-stack resolver — then the known-issues review the owner asked for before T8.**
 
 ## ✅ v0.7.0 — SHIPPED and published (2026-08-03)
 
@@ -20,12 +22,9 @@ crates.io; tag `v0.7.0` pushed. Commits: `8a37795` validator arms · `5e82d08` s
 name map · `523ad3d` assembler core · `6d8d56c` floats + block types · `4e4b4de` SIMD/atomics ·
 `0a7dc7e` GC/EH text forms · the `.wast` runner · the conformance runner + its findings.
 
-**Spec-suite conformance: 98.4%** — 54,509 passing, 871 failing, 9,608 skipped (284 files). Owner's call
-(2026-08-03): **stop T6 here and re-check after T7**, since most skips need host imports. Do not grind
-the remaining assembler edges first.
-
-**Next: T7 — host imports + WASI preview 1.** `Instance::new` still rejects any module with imports
-(`Trap::ImportsUnsupported`), which is also what blocks the suite's `register` / import-linking cases.
+Conformance at the v0.7.0 tag was **98.4%** (54,509 / 871 / 9,608). It has since moved to **98.6%**
+(59,261 / 851 / 4,720) on unreleased T7 work — see the T7 entry below and `cmem/testing.md` for the
+three-column history and why the middle column dipped.
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6
@@ -322,7 +321,24 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     defined initializer may read an imported global. **Imported memories/tables reject loudly**
     (`UnsupportedImportKind`) pending T7b's shared-ownership model. `[x]`
   - **T7b — module linking** (wasm→wasm imports; shared memories/tables) **+ a `spectest` provider in the
-    `.wast` runner**. `[ ]`
+    `.wast` runner**. **✅ DONE (2026-08-05).** Built on the **shared-store model** (owner approved
+    2026-08-05: *"Proceed with the shared store. I agree with doing it like wasmtime."*). `Store` owns
+    `code: Vec<InstanceData>` + `pools: Pools` as **separate fields**, so a cross-instance call borrows
+    two disjoint pieces — no `Rc`, no `RefCell`, no `unsafe`, and no borrow check on the hot path. Each
+    instance holds an `IndexMaps` from its own index space into the pools; `IndexMaps::get` returns
+    `usize::MAX` out of range, so a bad index **traps instead of aliasing another instance**. `Instance`
+    survives as a thin `{ store, id }` wrapper, so the single-instance API is unchanged. `Imports` keeps
+    host and wasm backings in **one ordered vector** — two vectors silently reordered any module that
+    mixed `(import "spectest" …)` with `(import "a" …)`. `[x]`
+    - **The refactor's own defect class, found and fixed 2026-08-05:** with every instance sharing one
+      pool, any site that indexes a pool with a raw module-local immediate reads *another module's*
+      resource — and it is **invisible under one instance per store**, where the two indices are equal.
+      Three such sites: `Op::CallIndirect` (raw `ci.table`), `exec_memory_init` (store index into
+      `ctx.module.data`), plus the assembler's missing `table.copy`/`table.init` index shorthands.
+      **Suite: 1,521 failing → 851; 97.4% → 98.6%** (59,261 / 851 / 4,720). Clippy's `unused variable:
+      maps` caught three of these; the rest needed a hand audit, because `ci.table` is a different
+      expression from `table_imm(instr)` and no lint can see the difference. Full write-up +
+      the standing **two-instance rule** for tests: `cmem/known-issues.md`, `cmem/testing.md`.
     - **⚠️ Measured correction (2026-08-04): host imports alone did NOT move the conformance skips** —
       9,608 → 9,605 after T7a. The earlier claim that T7a would "unblock most of the skips" was wrong,
       and the measurement is what caught it. T7a gave the *engine* the capability; the **`.wast` runner

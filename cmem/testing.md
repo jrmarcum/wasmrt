@@ -18,16 +18,25 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — the T6 gate result (2026-08-03, v0.7.0)
+## Spec-suite conformance — current (2026-08-05, post-T7 linking + the shared-store fixes)
 
-First full run of `wasmrt wast <testsuite>` over the 284 vendored files:
+`wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | count |
-| --- | --- |
-| **passed** | **54,509** |
-| failed | 871 |
-| skipped | 9,608 |
-| **pass rate** | **98.4%** of 55,380 adjudicated assertions |
+| | T6 gate (2026-08-03) | post-linking (08-04) | **current (08-05)** |
+| --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | **59,261** |
+| failed | 871 | 1,521 | **851** |
+| skipped | 9,608 | 6,821 | **4,720** |
+| **pass rate** | 98.4% | 97.4% | **98.6%** of 60,112 adjudicated |
+
+The dip at 08-04 was capability, not regression: wiring `register` + `spectest` moved 2,784 assertions
+out of *skipped*, and ~649 of them were already-broken code that had been hidden behind a skip. The
+08-05 column is that debt paid off — see the shared-store punch-list in `known-issues.md`.
+
+**Two-instance rule.** Every conformance defect fixed on 08-05 was a store-index/module-index
+conflation that is *unobservable* with a single instance per store. Regression tests touching pools
+(tables, memories, globals, data/elem segments) MUST instantiate a second module first, or they prove
+nothing.
 
 **Skips are never folded into passes.** A construct this build cannot put to the test is not a pass —
 that is the runner's honesty rule (`wast.rs`), and it is why the number is trustworthy. The skip count is

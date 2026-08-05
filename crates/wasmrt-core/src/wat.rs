@@ -2219,6 +2219,28 @@ fn immediate_arity(op: crate::opcode::Op) -> usize {
     }
 }
 
+/// Whether every index immediate of `op` may be omitted in the text format, defaulting to 0.
+/// `memory.init` and `table.init` are here too: their *segment* index is mandatory, but it is
+/// also index-like, so the leading-atom count stops in the right place either way.
+fn has_optional_indices(op: crate::opcode::Op) -> bool {
+    use crate::opcode::Op as O;
+    matches!(
+        op,
+        O::TableGet
+            | O::TableSet
+            | O::TableSize
+            | O::TableGrow
+            | O::TableFill
+            | O::MemorySize
+            | O::MemoryGrow
+            | O::MemoryFill
+            | O::TableInit
+            | O::TableCopy
+            | O::MemoryInit
+            | O::MemoryCopy
+    )
+}
+
 /// Emit `call_indirect`, in either form:
 /// `call_indirect $table? (type $t)? (param …)* (result …)*` — plus, when `folded`, the
 /// operand sub-expressions that follow (emitted before the opcode).
@@ -2531,7 +2553,20 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             Ok(j)
         }
         _ => {
-            let n = immediate_arity(op);
+            let mut n = immediate_arity(op);
+            // For ops whose index immediates may be omitted (defaulting to 0), consume only
+            // the index-like atoms actually present — otherwise a bare `table.copy` would
+            // swallow the two atoms of whatever instruction follows it.
+            if has_optional_indices(op) {
+                n = (0..n)
+                    .take_while(|k| {
+                        items
+                            .get(i + 1 + k)
+                            .and_then(Sexpr::as_atom)
+                            .is_some_and(is_index_or_id)
+                    })
+                    .count();
+            }
             let end = (i + 1 + n).min(items.len());
             emit_op_with_immediates(ctx, op, &items[..end], i + 1)?;
             // Loads/stores may carry `offset=`/`align=` atoms beyond the fixed arity.
@@ -2732,15 +2767,25 @@ fn emit_op_with_immediates(
             );
         }
         O::TableInit => {
-            // `table.init $table $elem` — the binary order is elem then table.
-            let a = resolve_by_name(ctx.table_names, imm(0)?)?;
-            let e = resolve_by_name(ctx.elem_names, imm(1)?)?;
+            // Two spellings: `table.init $table $elem`, or `table.init $elem` with the
+            // table defaulting to 0. The binary order is always elem then table.
+            let (table, elem) = match (items.get(start), items.get(start + 1)) {
+                (Some(t), Some(e)) => (resolve_by_name(ctx.table_names, t)?, e),
+                (Some(e), None) => (0, e),
+                _ => return Err(Error::BadImmediate),
+            };
+            let e = resolve_by_name(ctx.elem_names, elem)?;
             uleb(&mut ctx.out, u64::from(e));
-            uleb(&mut ctx.out, u64::from(a));
+            uleb(&mut ctx.out, u64::from(table));
         }
         O::TableCopy => {
-            let d = resolve_by_name(ctx.table_names, imm(0)?)?;
-            let s = resolve_by_name(ctx.table_names, imm(1)?)?;
+            // `table.copy $dst $src`, or bare with both defaulting to table 0.
+            let d = items
+                .get(start)
+                .map_or(Ok(0), |s| resolve_by_name(ctx.table_names, s))?;
+            let s = items
+                .get(start + 1)
+                .map_or(Ok(0), |s| resolve_by_name(ctx.table_names, s))?;
             uleb(&mut ctx.out, u64::from(d));
             uleb(&mut ctx.out, u64::from(s));
         }
@@ -3642,6 +3687,30 @@ mod tests {
     fn assembles_the_module_binary_form() {
         let m = asm(r#"(module binary "\00asm\01\00\00\00")"#).unwrap();
         assert_eq!(m, [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    }
+
+    /// `table.copy`/`table.init` may omit their table index (it defaults to 0), and in flat
+    /// form the omission must not make the assembler eat the next instruction's atoms.
+    #[test]
+    fn assembles_the_table_index_shorthands() {
+        let bare = asm(
+            r#"(module (table 3 funcref) (elem $e funcref (ref.null func))
+                 (func (table.copy (i32.const 0) (i32.const 1) (i32.const 1))
+                       (table.init $e (i32.const 0) (i32.const 0) (i32.const 1))))"#,
+        )
+        .unwrap();
+        let explicit = asm(
+            r#"(module (table $t 3 funcref) (elem $e funcref (ref.null func))
+                 (func (table.copy $t $t (i32.const 0) (i32.const 1) (i32.const 1))
+                       (table.init $t $e (i32.const 0) (i32.const 0) (i32.const 1))))"#,
+        )
+        .unwrap();
+        assert_eq!(bare, explicit);
+
+        // Flat form: `table.copy` takes no immediates here, so `drop` must survive it.
+        asm(r#"(module (table 3 funcref) (func (result i32)
+                 i32.const 0 i32.const 1 i32.const 1 table.copy i32.const 7))"#)
+        .unwrap();
     }
 
     #[test]

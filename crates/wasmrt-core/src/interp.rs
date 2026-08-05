@@ -1706,7 +1706,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 let slot = frame.pop_i32() as u32 as usize;
                 let entry = *store
                     .tables
-                    .get(ci.table as usize)
+                    .get(ctx.maps.table(ci.table))
                     .ok_or(Trap::NoTable)?
                     .entries
                     .get(slot)
@@ -2383,7 +2383,13 @@ fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, instr: &Ins
     let seg: &[u8] = if dropped {
         empty
     } else {
-        &ctx.module.data.get(di).ok_or(Trap::UndefinedData)?.bytes
+        // `di` indexes the store-wide drop flags; the bytes live in this module's own
+        // segment list, so they are addressed by the module-local `data`.
+        &ctx.module
+            .data
+            .get(data as usize)
+            .ok_or(Trap::UndefinedData)?
+            .bytes
     };
     // n/src index the data segment (always i32); dst is a memory address.
     let n = u64::from(frame.pop_i32() as u32);
