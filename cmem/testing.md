@@ -52,6 +52,37 @@ encoding no decoder could read, truncated out-of-range constants, and mis-placed
 `roadmap.md`'s T6-gate entry, all pinned by regression tests). **That is the argument for the suite:** it
 tests the assembler against the decoder, validator and interpreter at a scale hand vectors cannot reach.
 
+## The wasmtk corpora — first full run (2026-08-05, at v0.8.0)
+
+Two corpora beyond the spec testsuite, both in `wasmtk/tests` ([[spec-testsuite-location]]). **This is
+the T7 `wasi-gate`**, and it now runs.
+
+**WASI corpus — 441 `.wasm`, stdout diffed against the frozen oracle `wazmrt@dadc727`:**
+
+| | count |
+| --- | --- |
+| **stdout byte-identical to the oracle** | **426** |
+| differing | 15 |
+
+**Engine-observable behaviour matches on 441/441.** All 15 differences are CLI shape, not execution: 12
+are library/reactor modules with no `_start` (the two CLIs disagree about what to do with those), and 3
+are deliberate-throw tests where both runtimes print the value and then trap. Detail in
+`known-issues.md`.
+
+**`.wat` corpus — 534 files, assemble → decode → validate:**
+
+| stage | result |
+| --- | --- |
+| assembled | **532** |
+| validated | **529** |
+| failed | **2** (`ref.null $ConcreteType`) |
+
+**Method notes worth keeping.** Compare **stdout only** (`2>/dev/null`) — wasmrt writes diagnostics to
+stderr and the oracle writes them to stdout, so an unseparated diff reports differences that are not
+there. And give each file its **own** output path: reusing one `/tmp/out.wasm` across a 534-file loop hit
+Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
+re-run.
+
 ## Current test state (2026-08-05, post-T7)
 
 **281 workspace tests, all green** under native + (compile) `wasm32` no_std; clippy clean on all four

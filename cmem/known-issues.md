@@ -40,6 +40,78 @@ preopen while a guest runs) is written up in `security-model.md`. Do not re-liti
 interpreter alike — deliberate, oracle-faithful. `legacy/try_delegate.wast` failing is the *correct*
 outcome.
 
+## 🔧 Open — found by the wasmtk corpus run (2026-08-05), all unfixed
+
+The spec testsuite never exercised these; the **wasmtk** corpus did. All four are measured against the
+frozen oracle, so each says what wazmrt does with the same input.
+
+### 1. `ref.null $ConcreteType` is rejected by the assembler — REAL GAP
+
+[`wat.rs`'s `O::RefNull` arm](../crates/wasmrt-core/src/wat.rs) matches only the **abstract** heap types
+(`func`/`extern`/`any`/`eq`/`i31`/`struct`/`array`/`exn`/`none`) and its `_ =>` returns `BadImmediate`.
+A **concrete** heap type is legal there and encodes as a **positive s33 type index** — the same encoding
+`(ref $t)` already uses elsewhere, so the fix is to fall through to type-name resolution instead of
+erroring.
+
+```wat
+(module (type $A (array (mut i32))) (global $h (ref null $A) (ref.null $A)))   ;; BadImmediate
+```
+
+The oracle assembles and validates it. Hits `gc-collect-demo.wat` and `gc-linked-list.wat` — **the only
+2 of 534 `.wat` files wasmrt cannot assemble.**
+
+### 2. `reference-types.wat` — `UndefinedType`, oracle says valid
+
+Assembles, then fails **validation** with `UndefinedType`. Oracle: `valid wasm v1, 6 sections`. Not yet
+diagnosed. `module/wasm_wast/wasm-wat-samples-main/.../reference-types/reference-types.wat`.
+
+### 3. `39_JstyperMixed.wasm.{rt,roundtrip}.wat` — `TypeMismatch`, oracle **runs** them
+
+Two files (same defect). We reject at validation; the oracle assembles *and executes* them, printing
+`3 / 0 / 7`. That the oracle gets a result means this is our type-checker being wrong, not the input.
+`wasi/wasm_wasi/`.
+
+### 4. Trap diagnostics are one line — no backtrace
+
+Both runtimes trap identically, but the **reports differ in quality**:
+
+```
+wasmrt  stderr: wasmrt: <path>: trap: uncaught exception
+wazmrt  stdout: trap: UncaughtException
+                  at fn[13] +57
+                  by fn[14] +77
+                  (no name section: rebuild the guest unstripped for symbols)
+```
+
+The missing piece is the **`decode_body_tracked` byte-offset work deferred at T2** — without per-instruction
+offsets there is no frame to report. **A C-ABI embedder needs this more than the CLI does**: at T8 a trap
+crossing the boundary is otherwise completely opaque. *(Keep writing diagnostics to **stderr** — that is a
+deliberate divergence, not a bug: `wasmrt wasi prog.wasm > out.txt` then captures only guest output,
+whereas the oracle would mix its trap report into that file.)*
+
+### 5. An unconditional `data_count` section wastes 3 bytes — against the "small" axis
+
+Assembling the book's `helloworld.wat` gives **135 bytes vs wat2wasm's 132**, and the whole difference is
+a `data_count` section we always emit. The spec requires it **only** when `memory.init`/`data.drop`
+appear; otherwise it is optional. Legal, but it is dead weight on every module with data segments, and
+**smallest-binary is one of the three stated axes** (`vision.md`). Fix at T9 with the other size levers.
+
+### Not a defect — recorded so it is not chased twice
+
+- **12 wasmtk modules have no `_start`** (`*_lib_modc`, `1_print`, `18_symbol_table`): they are
+  library/reactor modules exporting named functions for a loader to drive. `wasmrt wasi` reports "no such
+  exported function"; wazmrt's CLI falls back to summarize-and-validate. **A CLI-shape difference, not an
+  engine one.**
+- **`15_panic` / `15_Trap-On-Error` "fail" correctly** — both `console.log` a value and *then* throw.
+  wasmrt prints `5`, then traps. So does the oracle.
+- **`SumSquared.wat` and `loop.wat` were corrupt fixtures**, not wasmrt bugs — book line numbers had been
+  pasted into the source (`(export 1"SumSquared")`, `(6local.get`), which is why the oracle rejected them
+  too. **Repaired in the wasmtk repo 2026-08-05**; both now assemble, validate, and compute correctly
+  (`SumSquared(3,4)=49`; `loop_test` yields 1/6/120/720 = n!).
+- **`helloworld.wat` needs no repair.** Both copies assemble to byte-identical output and validate in both
+  runtimes. `(call $print_string (global.get $string_len))` passing a *length* is correct: the shipped
+  `Chapter2/helloworld.js` reads from a fixed `start_string_index = 100` and takes a length.
+
 ## ✅ Literal/text edges — DONE 2026-08-05 (item 3 above)
 
 `simd_const` 46→2, `const` 26→2, `float_literals` 26→**0**, `token` 22→**0**. Suite **59,395 → 61,013

@@ -298,7 +298,11 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     `table_copy`/`table_init` module failed to build; (3) **out-of-range constants truncated instead of
     rejected** (`(i32.const 0x100000000)` quietly became 0); (4) **digit separators accepted anywhere**
     (`_` is legal only *between* digits). All four are pinned by regression tests. `[x]`
-- **T7 — Host imports + WASI preview 1 + CLI. 🚧 IN PROGRESS (2026-08-04).** Gate: **wasi-gate** compiles
+- **T7 — Host imports + WASI preview 1 + CLI. ✅ DONE (2026-08-05, v0.8.0). GATE MET:** the wasmtk WASI
+  corpus runs — **426/441 stdout byte-identical to the frozen oracle, and 441/441 identical in
+  engine-observable behaviour** (the 15 diffs are CLI shape: 12 modules have no `_start`, 3 are
+  deliberate-throw tests). The `.wat` corpus assembles 532/534. Numbers + method in `cmem/testing.md`;
+  the 5 open defects it surfaced are in `cmem/known-issues.md`. Original gate text: **wasi-gate** compiles
   real Zig/C/Rust guests and matches stdout; run the wasmtk WASI corpus (400 runnable) to wazmrt's
   result. `[🚧]`
   - **✅ Both decision-gates RESOLVED (owner, 2026-08-04) — both the zero-dependency option, which keeps
