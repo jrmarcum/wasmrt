@@ -7,17 +7,24 @@ which already runs the full WebAssembly spec testsuite and a large WASI corpus. 
 **reference oracle**; wasmrt is finished when it reproduces the oracle feature-for-feature, verified by
 parity testing at every step.
 
-> **Status: early — `0.7.0`.** wasmrt can **assemble**, **decode**, **type-check**, and **run**
+> **Status: early — `0.8.0`.** wasmrt can **assemble**, **decode**, **type-check**, and **run**
 > WebAssembly — `wasmrt run fac.wasm fac 10` → `3628800`, `wasmrt wat mod.wat -o mod.wasm`. Execution
 > covers integer + floating-point compute, linear memory (incl. **multi-memory** and **memory64**),
 > tables / `call_indirect` / reference types, **WasmGC**, **SIMD** (the full `v128` set, incl. relaxed),
 > **atomics**, and **exception handling** — and the type-checker covers all of it, so
 > `wasmrt <file.wasm>` gives a real verdict on any module wasmrt can run.
 >
-> It now reads and writes the **text format** and runs the **official spec testsuite**:
-> `wasmrt wast <dir>` scores **98.4% (54,509 assertions passing)**. Most of what remains needs **host
-> imports**, which arrive with WASI next. See **[ROADMAP.md](ROADMAP.md)** for the live use-case matrix
-> (what actually works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
+> It reads and writes the **text format** and runs the **official spec testsuite**: `wasmrt wast <dir>`
+> scores **98.8% (61,013 assertions passing)**, with every one of the 284 files parsing.
+>
+> It also runs **real WASI programs** — `wasmrt wasi prog.wasm` — with stdio, args, environ, clocks,
+> `random_get` and a **sandboxed filesystem**. A guest reaches only what you preopen:
+> `--dir <host>[::<guest>]`, or `--ro-dir` for read-only (which propagates to the whole subtree). With
+> no `--dir`, every path call returns `BADF` — there is no implicit working directory.
+>
+> The engine is **`#![forbid(unsafe_code)]`**: `wasmrt-core` and the CLI contain no `unsafe` at all, and
+> the compiler enforces it. See **[ROADMAP.md](ROADMAP.md)** for the live use-case matrix (what actually
+> works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
 
 ## Goals
 

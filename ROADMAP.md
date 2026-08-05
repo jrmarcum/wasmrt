@@ -34,7 +34,7 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | **0.5.0** | Validate (core) | the spec type-checker over the core language | ✅ |
 | **0.6.x** | Interpret | execution, one feature slice at a time — compute, memory, tables/reftypes, WasmGC, SIMD, multi-memory, threads/atomics, memory64, exception handling | ✅ |
 | **0.7.0** | Text toolchain + Validate (complete) | `.wat` assembler + `.wast` runner, bringing the official spec testsuite online; plus the SIMD / atomics / GC / EH typing arms, so the type-checker covers everything the interpreter runs | ✅ |
-| 0.8.0 | WASI + CLI | host imports + WASI preview 1 — run real compiled programs | ⬜ |
+| **0.8.0** | WASI + CLI | host imports + module linking on a shared store + WASI preview 1 **including the sandboxed filesystem** (`--dir` / `--ro-dir` preopens); plus `#![forbid(unsafe_code)]` in the engine | ✅ |
 | 0.9.0 | C ABI | the `wasmrt.h` embedding surface | ⬜ |
 | 0.10.0 | Hardening | licensing, size minimization, all gates green | ⬜ |
 | **1.0.0** | **Parity** | **full parity with the wazmrt oracle** | ⬜ |
@@ -59,7 +59,7 @@ Checked off as each capability lands and passes its gate.
 | memory64 | ✅ | 0.6 |
 | Exception handling (exnref + legacy) | ✅ | 0.6 |
 | Type-check every construct above | ✅ | 0.7 |
-| Host imports (link a module against another) | ⬜ | 0.8 |
+| Host imports (link a module against another) | ✅ | 0.8 |
 | Tail calls | ⬜ | 0.8 |
 
 ### Text & conformance
@@ -67,14 +67,14 @@ Checked off as each capability lands and passes its gate.
 | --- | --- | --- |
 | Assemble `.wat` → `.wasm` | ✅ | 0.7 |
 | Run `.wast` spec scripts | ✅ | 0.7 |
-| Pass the official WebAssembly spec testsuite | 🚧 98.4% | 0.7 |
+| Pass the official WebAssembly spec testsuite | 🚧 98.8% | 0.7 |
 
 ### WASI & the CLI
 | Use case | Status | Lands in |
 | --- | --- | --- |
-| Run a WASI preview-1 program (stdout/args/env/clock) | ⬜ | 0.8 |
-| Sandboxed filesystem (`--dir` / `--ro-dir` preopens) | ⬜ | 0.8 |
-| Module pin verification / signatures | ⬜ | 0.8 |
+| Run a WASI preview-1 program (stdout/args/env/clock) | ✅ | 0.8 |
+| Sandboxed filesystem (`--dir` / `--ro-dir` preopens) | ✅ | 0.8 |
+| Module pin verification / signatures | ⬜ | 0.9 |
 
 ### Embed wasmrt
 | Use case | Status | Lands in |

@@ -11,8 +11,67 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: T7 — host imports + WASI preview 1, which also unblocks the spec suite's `register` /
-import-linking cases (the bulk of the current conformance skips)._
+_Next: T8 — the `wasmrt.h` C ABI._
+
+## [0.8.0] — WASI preview 1, host imports and module linking (stage T7)
+
+wasmrt can now **run real compiled programs**. This release adds host imports, module-to-module
+linking, and WASI preview 1 including the sandboxed filesystem — and makes the project's no-`unsafe`
+rule mechanical rather than aspirational.
+
+### Added — running real programs
+
+- **Host imports** (`Instance::new_with_imports`). A module's declared imports link to host backings in
+  declaration order. `HostFunc` is a **boxed closure**, not a function pointer plus a `void*` context —
+  the context-pointer shape cannot be expressed without `unsafe`. `Caller` gives hosts **bounds-checked**
+  `read`/`write`/`memory_len` over guest memory, so a wild guest pointer yields `None` rather than
+  panicking the embedder.
+- **Module linking on a shared store.** Resources are owned once by a `Store`; each instance holds an
+  index map into it. A cross-instance call borrows two disjoint fields, so there is no `Rc`, no
+  `RefCell`, no `unsafe`, and no borrow check on the interpreter's hot path. `Instance` is unchanged for
+  single-module use.
+- **WASI preview 1** (`wasmrt wasi <file.wasm> [args…]`): stdio, `args_*`, `environ_*`, clocks,
+  `proc_exit`, and `random_get` backed by a **ChaCha20 CSPRNG seeded from the OS** — which fails loudly
+  if the OS will not supply entropy rather than emitting predictable bytes.
+- **A sandboxed filesystem**, reached only through explicit preopens: `--dir <host>[::<guest>]` and
+  `--ro-dir` for read-only, which propagates to the whole subtree. **With no `--dir`, every path call
+  returns `BADF`** — there is no implicit working directory. Roughly twenty `fd_*` / `path_*` calls,
+  a rights lattice, and a resolver in which the escape properties hold *by construction*: `..` cannot
+  rise above the preopen, an absolute symlink target re-bases to the preopen root, symlink targets are
+  expanded through the same loop that vets the original path, and device/NT-namespace components are
+  refused before the filesystem is touched. Calls that are not implemented report `NOSYS` rather than a
+  silent success.
+
+### Added — safety
+
+- **`#![forbid(unsafe_code)]`** in `wasmrt-core` and the CLI; `#![deny(unsafe_code)]` in `wasmrt-capi`
+  with a single documented exception for the `#[unsafe(no_mangle)]` a C export requires. Both crates
+  already carried zero `unsafe`; the lints make the next one a compile error.
+
+### Fixed
+
+- **`call_indirect` read the wrong module's table** when several modules shared a store, because it
+  indexed the store with a module-local index. `memory.init` had the mirror-image defect. Together these
+  accounted for over 500 spec-suite failures.
+- **A folded `br_table` emitted no label vector at all** — the assembler reported success for bytes no
+  decoder could read.
+- **`(data "a""b")` was accepted and silently concatenated** to `ab`. Tokens must now be separated by
+  whitespace or a parenthesis.
+- **Float literals that overflow are rejected** instead of quietly becoming infinity; only `inf` and
+  `nan` may denote a non-finite value. The float grammar now follows the spec rather than Rust's parser
+  (`.0` is malformed, `1.` is not), digit separators must sit between two **digits** (`0x_1` and `1_e1`
+  were accepted), and a NaN payload is range-checked rather than masked into a different NaN.
+- **`v128.const` is a constant expression.** The interpreter had evaluated it since 0.6.5 while the
+  validator rejected it, so a module with a `v128` global was refused despite running correctly.
+- **`table.copy` / `table.init` accept their index shorthands** (both indices may be omitted).
+- **Quoted identifiers** (`$"a b"`) parse, and **annotations** (`(@id …)`) are skipped as the annotations
+  proposal requires of a tool that does not implement them.
+
+### Conformance
+
+**98.8%** of the official WebAssembly spec testsuite — 61,013 passing, 751 failing, 3,094 skipped across
+284 files, up from 98.4% (54,509 passing) at 0.7.0. **Every one of the 284 files now parses.** Skips are
+never counted as passes: a construct this build cannot put to the test is reported separately.
 
 ## [0.7.0] — Text toolchain (stage T6) + the validator's deferred typing arms (completes stage T4)
 
@@ -384,7 +443,15 @@ First release: the crate exists and the build is real on every target surface. N
 - Size-first release profile; builds verified on native (CLI + static lib + cdylib) and freestanding
   `wasm32-unknown-unknown` (no_std, libc-free).
 
-[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/jrmarcum/wasmrt/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jrmarcum/wasmrt/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/jrmarcum/wasmrt/compare/v0.6.9...v0.7.0
+[0.6.9]: https://github.com/jrmarcum/wasmrt/compare/v0.6.8...v0.6.9
+[0.6.8]: https://github.com/jrmarcum/wasmrt/compare/v0.6.7...v0.6.8
+[0.6.7]: https://github.com/jrmarcum/wasmrt/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/jrmarcum/wasmrt/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/jrmarcum/wasmrt/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/jrmarcum/wasmrt/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/jrmarcum/wasmrt/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/jrmarcum/wasmrt/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/jrmarcum/wasmrt/compare/v0.6.0...v0.6.1

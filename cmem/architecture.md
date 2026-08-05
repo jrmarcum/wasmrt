@@ -4,15 +4,30 @@ The Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate
 pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
 `00-synthesis.md`, `02-decode-core.md`, `03-validate-interp.md`, `06-build-docs-licensing.md`).
 
-**Realized so far (through T6 / v0.7.0):** the workspace + all three crates exist; `wasmrt-core`
+**Realized so far (through T7 / v0.8.0):** the workspace + all three crates exist; `wasmrt-core`
 has `types`, `reader`, `opcode`, `module` (decode), `validate` (core-language type-checker), and `interp`
 (switch interpreter — integer + float compute + linear memory incl. **multi-memory** and **memory64** +
 tables/`call_indirect`/reference types + **WasmGC** structs/arrays/`i31`/casts over a `Store`-owned GC heap +
 **SIMD** the full `v128` fixed-width + relaxed set + **threads/atomics** the `0xFE` family, single-threaded
 semantics + **exception handling** in both encodings) implemented and parity-tested — the interpreter's
 proposal coverage is complete — plus the **text toolchain**: `sexpr` (the shared front-end), `wat` (the
-`.wat` assembler, every opcode family) and `wast` (the spec-script runner). `wasi` / `pin` remain stubs.
-The CLI does summarize + validate + `run` + `wat` (assemble) + `wast` (conformance). **A memory's index type is a property of the
+`.wat` assembler, every opcode family) and `wast` (the spec-script runner).
+
+**Added at T7 / v0.8.0:** **host imports** (`Instance::new_with_imports`; `HostFunc` is a boxed closure,
+not a fn-pointer + `void*` ctx — that shape cannot be expressed without `unsafe`), **module linking on a
+shared store**, and **`wasi`** — complete for preview 1, split into `wasi/mod.rs` (the process surface:
+stdio, `args_*`, `environ_*`, clocks, `random_get`, `proc_exit`) and `wasi/fs.rs` (the fd table, the
+rights lattice, the sandbox resolver, and ~20 `fd_*`/`path_*` calls). `pin` remains a stub (T8).
+
+**The shared store is the load-bearing T7 shape.** `Store` holds `code: Vec<InstanceData>` and
+`pools: Pools` as **separate fields**, so a cross-instance call borrows two disjoint pieces — no `Rc`, no
+`RefCell`, no `unsafe`, and no borrow check on the interpreter's hot path. Each instance carries an
+`IndexMaps` from its own index space into the pools, and `IndexMaps::get` yields `usize::MAX` out of
+range so a bad index **traps rather than aliasing another instance**. `Instance` survives as a thin
+`{ store, id }` wrapper, so the single-instance API is unchanged.
+
+The CLI does summarize + validate + `run` + `wasi` (with `--dir`/`--ro-dir` preopens) + `wat` (assemble)
++ `wast` (conformance). **A memory's index type is a property of the
 memory, not the engine:** `Memory.is64` drives one `pop_mem(is64)` on the address/count path and one
 `mem_addr_ty(index)` in the validator, so every memory op (incl. the `0xFE` atomic and `v128` families)
 is memory64-aware through a single choke point rather than duplicated 32/64 opcode arms. **Exceptions
@@ -45,7 +60,11 @@ data** rather than wazmrt's arena (frees on drop; no `deinit`).
   - `interp` — `Instance` (retains its `Module`) + the switch interpreter over untyped `u64` slots;
     GC heap; host imports; trap backtrace.
   - `sexpr` / `wat` / `wast` — the text toolchain (assembler + spec-testsuite runner).
-  - `wasi` — WASI preview 1 + the secure sandbox (`walkFull` handle-stack resolver).
+  - `wasi` — WASI preview 1 (`wasi/mod.rs` process surface + `wasi/fs.rs` fd table, rights lattice and
+    the sandbox resolver). The resolver walks **one component at a time**, accumulating a path rather
+    than holding dir handles — Rust's `std` has no dir-relative open, and both the zero-dep and
+    no-`unsafe` lines are held instead. Escape is unrepresentable either way; see `security-model.md`
+    for exactly what that does and does not buy.
   - `pin` — module pin verification (SHA-256 allow-list; hash the bytes you run).
 - **`wasmrt-capi`** — `crate-type = ["staticlib", "cdylib"]`. The public **`wasmrt.h`** surface as
   `#[no_mangle] pub extern "C"` functions over core. Uses **lightweight `{id}` handles** into a store

@@ -17,13 +17,13 @@ Only tail calls have no wazmrt oracle → conform those against **wasmtime + the
 (see [testing.md](testing.md), [design-decisions.md](design-decisions.md)). Full deep-read of wazmrt is
 in `docs/port/00-synthesis.md` (+ 6 subsystem maps).
 
-## Status (2026-07-28) — PORT phase; **decode → validate → run all working**
+## Status (2026-08-05) — PORT phase; **assemble → decode → validate → run → WASI all working**
 
 The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the port is underway,
 released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
 **memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
 
-**Done — T0–T6 (v0.1.0 → v0.7.0):**
+**Done — T0–T7 (v0.1.0 → v0.8.0):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
   surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
 - **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`
@@ -53,12 +53,25 @@ released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope a
   `catch_all`/`rethrow` — unwinding across call frames; **`delegate` is rejected, matching the oracle**.
 
 **T4 and T6 are complete too (v0.7.0): the validator covers every construct the interpreter runs, and
-the text toolchain assembles `.wat`, runs `.wast`, and scores 98.4% on the official spec testsuite
+the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the official spec testsuite
 (54,509 assertions).**
 
-**Next: T7 — host imports + WASI preview 1.** `Instance::new` still rejects any module with imports,
-which is also what blocks most of the suite's remaining skips.
-See the task list in [roadmap.md](roadmap.md). **218 core unit tests** green; clippy clean; native +
+- **T7 (v0.8.0)** — **host imports, module linking, and WASI preview 1 including the sandboxed
+  filesystem.** `Instance::new_with_imports` links host backings in declaration order (`HostFunc` is a
+  **boxed closure**, not a fn-pointer + `void*` ctx — that shape needs `unsafe`, so this is the safety
+  directive's first real application, and T8's C ABI will need the same treatment). Linking runs on a
+  **shared store** (wasmtime-style): resources are owned once by the `Store`, instances hold `IndexMaps`
+  into it, and the borrow splits cleanly with no `Rc`, no `RefCell`, no `unsafe`. **`wasmrt wasi <file>`
+  runs a preview-1 program**; a guest reaches only what `--dir` / `--ro-dir` preopens, and with no
+  `--dir` every path call is `BADF` — there is no implicit cwd. **The sandbox is the resolver**: `..`
+  cannot rise above the preopen, absolute symlink targets re-base to the preopen root, and a canary
+  outside the preopen is a mutation-verified test. v0.8.0 also made the **safety directive mechanical**
+  (`#![forbid(unsafe_code)]` in core + the CLI) and closed the **literal/text edges**, which took the
+  suite to **98.8%** (61,013 passing) with **all 284 files parsing for the first time**.
+
+**Next: T8 — the `wasmrt.h` C ABI.** Its decision-gate is finalizing the header shape with the owner
+before any code is written; the draft lives in `docs/port/`.
+See the task list in [roadmap.md](roadmap.md). **281 workspace tests** green; clippy clean; native +
 `wasm32` no_std all build.
 
 ## Planned repo / crate layout

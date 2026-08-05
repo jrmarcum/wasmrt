@@ -10,11 +10,13 @@ so the oracle split has collapsed to that one item (see `design-decisions.md`, `
 is in scope** (owner, 2026-07-27). **T0–T6 ALL DONE.** T5's ten interpreter slices (v0.6.0 integer →
 v0.6.9 exception handling) completed the interpreter's wasm-proposal coverage; **v0.7.0 then finished T4
 (the deferred SIMD/atomic/GC/EH validation arms) and all of T6 (the text toolchain) together.** wasmrt
-now assembles, decodes, type-checks and runs WebAssembly. **ALL of T7 is DONE (2026-08-05, unreleased)** —
-host imports, module linking on the shared store, and WASI preview 1 including the sandboxed filesystem —
-scoring **98.6% on the official spec testsuite** (59,261 / 851 / 4,720). **Next: the known-issues review
-the owner asked for before T8, together with the safety pass** (`unsafe_code = "forbid"` in core), which
-now also has to settle the resolver's open TOCTOU decision below.
+now assembles, decodes, type-checks and runs WebAssembly. **ALL of T7 is DONE (2026-08-05) and shipped as
+v0.8.0** — host imports, module linking on the shared store, and WASI preview 1 including the sandboxed
+filesystem — together with the **safety pass** (`#![forbid(unsafe_code)]` in core and the CLI) and the
+**literal/text edges**, scoring **98.8% on the official spec testsuite** (61,013 / 751 / 3,094) with all
+284 files parsing. The pre-T8 known-issues review is **done** (`known-issues.md`) and the resolver's
+TOCTOU question is **decided** (accept + document). **Next: T8 — the `wasmrt.h` C ABI**, whose
+decision-gate is finalizing the header shape with the owner before any code is written.
 
 ## ✅ v0.7.0 — SHIPPED and published (2026-08-03)
 
@@ -23,9 +25,9 @@ crates.io; tag `v0.7.0` pushed. Commits: `8a37795` validator arms · `5e82d08` s
 name map · `523ad3d` assembler core · `6d8d56c` floats + block types · `4e4b4de` SIMD/atomics ·
 `0a7dc7e` GC/EH text forms · the `.wast` runner · the conformance runner + its findings.
 
-Conformance at the v0.7.0 tag was **98.4%** (54,509 / 871 / 9,608). It has since moved to **98.6%**
-(59,261 / 851 / 4,720) on unreleased T7 work — see the T7 entry below and `cmem/testing.md` for the
-three-column history and why the middle column dipped.
+Conformance at the v0.7.0 tag was **98.4%** (54,509 / 871 / 9,608). **v0.8.0 takes it to 98.8%**
+(61,013 / 751 / 3,094), with **all 284 files parsing for the first time** — see the T7 entry below and
+`cmem/testing.md` for the three-column history and why the middle column dipped.
 
 **Prep DONE (pre-freeze):** scope reconciled (a faithful runtime port; fidelity = boundary-faithful +
 idiomatic Rust; success = **canonical / fast / small**, `vision.md`); full **deep-read of wazmrt** (6

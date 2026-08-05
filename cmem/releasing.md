@@ -114,17 +114,19 @@ bump + public trackers + **full `cmem/` sync** + release commit (checklist steps
 hands over the publish commands. Established rhythm since v0.1.0; the pre-publish doc-sync gate added
 2026-07-31 (v0.6.4) after earlier releases shipped with docs lagging a turn behind.
 
-## Status (2026-08-03)
+## Status (2026-08-05)
 
-- **Published through v0.7.0 — no release is pending.** 0.7.0 shipped the validator completion **and all
-  of T6** (the text toolchain) together, as the owner decided on 2026-08-03. Spec-suite conformance at
-  release: **98.4%** (54,509 passing); the remaining punch-list is deliberately deferred to after T7 —
-  see `known-issues.md`.
-  `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
+- **v0.8.0 is PREPARED and awaiting the owner's publish** (steps 1–6 done, 7–9 owed). It ships **all of
+  T7** — host imports, module linking on a shared store, and WASI preview 1 **including the sandboxed
+  filesystem** with `--dir`/`--ro-dir` — plus the **safety pass** (`#![forbid(unsafe_code)]` in core and
+  the CLI) and the **literal/text edges**. Spec-suite conformance at release: **98.8%** (61,013 passing /
+  751 failing / 3,094 skipped) and **all 284 files parse for the first time**. 281 workspace tests.
+- **Published through v0.7.0.** `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
   crates.io through v0.7.0 (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
   WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6 → threads/atomics v0.6.7 → memory64 v0.6.8 →
-  exception handling v0.6.9 → **text toolchain + validator completion v0.7.0**). The owner
+  exception handling v0.6.9 → **text toolchain + validator completion v0.7.0**), with **v0.8.0 prepared
+  but not yet published**. The owner
   runs each publish; the rhythm (implement →
   **full-doc prep** → owner publishes) holds. **v0.6.4 onward run under the pre-publish doc-sync gate, and
   each v0.6.4+ GitHub release was created automatically by the tag-triggered `.github/workflows/release.yml`**
