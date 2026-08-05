@@ -5,7 +5,35 @@ v0.1.0–v0.7.0). This records the **inherited concerns** from the frozen wazmrt
 intentional divergences**, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
 (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
-## Spec-suite punch-list (2026-08-03, v0.7.0 — 98.4%, 871 failing)
+## Spec-suite punch-list (2026-08-04, post-linking — 97.4%, 1,521 failing)
+
+**The pass RATE fell while the capability rose, and that is the honest reading.** Wiring `register` + a
+`spectest` provider into the `.wast` runner moved **2,784 assertions out of "skipped"**: 2,032 became
+passes (54,509 → **56,541**) and ~649 became *visible* failures (872 → 1,521). Nothing regressed — those
+649 were always broken, just hidden behind a skip. A harness that folded skips into passes would have
+shown a rise here; ours shows the truth.
+
+| | before | after |
+| --- | --- | --- |
+| passed | 54,509 | **56,541** |
+| failed | 872 | 1,521 |
+| skipped | 9,605 | **6,821** |
+| rate | 98.4% | 97.4% |
+
+**Newly exposed, biggest first — these are now the real punch-list:**
+
+- **`table_copy` 216 + `table_copy64` 238 + `table_init` 68 + `table_init64` 71.** These files now *run*
+  (916 assertions in `table_copy` alone, previously all skipped) and return **wrong values** — e.g. got
+  5 where 3 was expected. A genuine `table.copy`/`table.init` or elem-segment-with-imports bug, and the
+  single biggest win available. **Start here.**
+- `memory_init` 27 + `memory_init64` 27 — likely the same family.
+- `linking.wast` 23 — the linking semantics themselves.
+- The T6-era literal/binary items below are unchanged.
+
+Still skipped (6,821): imported **memories and tables**, which need shared-resource linking beyond
+functions — `imports.wast` alone still skips 168.
+
+## Earlier punch-list (2026-08-03, v0.7.0 — 98.4%, 871 failing)
 
 Deliberately **not** chased before T7 (owner's call): most of the 9,608 skips need host imports, so the
 picture will change substantially once those land. Re-run `wasmrt wast <testsuite>` after T7 before

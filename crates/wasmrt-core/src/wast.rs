@@ -26,7 +26,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::interp::{Instance, Trap, Value};
+use crate::interp::{HostFunc, Imports, InstanceId, Store, Trap, Value};
+use crate::module::Module;
 use crate::sexpr::{self, Sexpr};
 use crate::wat;
 
@@ -102,11 +103,36 @@ pub fn run_script(src: &[u8]) -> Result<Summary, Error> {
 
 #[derive(Default)]
 struct Runner {
+    /// One store for the whole script, so `(register …)` can publish a module and a later
+    /// one can import from it — the instances genuinely share resources.
+    store: Store,
     /// The most recently built module, which un-named actions target.
-    current: Option<Instance>,
+    current: Option<InstanceId>,
     /// Modules by their textual `$name`, for `(invoke $M …)`.
-    named: Vec<(String, Instance)>,
+    named: Vec<(String, InstanceId)>,
+    /// Modules published by `(register "name")`, which later modules may import from.
+    registered: Vec<(String, InstanceId)>,
     summary: Summary,
+}
+
+/// The spec suite's standard `spectest` host module.
+///
+/// Its `print*` functions exist only to be callable — the suite asserts nothing about what
+/// they emit — and its globals have values the suite checks, so those must be exact.
+fn spectest_func(_name: &str) -> HostFunc {
+    // Every `print*` variant takes its arguments and returns nothing.
+    HostFunc::new(|_caller, _args, _results| Ok(()))
+}
+
+/// The `spectest` module's exported global values (§ the spec suite's `spectest` host).
+fn spectest_global(name: &str) -> Option<Value> {
+    Some(match name {
+        "global_i32" => crate::interp::i32_value(666),
+        "global_i64" => crate::interp::i64_value(666),
+        "global_f32" => crate::interp::f32_value(666.6),
+        "global_f64" => crate::interp::f64_value(666.6),
+        _ => return None,
+    })
 }
 
 /// Why an action could not run.
@@ -147,9 +173,24 @@ impl Runner {
                 Err(ActionErr::Trap(t)) => self.fail(format!("action trapped: {t}")),
                 Err(ActionErr::Bad(m)) => self.fail(m),
             },
-            // `register` needs cross-module imports, which the interpreter does not link
-            // yet (see the module docs) — count it honestly rather than silently.
-            "register" => self.summary.skipped += 1,
+            // `(register "name" $id?)` publishes a module's exports under `name`, so later
+            // modules can import from it: the $id-named module if given, else the current one.
+            "register" => {
+                let target = list
+                    .get(2)
+                    .and_then(Sexpr::as_atom)
+                    .filter(|a| a.starts_with('$'))
+                    .and_then(|a| self.named.iter().find(|(n, _)| n == a).map(|(_, i)| *i))
+                    .or(self.current);
+                match (list.get(1).and_then(Sexpr::as_str), target) {
+                    (Some(name), Some(id)) => {
+                        let name = String::from_utf8_lossy(name).into_owned();
+                        self.registered.push((name, id));
+                        self.summary.passed += 1;
+                    }
+                    _ => self.summary.skipped += 1,
+                }
+            }
             _ => self.summary.skipped += 1,
         }
     }
@@ -171,15 +212,61 @@ impl Runner {
         wat::assemble_module(form)
     }
 
-    fn build(form: &[Sexpr]) -> Result<Instance, BuildErr> {
+    /// Resolve a module's declared imports against `spectest` and the registered modules.
+    ///
+    /// Walks them in **declaration order** so each backing binds to its own slot.
+    fn resolve_imports(&mut self, md: &Module) -> Result<Imports, BuildErr> {
+        let mut imports = Imports::new();
+        for imp in &md.imports {
+            let from_spectest = imp.module == "spectest";
+            let target = self
+                .registered
+                .iter()
+                .find(|(n, _)| *n == imp.module)
+                .map(|(_, id)| *id);
+            match imp.ty.kind() {
+                crate::types::ExternKind::Func => {
+                    if from_spectest {
+                        imports = imports.with_host_func(spectest_func(&imp.name));
+                    } else if let Some(id) = target {
+                        let f = self
+                            .store
+                            .export_func(id, &imp.name)
+                            .ok_or(BuildErr::Unresolved)?;
+                        imports = imports.with_instance_func(id, f);
+                    } else {
+                        return Err(BuildErr::Unresolved);
+                    }
+                }
+                crate::types::ExternKind::Global => {
+                    // A registered module's exported globals are not reachable yet; only
+                    // `spectest`'s well-known values are.
+                    let v = from_spectest
+                        .then(|| spectest_global(&imp.name))
+                        .flatten()
+                        .ok_or(BuildErr::Unresolved)?;
+                    imports = imports.with_global(v);
+                }
+                // Imported memories and tables need shared-resource linking, which the
+                // engine does not do yet — skip rather than pretend.
+                _ => return Err(BuildErr::Unresolved),
+            }
+        }
+        Ok(imports)
+    }
+
+    fn build(&mut self, form: &[Sexpr]) -> Result<InstanceId, BuildErr> {
         let bytes = Self::module_binary(form).map_err(BuildErr::Assemble)?;
         let md = crate::module::decode(&bytes).map_err(BuildErr::Decode)?;
         crate::validate::validate(&md).map_err(BuildErr::Validate)?;
-        Instance::new(md).map_err(BuildErr::Instantiate)
+        let imports = self.resolve_imports(&md)?;
+        self.store
+            .instantiate(md, imports)
+            .map_err(BuildErr::Instantiate)
     }
 
     fn define_module(&mut self, list: &[Sexpr]) {
-        match Self::build(list) {
+        match self.build(list) {
             Ok(inst) => {
                 // Track by textual `$name` for later `$M` references.
                 if let Some(name) = list.get(1).and_then(Sexpr::as_atom) {
@@ -208,19 +295,12 @@ impl Runner {
     }
 
     /// The instance an action targets: `$name` if given, else the most recent module.
-    fn target(&mut self, name: Option<&str>) -> Option<&mut Instance> {
+    fn target(&mut self, name: Option<&str>) -> Option<InstanceId> {
         match name {
-            Some(n) => self
-                .named
-                .iter_mut()
-                .find(|(k, _)| k == n)
-                .map(|(_, i)| i),
-            None => match self.current {
-                Some(ref mut i) => Some(i),
-                // With no un-named current module, fall back to the most recent named one
-                // — a `.wast` file that names every module still runs its bare actions.
-                None => self.named.last_mut().map(|(_, i)| i),
-            },
+            Some(n) => self.named.iter().find(|(k, _)| k == n).map(|(_, i)| *i),
+            // With no un-named current module, fall back to the most recent named one — a
+            // `.wast` file that names every module still runs its bare actions.
+            None => self.current.or_else(|| self.named.last().map(|(_, i)| *i)),
         }
     }
 
@@ -261,7 +341,9 @@ impl Runner {
             // Reading an exported global is not part of the embedding surface yet.
             return Err(ActionErr::NoTarget);
         }
-        inst.invoke(&export, &args).map_err(ActionErr::Trap)
+        self.store
+            .invoke(inst, &export, &args)
+            .map_err(ActionErr::Trap)
     }
 
     fn assert_return(&mut self, form: &[Sexpr]) {
@@ -322,7 +404,7 @@ impl Runner {
         // `assert_trap (module …)` — instantiation itself must trap (an active data or
         // element segment out of bounds, say). It does not become the current module.
         if operand.keyword() == Some("module") {
-            match Self::build(operand.as_list().unwrap_or(&[])) {
+            match self.build(operand.as_list().unwrap_or(&[])) {
                 Ok(_) => self.fail("assert_trap: module instantiated without trapping".to_string()),
                 Err(BuildErr::Instantiate(_)) => self.summary.passed += 1,
                 Err(e) if e.is_unsupported() => self.summary.skipped += 1,
@@ -359,7 +441,7 @@ impl Runner {
             self.summary.skipped += 1;
             return;
         };
-        match Self::build(inner.as_list().unwrap_or(&[])) {
+        match self.build(inner.as_list().unwrap_or(&[])) {
             Ok(_) => self.fail(format!(
                 "{kind:?}: module was accepted (should be rejected)"
             )),
@@ -421,6 +503,9 @@ impl Rejection {
 /// Why a module failed to become an instance — the stage matters for the assertions.
 enum BuildErr {
     Assemble(wat::Error),
+    /// An import naming a module this script has not registered, or a kind the engine
+    /// cannot link yet (memory/table). Counts as a SKIP, never a pass or a failure.
+    Unresolved,
     Decode(crate::types::DecodeError),
     Validate(crate::validate::ValidateError),
     Instantiate(Trap),
@@ -434,7 +519,8 @@ impl BuildErr {
             self,
             BuildErr::Assemble(
                 wat::Error::Unsupported(_) | wat::Error::UnknownInstr | wat::Error::NotAModule
-            ) | BuildErr::Validate(crate::validate::ValidateError::UnsupportedValidation)
+            ) | BuildErr::Unresolved
+                | BuildErr::Validate(crate::validate::ValidateError::UnsupportedValidation)
                 | BuildErr::Instantiate(
                     Trap::MissingImport | Trap::UnsupportedImportKind | Trap::UnsupportedInstruction
                 )
@@ -446,6 +532,7 @@ impl fmt::Display for BuildErr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuildErr::Assemble(e) => write!(f, "assemble: {e}"),
+            BuildErr::Unresolved => f.write_str("unresolved import"),
             BuildErr::Decode(e) => write!(f, "decode: {e}"),
             BuildErr::Validate(e) => write!(f, "validate: {e}"),
             BuildErr::Instantiate(t) => write!(f, "instantiate: {t}"),

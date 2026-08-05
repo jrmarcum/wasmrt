@@ -455,12 +455,18 @@ impl fmt::Debug for HostFunc {
 /// index space.
 #[derive(Default)]
 pub struct Imports {
-    pub funcs: Vec<HostFunc>,
+    /// Function backings **in declaration order**, host and wasm interleaved as the module
+    /// declares them. Keeping one ordered vector rather than a vector per kind is what lets
+    /// a module mix `(import "spectest" "print")` with `(import "a" "f")` and still bind
+    /// each to the right slot.
+    funcs: Vec<ImportedFunc>,
     pub globals: Vec<Value>,
-    /// Function imports satisfied by **another instance's export** (module linking), added
-    /// with [`Imports::with_instance_func`]. These follow the host functions in the module's
-    /// import order.
-    wasm_funcs: Vec<FuncTarget>,
+}
+
+/// One function import's backing.
+enum ImportedFunc {
+    Host(HostFunc),
+    Wasm(FuncTarget),
 }
 
 impl Imports {
@@ -471,11 +477,19 @@ impl Imports {
 
     /// Append a host function, in the order the module declares its function imports.
     #[must_use]
+    pub fn with_host_func(mut self, f: HostFunc) -> Imports {
+        self.funcs.push(ImportedFunc::Host(f));
+        self
+    }
+
+    /// Append a host function from a closure, in the order the module declares its
+    /// function imports.
+    #[must_use]
     pub fn with_func(
         mut self,
         f: impl Fn(&mut Caller<'_>, &[Value], &mut [Value]) -> Result<()> + 'static,
     ) -> Imports {
-        self.funcs.push(HostFunc::new(f));
+        self.funcs.push(ImportedFunc::Host(HostFunc::new(f)));
         self
     }
 
@@ -491,10 +505,10 @@ impl Imports {
     /// globals — which is what makes `(register …)` linking behave correctly.
     #[must_use]
     pub fn with_instance_func(mut self, instance: InstanceId, func: u32) -> Imports {
-        self.wasm_funcs.push(FuncTarget::Wasm {
+        self.funcs.push(ImportedFunc::Wasm(FuncTarget::Wasm {
             instance: instance.0,
             func,
-        });
+        }));
         self
     }
 }
@@ -664,9 +678,7 @@ impl Store {
         }
         // A function import may be backed by a host callback OR another instance's export,
         // so both pools count toward the declared total.
-        if imports.funcs.len() + imports.wasm_funcs.len() != n_funcs
-            || imports.globals.len() != n_globals
-        {
+        if imports.funcs.len() != n_funcs || imports.globals.len() != n_globals {
             return Err(Trap::MissingImport);
         }
 
@@ -797,14 +809,18 @@ impl Store {
         self.pools.elem_values.extend(elem_values);
         self.pools.elem_dropped.extend(elem_dropped);
 
-        // Host functions join the store-wide pool; each import records where its backing is.
+        // Walk the backings IN DECLARATION ORDER so each import binds to its own slot;
+        // host callbacks join the store-wide pool as they are seen.
         let mut targets = Vec::with_capacity(imports.funcs.len());
         for f in imports.funcs {
-            targets.push(FuncTarget::Host(self.host_funcs.len()));
-            self.host_funcs.push(f);
+            targets.push(match f {
+                ImportedFunc::Host(h) => {
+                    self.host_funcs.push(h);
+                    FuncTarget::Host(self.host_funcs.len() - 1)
+                }
+                ImportedFunc::Wasm(t) => t,
+            });
         }
-        // Any wasm→wasm import the caller pre-resolved comes after the host ones.
-        targets.extend(imports.wasm_funcs);
 
         let id = InstanceId(self.code.len());
         self.code.push(InstanceData {
