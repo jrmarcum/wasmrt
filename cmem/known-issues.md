@@ -23,11 +23,15 @@ Workspace: **274 tests**, clippy clean, all four build surfaces green.
 
 **Open, ranked by what they cost:**
 
+**Item 1 is CLOSED — owner decided 2026-08-05: accept + document the resolver TOCTOU residual.** Zero-dep
+and zero-`unsafe` both hold; the deployment assumption (no untrusted second process writing inside a
+preopen while a guest runs) is written up in `security-model.md`. Do not re-litigate.
+
+
 | # | Item | Cost / risk | Recommendation |
 | --- | --- | --- | --- |
-| 1 | **Resolver TOCTOU residual** — Rust `std` has no dir-relative open, so the walk accumulates a path; escape properties intact, **inode pinning is not**. See `security-model.md`. | Needs a *second process* writing inside the preopen. Not guest-reachable. | **Owner decision.** Accept + document, or spend `cap-std`, or a narrow audited `unsafe` shim. Nothing else blocks on it. |
 | 2 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. | ~30 `i31.wast` failures + some of `type-subtyping`. Consistent, so no disagreement — an honest missing feature. | Fix at T9 hardening, or sooner if a loader needs GC globals. |
-| 3 | **Literal/text edges** — `simd_const` 46, `binary` 44 ×2, `const`/`float_literals` 26 each, `token` 22. | Assembler **over-accepts** malformed literals the spec wants rejected. No wrong values at runtime. | Grind at T9; each is small and independent. |
+| 3 | ~~**Literal/text edges**~~ **DONE 2026-08-05** (owner chose to grind these before T8) — see below. | — | ✅ |
 | 4 | **64-bit table index type** (`(table $t i64 …)`) — `table_copy64` 22, `table_init64` 3. | Out of scope by a recorded invariant ("tables stay 32-bit", matching the oracle). | Leave unless a loader needs it — it is a **scope change**, not a bug. |
 | 5 | **Proposals not targeted** — `custom-page-sizes` 21+18, `exact` 18, `memory64-imports` 20. | Not in the feature set. | Leave; revisit only if the spec promotes them. |
 | 6 | **Debug-build stack depth** — deep recursion can overflow the native stack before the 512-frame cap fires (release is correct). | Debug only. Deliberately not "fixed" by lowering the cap (oracle parity). | Revisit at T8 alongside the C ABI's own re-entrancy limits. |
@@ -35,6 +39,46 @@ Workspace: **274 tests**, clippy clean, all four build surfaces green.
 **Not an issue, recorded so it is not re-litigated:** `delegate` is rejected by assembler, validator and
 interpreter alike — deliberate, oracle-faithful. `legacy/try_delegate.wast` failing is the *correct*
 outcome.
+
+## ✅ Literal/text edges — DONE 2026-08-05 (item 3 above)
+
+`simd_const` 46→2, `const` 26→2, `float_literals` 26→**0**, `token` 22→**0**. Suite **59,395 → 61,013
+passing**, and **every one of the 284 files now parses (0 unparseable, was 1)**. Six defects, and two of
+them were *not* the over-acceptance the punch list predicted:
+
+1. **A folded `br_table` emitted its opcode with NO label vector** (`wat.rs`). The label emission lived
+   only in the flat emitter; the folded path fell through to `emit_op_with_immediates`, which has no
+   `BrTable` arm. **The assembler reported "assembled" for bytes no decoder could read** — a
+   silent-wrong-output bug, the worst category, and the cause of the `token.wast` "unexpected end of
+   input" failures. Now one shared `emit_br_table_labels` used by both. **Lesson: an op with a
+   variable-length immediate must be reachable from both spellings, or one silently truncates.**
+2. **Adjacent tokens were accepted** (`sexpr.rs`). `(data "a""b")` lexed as two strings and silently
+   **concatenated to `ab`** — again a wrong value, not a rejection. Now every token must end at
+   whitespace, a paren, a comment, or EOF.
+3. **Float literals that overflow returned infinity** instead of being refused. Only `inf`/`nan` may
+   denote a non-finite value, and they are now matched exactly — Rust's `FromStr` would also take
+   `infinity`, `Inf`, `NaN`, all malformed in wasm.
+4. **The float grammar was Rust's, not wasm's.** The integer part is mandatory (`.0` is malformed), an
+   empty fraction is fine (`1.` is legal), and an exponent marker needs at least one digit (`0e`,
+   `0.0e-` are not). `check_float_syntax` decides this now rather than deferring to `FromStr`.
+5. **Digit separators were checked "between two alphanumerics"** instead of *between two digits*, which
+   admits `0x_1`, `1_e1`, `1e_1` — `x`, `e`, `p` are alphanumeric. The check is now radix-aware: `e` is a
+   digit in hex, an exponent marker in decimal.
+6. **NaN payloads were masked, not range-checked** — an over-wide payload became a *different* NaN. Now
+   a payload must be non-zero and fit the mantissa.
+
+**Two spec-correctness notes discovered on the way:**
+
+- **`$"quoted identifier"` is ONE token** — `$` immediately followed by a string. Tightening (2) broke
+  `id.wast` until this was handled; the contrast with the rejected `(data $l"a")` is that there the atom
+  is `$l`, not a bare `$`.
+- **Annotations `(@id …)` are skipped as trivia.** The proposal says a tool that does not implement
+  annotations must ignore them, and their bodies are raw token sequences where the separation rule does
+  not apply (`(@a x-y$yz"aa"-2)`), so they must be skipped *lexically*. `)` inside a string or a comment
+  is not a terminator. This made `annotations.wast` parse for the first time; it now contributes **51
+  visible failures** (it is a proposal wasmrt does not target), which is why the headline rate reads
+  98.8% rather than the 98.9% the run showed while the file was still unparseable. **Capability up,
+  rate honestly down** — the same accounting as the `register` work on 08-04.
 
 ## Spec-suite punch-list (2026-08-05, post shared-store fixes — 851 failing)
 

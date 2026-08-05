@@ -208,12 +208,27 @@ fn opt_name(items: &[Sexpr], j: &mut usize) -> Option<String> {
 /// `assert_malformed` literals it should have rejected.
 fn strip_seps(s: &str) -> Result<String> {
     let b = s.as_bytes();
+    // A separator must sit between two **digits** — not merely two alphanumerics. The looser
+    // reading wrongly admits `0x_1`, `1_e1` and `1e_1`, because `x`, `e` and `p` are
+    // alphanumeric. Which characters count as digits depends on the radix: in a hex literal
+    // `a`–`f` are digits (so `0x1_e2` is legal and its `e` is a digit, not an exponent
+    // marker), while in a decimal literal `e` can only be the exponent marker.
+    let hex = s.strip_prefix('-').unwrap_or(s);
+    let hex = hex.strip_prefix('+').unwrap_or(hex);
+    let is_hex = hex.starts_with("0x") || hex.starts_with("0X");
+    let digit = |c: u8| {
+        if is_hex {
+            c.is_ascii_hexdigit()
+        } else {
+            c.is_ascii_digit()
+        }
+    };
     for (i, &c) in b.iter().enumerate() {
         if c != b'_' {
             continue;
         }
-        let prev_ok = i > 0 && b[i - 1].is_ascii_alphanumeric();
-        let next_ok = i + 1 < b.len() && b[i + 1].is_ascii_alphanumeric();
+        let prev_ok = i > 0 && digit(b[i - 1]);
+        let next_ok = i + 1 < b.len() && digit(b[i + 1]);
         if !prev_ok || !next_ok {
             return Err(Error::BadNumber);
         }
@@ -338,6 +353,65 @@ fn compose_float_bits(mut q: u128, mut ulp_exp: i32, neg: bool, f: FloatFmt) -> 
 /// `simd_f64x2_rounding.wast`, whose literals are long enough to cross the threshold.
 ///
 /// Returns `None` on a malformed literal.
+/// Check a *numeric* float literal against the wasm text grammar:
+///
+/// ```text
+/// float    ::= num ('.' frac?)? (('e'|'E') sign? num)?
+/// hexfloat ::= hexnum ('.' hexfrac?)? (('p'|'P') sign? num)?
+/// ```
+///
+/// This cannot be left to Rust's `FromStr`, which is looser in exactly the places the spec
+/// tests probe: it accepts `.5` and `1.5.`-style oddities, and the keywords `inf`/`NaN`. The
+/// integer part is mandatory (`.0` is malformed), the fraction may be empty (`1.` is fine),
+/// and an exponent marker must be followed by at least one digit (`0e`, `0.0e-` are not).
+///
+/// `body` has already had its sign and any `0x` prefix removed; separators are permitted and
+/// were placement-checked by [`strip_seps`]. An exponent is always spelled in **decimal**,
+/// even for a hex literal.
+fn check_float_syntax(body: &str, is_hex: bool) -> Result<()> {
+    let b = body.as_bytes();
+    let digit = |c: u8| {
+        if is_hex {
+            c.is_ascii_hexdigit()
+        } else {
+            c.is_ascii_digit()
+        }
+    };
+    let mut i = 0;
+    let take = |i: &mut usize, p: &dyn Fn(u8) -> bool| {
+        let start = *i;
+        while *i < b.len() && (b[*i] == b'_' || p(b[*i])) {
+            *i += 1;
+        }
+        *i > start
+    };
+    if !take(&mut i, &digit) {
+        return Err(Error::BadNumber); // no integer part
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        take(&mut i, &digit); // an empty fraction is legal
+    }
+    if i < b.len() {
+        let marker = if is_hex { b'p' } else { b'e' };
+        if b[i] | 0x20 != marker {
+            return Err(Error::BadNumber);
+        }
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        if !take(&mut i, &|c: u8| c.is_ascii_digit()) {
+            return Err(Error::BadNumber); // exponent marker with no digits
+        }
+    }
+    if i == b.len() {
+        Ok(())
+    } else {
+        Err(Error::BadNumber)
+    }
+}
+
 fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
     // The wasm-specific NaN spellings: `nan:canonical`, `nan:arithmetic`, `nan:0x<payload>`.
     if let Some(colon) = lit.find(':') {
@@ -348,7 +422,13 @@ fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
         let mut bits = exp_all | canonical;
         if tail != "canonical" && tail != "arithmetic" {
             let payload = parse_u64_str(tail).ok()?;
-            bits = exp_all | (payload & mant_mask);
+            // The payload must fit the mantissa and be non-zero — a zero payload is an
+            // infinity, not a NaN. Masking instead of checking turned an out-of-range
+            // payload into a *different* NaN, which is a wrong value rather than a rejection.
+            if payload == 0 || payload > mant_mask {
+                return None;
+            }
+            bits = exp_all | payload;
         }
         if lit.starts_with('-') {
             bits |= 1u64 << sign_shift(f);
@@ -369,22 +449,46 @@ fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
         s = rest;
     }
 
-    // Not hex → decimal (and `inf` / `nan`), which Rust rounds correctly.
+    // `inf` and `nan` are the ONLY spellings allowed to denote a non-finite value, and they
+    // are matched exactly. Rust's own parser would also accept `infinity`, `Inf`, `NaN` — all
+    // malformed in wasm — so they must not be allowed to reach it and come back as infinity.
+    let sign_bit = if neg { 1u64 << sign_shift(f) } else { 0 };
+    if s == "inf" {
+        return Some(sign_bit | ((f.max_biased as u64) << f.mant_bits));
+    }
+    if s == "nan" {
+        return Some(sign_bit | ((f.max_biased as u64) << f.mant_bits) | (1u64 << (f.mant_bits - 1)));
+    }
+
+    // Not hex → decimal, which Rust rounds correctly.
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"));
     let Some(body) = hex else {
+        check_float_syntax(s, false).ok()?;
         let cleaned = strip_seps(s).ok()?;
         let v: f64 = if f.mant_bits == 23 {
             f64::from(cleaned.parse::<f32>().ok()?)
         } else {
             cleaned.parse::<f64>().ok()?
         };
+        // A *numeric* literal that rounds to infinity is out of range, not infinity: the
+        // spec makes it malformed, and silently returning inf is a wrong value rather than a
+        // rejected one. `inf`/`nan` already returned above, so this cannot catch them.
+        if !v.is_finite() {
+            return None;
+        }
         let bits = if f.mant_bits == 23 {
-            u64::from((v as f32).to_bits())
+            let n = v as f32;
+            if !n.is_finite() {
+                return None; // in range for f64, overflows f32
+            }
+            u64::from(n.to_bits())
         } else {
             v.to_bits()
         };
-        return Some(if neg { bits | (1u64 << sign_shift(f)) } else { bits });
+        return Some(bits | sign_bit);
     };
+
+    check_float_syntax(body, true).ok()?;
 
     // Accumulate the hex significand into a u128. Digits past its capacity cannot change
     // the rounded result except through the sticky bit, so they are folded in rather than
@@ -506,7 +610,14 @@ fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
         mant << (-k) as u32
     };
 
-    Some(compose_float_bits(q, ulp_exp, neg, f))
+    // A hex literal that overflows the format is out of range, exactly as in the decimal
+    // path. `compose_float_bits` saturates to infinity, so the check is on its result.
+    let bits = compose_float_bits(q, ulp_exp, neg, f);
+    let exp_all = (f.max_biased as u64) << f.mant_bits;
+    if bits & !(1u64 << sign_shift(f)) == exp_all {
+        return None;
+    }
+    Some(bits)
 }
 
 /// Parse a WAT `f32` literal to its bit pattern.
@@ -2197,8 +2308,46 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     for j in imm_end..l.len() {
         emit_one(ctx, l, j)?;
     }
+    // `br_table`'s label vector is variable-length, so it cannot go through
+    // `emit_op_with_immediates` — which is what silently dropped it here before.
+    if op == O::BrTable {
+        ctx.out.push(0x0e);
+        emit_br_table_labels(ctx, &l[..imm_end], 1)?;
+        return Ok(());
+    }
     emit_op_with_immediates(ctx, op, &l[..imm_end], 1)?;
     Ok(())
+}
+
+/// Emit a `br_table`'s label vector — every leading index-or-`$id` atom from `start`, the
+/// last of which is the default. Returns the index just past them.
+///
+/// Shared by the flat and folded emitters **on purpose**. It used to live only in the flat
+/// one, so a folded `(br_table $l)` emitted the opcode byte and no vector at all: the
+/// assembler reported success for a module no decoder could read. An op whose immediates are
+/// variable-length has to be reachable from both spellings or one of them silently truncates.
+fn emit_br_table_labels(ctx: &mut Ctx, items: &[Sexpr], start: usize) -> Result<usize> {
+    let mut j = start;
+    let mut labels: Vec<u32> = Vec::new();
+    while let Some(s) = items.get(j) {
+        if s.as_atom().is_some_and(is_index_or_id) {
+            labels.push(ctx.resolve_label(s)?);
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    // The last label is the default, so at least one is required.
+    if labels.is_empty() {
+        return Err(Error::BadImmediate);
+    }
+    let default = labels.pop().unwrap();
+    uleb(&mut ctx.out, labels.len() as u64);
+    for l in labels {
+        uleb(&mut ctx.out, u64::from(l));
+    }
+    uleb(&mut ctx.out, u64::from(default));
+    Ok(j)
 }
 
 /// How many leading atoms an op takes as immediates in a **flat** form (where operands are
@@ -2531,26 +2680,7 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
         O::CallIndirect => emit_call_indirect(ctx, items, i + 1, false),
         O::BrTable => {
             ctx.out.push(0x0e);
-            let mut j = i + 1;
-            let mut labels: Vec<u32> = Vec::new();
-            while let Some(s) = items.get(j) {
-                if s.as_atom().is_some_and(is_index_or_id) {
-                    labels.push(ctx.resolve_label(s)?);
-                    j += 1;
-                } else {
-                    break;
-                }
-            }
-            if labels.is_empty() {
-                return Err(Error::BadImmediate);
-            }
-            let default = labels.pop().unwrap();
-            uleb(&mut ctx.out, labels.len() as u64);
-            for l in labels {
-                uleb(&mut ctx.out, u64::from(l));
-            }
-            uleb(&mut ctx.out, u64::from(default));
-            Ok(j)
+            emit_br_table_labels(ctx, items, i + 1)
         }
         _ => {
             let mut n = immediate_arity(op);
@@ -3713,6 +3843,72 @@ mod tests {
         .unwrap();
     }
 
+    /// A folded `br_table` used to emit its opcode with **no label vector**: the flat and
+    /// folded emitters had diverged, and only the flat one knew about the variable-length
+    /// immediate. The assembler reported success for bytes no decoder could read, which is
+    /// why this asserts a decode+validate round-trip rather than "assemble returned Ok".
+    #[test]
+    fn a_folded_br_table_emits_its_label_vector() {
+        let bytes = asm(r#"(module (func (block $a (block $b
+                             (br_table $a $b $a (i32.const 1))))))"#)
+        .unwrap();
+        let md = crate::module::decode(&bytes).expect("folded br_table must decode");
+        crate::validate::validate(&md).expect("and validate");
+
+        // Same module written flat must produce byte-identical output.
+        let flat = asm(r#"(module (func (block $a (block $b
+                            i32.const 1 br_table $a $b $a))))"#)
+        .unwrap();
+        assert_eq!(bytes, flat);
+
+        // And an unknown label must be refused in the folded spelling too.
+        assert_eq!(
+            asm(r#"(module (func (block $l (br_table $nope))))"#),
+            Err(Error::UnknownLabel)
+        );
+    }
+
+    /// Only `inf`/`nan` may denote a non-finite value; a numeric literal that overflows is
+    /// out of range. Returning infinity instead is a wrong value, not a rejection.
+    #[test]
+    fn a_float_literal_that_overflows_is_rejected() {
+        for lit in ["1e40", "0x1p128", "0x1p10000", "infinity"] {
+            let src = alloc::format!("(module (func (f32.const {lit}) drop))");
+            assert!(asm(&src).is_err(), "{lit} overflows f32 and must be refused");
+        }
+        for lit in ["inf", "-inf", "nan", "nan:0x1", "3.4e38", "0x1p127"] {
+            let src = alloc::format!("(module (func (f32.const {lit}) drop))");
+            assert!(asm(&src).is_ok(), "{lit} is a legal f32 literal");
+        }
+        // f64 has room for what overflows f32.
+        assert!(asm("(module (func (f64.const 1e40) drop))").is_ok());
+        assert!(asm("(module (func (f64.const 1e400) drop))").is_err());
+    }
+
+    /// The wasm float grammar is stricter than Rust's `FromStr`: the integer part is
+    /// mandatory, and an exponent marker needs at least one digit.
+    #[test]
+    fn float_literal_syntax_follows_the_wasm_grammar_not_rusts() {
+        for bad in [".0", ".0e0", "0e", "0e+", "0.0e", "0.0e-", "0x.5", "0x1p", "1x", "0xg"] {
+            let src = alloc::format!("(module (func (f32.const {bad}) drop))");
+            assert!(asm(&src).is_err(), "{bad} is malformed");
+        }
+        // An empty fraction is legal; so is a hex exponent spelled in decimal.
+        for ok in ["1.", "0x1.", "1e5", "1E5", "0x1p3", "0x1.5p-3", "0123456789"] {
+            let src = alloc::format!("(module (func (f32.const {ok}) drop))");
+            assert!(asm(&src).is_ok(), "{ok} is well formed");
+        }
+    }
+
+    /// A NaN payload must fit the mantissa and be non-zero. Masking an over-wide payload
+    /// produced a *different* NaN — a wrong value rather than a rejection.
+    #[test]
+    fn a_nan_payload_is_range_checked_not_masked() {
+        assert!(asm("(module (func (f32.const nan:0x800000) drop))").is_err());
+        assert!(asm("(module (func (f32.const nan:0x0) drop))").is_err());
+        assert!(asm("(module (func (f32.const nan:0x7fffff) drop))").is_ok());
+    }
+
     #[test]
     fn rejects_source_with_no_module() {
         assert_eq!(asm("(func)"), Err(Error::NotAModule));
@@ -4445,6 +4641,18 @@ mod tests {
         for bad in ["_100", "1.0_", "1_.0", "1__000", "+_100"] {
             assert!(parse_f64_bits(bad).is_none(), "should reject `{bad}`");
         }
+
+        // "between two digits", not "between two alphanumerics" — the looser reading admits
+        // these, because `x`, `e` and `p` are alphanumeric. Which characters count as digits
+        // depends on the radix: `e` is a digit in hex but an exponent marker in decimal.
+        for bad in ["1_e1", "1e_1", "0x_1", "0x1_", "0x1_p3"] {
+            assert!(parse_f64_bits(bad).is_none(), "should reject `{bad}`");
+        }
+        for ok in ["0x1_e2", "0x1p1_0", "0xa_b", "1.0e1_0"] {
+            assert!(parse_f64_bits(ok).is_some(), "should accept `{ok}`");
+        }
+        assert!(parse_u64_str("0x_1").is_err());
+        assert_eq!(parse_u64_str("0xa_b").unwrap(), 0xab);
     }
 
     #[test]

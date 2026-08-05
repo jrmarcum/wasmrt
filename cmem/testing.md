@@ -24,10 +24,10 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 
 | | T6 gate (2026-08-03) | post-linking (08-04) | **current (08-05)** |
 | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | **59,395** |
-| failed | 871 | 1,521 | **843** |
-| skipped | 9,608 | 6,821 | **4,586** |
-| **pass rate** | 98.4% | 97.4% | **98.6%** of 60,238 adjudicated |
+| **passed** | 54,509 | 56,541 | **61,013** |
+| failed | 871 | 1,521 | **751** |
+| skipped | 9,608 | 6,821 | **3,094** |
+| **pass rate** | 98.4% | 97.4% | **98.8%** of 61,764 adjudicated |
 
 The dip at 08-04 was capability, not regression: wiring `register` + `spectest` moved 2,784 assertions
 out of *skipped*, and ~649 of them were already-broken code that had been hidden behind a skip. The
@@ -40,12 +40,12 @@ nothing.
 
 **Skips are never folded into passes.** A construct this build cannot put to the test is not a pass —
 that is the runner's honesty rule (`wast.rs`), and it is why the number is trustworthy. The residual
-4,586 skips are dominated by **imported memories and tables**, which the shared store now models but the
+3,094 skips are dominated by **imported memories and tables**, which the shared store now models but the
 `.wast` runner's `spectest` provider does not yet supply.
 
-Worst remaining files (2026-08-05): `simd_const` 46, `binary` 44 (×2 copies), `type-subtyping` 36,
-`i31` 30, `const` 26, `float_literals` 26, `table_copy64` 22, `token` 22. The ranked pre-T8 punch list —
-what each costs and what to do about it — is in `known-issues.md`.
+Worst remaining files (2026-08-05): `annotations` 51 (a proposal wasmrt does not target — the file became
+parseable only on 08-05), `binary` 44 (x2 copies), `type-subtyping` 36, `i31` 30. **All 284 files now
+parse (0 unparseable).** The ranked punch list is in `known-issues.md`.
 
 The first run scored 96.7% and surfaced four bugs the hand vectors could not — a panic, an element-segment
 encoding no decoder could read, truncated out-of-range constants, and mis-placed digit separators (all in
@@ -54,8 +54,8 @@ tests the assembler against the decoder, validator and interpreter at a scale ha
 
 ## Current test state (2026-08-05, post-T7)
 
-**274 workspace tests, all green** under native + (compile) `wasm32` no_std; clippy clean on all four
-build surfaces. T7 added 56 over v0.7.0's 218: host imports and the shared store (incl. the two
+**281 workspace tests, all green** under native + (compile) `wasm32` no_std; clippy clean on all four
+build surfaces. T7 plus the literal/text pass added 63 over v0.7.0's 218: host imports and the shared store (incl. the two
 **two-instance** regressions above), the WASI process surface, and the sandbox — whose resolver tests
 carry a canary *outside* the preopen and assert the **outcome** (no walk may produce a path that reads
 it) rather than a particular errno, so they survive a change of mechanism.

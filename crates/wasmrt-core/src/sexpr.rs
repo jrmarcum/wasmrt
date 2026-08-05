@@ -162,6 +162,8 @@ impl Parser<'_> {
                         self.pos += 1;
                     }
                 }
+            } else if c == b'(' && self.peek(1) == b'@' {
+                self.skip_annotation();
             } else {
                 break;
             }
@@ -176,7 +178,11 @@ impl Parser<'_> {
         match self.src[self.pos] {
             b'(' => self.parse_list(),
             b')' => Err(self.err(ParseErrorKind::UnexpectedParen)),
-            b'"' => Ok(Sexpr::Str(self.parse_string()?)),
+            b'"' => {
+                let s = self.parse_string()?;
+                self.require_delimiter()?;
+                Ok(Sexpr::Str(s))
+            }
             // A lone `;`: trivia-skipping consumes only `;;` and `(;`, and `parse_atom`
             // treats `;` as a terminator — so it would return an EMPTY atom without
             // advancing `pos`, and the parse loops would append empty atoms forever.
@@ -188,6 +194,19 @@ impl Parser<'_> {
                 if at.is_empty() {
                     return Err(self.err(ParseErrorKind::UnexpectedChar));
                 }
+                // A **quoted identifier**: `$` (or an annotation's `@`) immediately followed
+                // by a string is ONE token, not an atom next to a string — it is how a name
+                // holds characters the bare form cannot, e.g. `$"a b"`. The distinction from
+                // the malformed `(data $l"a")` is that there the atom is `$l`, not `$`, so
+                // the string genuinely is a second token butted against the first.
+                if (at == "$" || at == "@") && self.src.get(self.pos) == Some(&b'"') {
+                    let s = self.parse_string()?;
+                    self.require_delimiter()?;
+                    let mut name = at;
+                    name.push_str(&String::from_utf8_lossy(&s));
+                    return Ok(Sexpr::Atom(name));
+                }
+                self.require_delimiter()?;
                 Ok(Sexpr::Atom(at))
             }
         }
@@ -213,6 +232,76 @@ impl Parser<'_> {
         }
         self.depth -= 1;
         Ok(Sexpr::List(items))
+    }
+
+    /// Skip an annotation `(@id …)` whole, treating it as trivia.
+    ///
+    /// The annotations proposal is not one wasmrt targets, and it says explicitly that a tool
+    /// which does not understand an annotation must **ignore** it — so discarding is the
+    /// correct behaviour, not a shortcut. It also has to be discarded *lexically*: an
+    /// annotation's body is a raw token sequence where the usual separation rules do not
+    /// apply (`(@a x-y$yz"aa"-2)` is legal), so parsing it as an ordinary list would fail.
+    ///
+    /// Strings **and comments** are tracked, because a `)` inside either does not close the
+    /// annotation — `(@a ;; bla)` and `(@a (; ) ;))` both appear in the proposal's own tests.
+    fn skip_annotation(&mut self) {
+        self.pos += 2; // consume `(@`
+        let mut depth = 1usize;
+        while self.pos < self.src.len() && depth > 0 {
+            match self.src[self.pos] {
+                b'"' => {
+                    self.pos += 1;
+                    while self.pos < self.src.len() && self.src[self.pos] != b'"' {
+                        // A `\"` escape does not end the string.
+                        self.pos += if self.src[self.pos] == b'\\' { 2 } else { 1 };
+                    }
+                    self.pos += 1;
+                }
+                b';' if self.peek(1) == b';' => {
+                    while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
+                        self.pos += 1;
+                    }
+                }
+                b'(' if self.peek(1) == b';' => {
+                    self.pos += 2;
+                    let mut c = 1usize;
+                    while self.pos < self.src.len() && c > 0 {
+                        if self.src[self.pos] == b'(' && self.peek(1) == b';' {
+                            c += 1;
+                            self.pos += 2;
+                        } else if self.src[self.pos] == b';' && self.peek(1) == b')' {
+                            c -= 1;
+                            self.pos += 2;
+                        } else {
+                            self.pos += 1;
+                        }
+                    }
+                }
+                b'(' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b')' => {
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                _ => self.pos += 1,
+            }
+        }
+    }
+
+    /// A token must end at whitespace, a parenthesis, a comment, or end-of-input.
+    ///
+    /// Without this, two tokens written flush against each other lex as two tokens —
+    /// `(data "a""b")`, `(data $l"a")`, `(br_table $l$l)` — where the spec says the source is
+    /// malformed. It matters because `"a""b"` silently becoming the *concatenation* `ab` is a
+    /// wrong value, not a rejected one. Parentheses are exempt on purpose: `(func(nop))` is
+    /// legal, and `token.wast` tests both halves of that rule.
+    fn require_delimiter(&mut self) -> Result<()> {
+        match self.src.get(self.pos) {
+            None | Some(b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b';') => Ok(()),
+            Some(_) => Err(self.err(ParseErrorKind::UnexpectedChar)),
+        }
     }
 
     /// An atom runs to the next delimiter. Source is not required to be UTF-8 overall, but
@@ -310,6 +399,69 @@ mod tests {
 
     fn parse(src: &str) -> Result<Vec<Sexpr>> {
         parse_all(src.as_bytes())
+    }
+
+    /// Tokens must be separated by whitespace or a parenthesis. The parenthesis half matters
+    /// as much as the separator half: `(func(nop))` is legal and `(data "a""b")` is not, and
+    /// `token.wast` tests both. Accepting `"a""b"` silently concatenated it to `ab` — a wrong
+    /// value rather than a rejection.
+    #[test]
+    fn adjacent_tokens_need_a_separator_but_parens_are_one() {
+        for bad in [
+            r#"(data "a""b")"#,
+            r#"(data $l"a")"#,
+            r#"(data"a")"#,
+            r#"(f "a"1)"#,
+        ] {
+            assert!(parse(bad).is_err(), "should reject `{bad}`");
+        }
+        for ok in [
+            "(func(nop))",
+            "(func (nop)nop)",
+            "(func nop(nop))",
+            "(func br 0(nop))",
+            r#"(data "a" "b")"#,
+            "(func nop);;trailing comment",
+        ] {
+            assert!(parse(ok).is_ok(), "should accept `{ok}`");
+        }
+    }
+
+    /// `$` immediately followed by a string is ONE token — the quoted-identifier form, which
+    /// is how a name carries characters the bare spelling cannot. The contrast with the
+    /// rejected `(data $l"a")` above is that there the atom is `$l`, not a bare `$`.
+    #[test]
+    fn a_quoted_identifier_is_a_single_token() {
+        let v = parse(r#"(func $"a b" nop)"#).expect("quoted identifier parses");
+        let Sexpr::List(items) = &v[0] else {
+            panic!("expected a list")
+        };
+        assert_eq!(items[1], Sexpr::Atom(String::from("$a b")));
+        // Two identifiers still cannot be butted together.
+        assert!(parse(r#"(br_table $"l"$l)"#).is_err());
+    }
+
+    /// An annotation is skipped whole, as the proposal requires of a tool that does not
+    /// implement it. It has to be skipped *lexically* — its body is a raw token sequence
+    /// where the separation rule above does not apply — and a `)` inside a string or a
+    /// comment must not be mistaken for its terminator.
+    #[test]
+    fn annotations_are_skipped_as_trivia() {
+        let v = parse(r#"(module (@custom "x") (func (@a 1) nop))"#).expect("parses");
+        let Sexpr::List(items) = &v[0] else {
+            panic!("expected a list")
+        };
+        assert_eq!(items.len(), 2, "the annotation must not become an item");
+        // The awkward bodies from the proposal's own tests.
+        for src in [
+            r#"(module (@a x-y$yz"aa"-2))"#,
+            r#"(module (@a ;; bla)
+               ))"#,
+            r#"(module (@a (; ) ;)))"#,
+            r#"(module (@a "str)ing"))"#,
+        ] {
+            assert!(parse(src).is_ok(), "should skip `{src}`");
+        }
     }
 
     #[test]

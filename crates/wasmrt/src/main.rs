@@ -241,7 +241,9 @@ fn run_wast(rest: &[String]) -> ExitCode {
                 if verbose || s.failed > 0 {
                     println!("{name}: {s}");
                     if verbose {
-                        for m in s.failures.iter().take(3) {
+                        // All recorded failures, not a sample: triaging a file means seeing
+                        // the distinct reasons, and three of forty-six is not a diagnosis.
+                        for m in &s.failures {
                             println!("    {m}");
                         }
                     }

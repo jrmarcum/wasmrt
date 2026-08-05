@@ -442,8 +442,16 @@ impl Runner {
             return;
         };
         match self.build(inner.as_list().unwrap_or(&[])) {
+            // Quote the spec's own reason string. Without it every over-acceptance in a file
+            // reads identically and triaging means hand-matching failures back to source.
             Ok(_) => self.fail(format!(
-                "{kind:?}: module was accepted (should be rejected)"
+                "{kind:?}: module was accepted (should be rejected: {})",
+                match form.get(2) {
+                    // The reason is a string literal, so it arrives decoded to bytes.
+                    Some(Sexpr::Str(b)) => String::from_utf8_lossy(b).into_owned(),
+                    Some(Sexpr::Atom(a)) => a.clone(),
+                    _ => String::from("<no reason given>"),
+                }
             )),
             Err(e) => {
                 // Only the matching rejection stage counts. An assembler gap is a SKIP:

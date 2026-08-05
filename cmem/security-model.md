@@ -58,11 +58,23 @@ That leaves three project constraints that **cannot all hold at once**:
   re-checks it against the canonical preopen root, so a swap that *did* land still cannot yield a path
   outside the sandbox. **It closes the escape, not the race.**
 
-**OPEN DECISION for the owner (blocks nothing; revisit at T8/T9):** spend a dependency (`cap-std`) or a
-narrow, audited `unsafe` FFI shim (`openat`/`openat2` on unix, `NtCreateFile` on Windows) to close the
-residual — or accept it and document the deployment assumption. Note wazmrt itself still has a narrow
-**final-component** residual on `path_open` (`#17/#18/#23`, a Windows Zig-std workaround), so the port is
-not obviously behind the oracle here; it trades a narrower residual for a wider one.
+### ✅ DECIDED 2026-08-05 (owner): **accept the residual and document it.** Do not re-litigate.
+
+`cap-std` was rejected again (first runtime dependency, a large tree, against the smallest-binary goal),
+and an `unsafe` FFI shim was rejected (it would punch the first hole in `#![forbid(unsafe_code)]`, which
+was made mechanical the same day). **wasmrt keeps zero dependencies and zero `unsafe` in the engine.**
+
+**The deployment assumption this creates, stated plainly so an embedder can check it:** wasmrt's sandbox
+guarantees a guest cannot *name* anything outside its preopen. It does **not** guarantee that a path
+resolved inside the preopen still refers to the same inode by the time the syscall runs. Closing that
+gap requires the embedder to ensure **no untrusted second process holds write access to a preopened
+directory while a guest is running**. The guest itself cannot create the race (preview 1 is
+single-threaded here), so this only matters for multi-tenant or shared-scratch layouts.
+
+Context for the choice: wazmrt itself still carries a narrower **final-component** residual on
+`path_open` (`#17/#18/#23`, a Windows Zig-std workaround), so the port is not far behind the oracle — it
+trades a narrow residual for a wider one, in exchange for holding both the zero-dep and no-`unsafe`
+lines. Revisit only if a consumer's threat model actually includes a hostile co-tenant.
 
 **Mandated adversarial test — DONE and it bites:** `wasi/fs.rs` keeps a canary outside the preopen and
 asserts no walk can ever produce a path that reads it, over absolute / relative / chained / symlinked-

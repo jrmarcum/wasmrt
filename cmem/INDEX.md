@@ -25,10 +25,10 @@ scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 **Progress (2026-08-05): T0–T7 DONE; published through v0.7.0, T7 unreleased.**
 v0.7.0 shipped the **text toolchain** (T6) **and the validator's deferred typing arms** (completing T4).
 Since then **T7 landed in full**: host imports, module linking on a **shared store** (wasmtime-style),
-and **WASI preview 1 including the sandboxed filesystem**. The suite is at **98.6%** (59,261 passed /
-851 failed / 4,720 skipped). **Next: the known-issues review the owner asked for before T8, plus the
-safety pass** — which must also settle the resolver's open TOCTOU decision (see `security-model.md`:
-Rust's `std` has no dir-relative open, so zero-dep + no-`unsafe` + real-handles cannot all hold).
+and **WASI preview 1 including the sandboxed filesystem**. The suite is at **98.8%** (61,013 passed / 751 failed / 3,094 skipped). **Known-issues review DONE (2026-08-05)**, and with it the safety pass (`#![forbid(unsafe_code)]` in core
+and the CLI, `deny` + one justified `allow` in capi) and the literal/text edges (all 284 suite files now
+parse). The resolver TOCTOU residual is **decided: accept + document** (`security-model.md`). **Next: T8 —
+the `wasmrt.h` C ABI**, whose decision-gate is finalizing the header shape with the owner.
 
 `wasmrt-core` has `types` + `reader` + `opcode` (the shared IR + `decode_body` + the text-name reverse
 map) + `module` (decode) + `validate` (spec §3 type-checker — **complete**, incl. SIMD/atomics/GC/EH) +
@@ -42,7 +42,7 @@ validates; `run` executes an export; `wasi` runs a preview-1 program with `--dir
 The interp value slot is 128-bit
 (`Value = u128`) so a `v128` is one slot; a memory carries its own index type (`i64` addresses on a
 64-bit memory) while **tables stay 32-bit**; `delegate` is rejected everywhere (oracle-faithful).
-**274 workspace tests** green, clippy clean, all four build surfaces. Each task ships a crates.io
+**281 workspace tests** green, clippy clean, all four build surfaces. Each task ships a crates.io
 release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix — with the full `cmem/`
 sync committed **before** the publish handoff (owner directive, 2026-07-31; see `releasing.md`).
 
