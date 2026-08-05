@@ -321,8 +321,25 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     reaches the host rather than re-entering the export. Imported globals precede defined ones, so a
     defined initializer may read an imported global. **Imported memories/tables reject loudly**
     (`UnsupportedImportKind`) pending T7b's shared-ownership model. `[x]`
-  - **T7b — module linking** (wasm→wasm imports; shared memories/tables). Unblocks the `.wast` runner's
-    `register` and `assert_unlinkable`. `[ ]`
+  - **T7b — module linking** (wasm→wasm imports; shared memories/tables) **+ a `spectest` provider in the
+    `.wast` runner**. `[ ]`
+    - **⚠️ Measured correction (2026-08-04): host imports alone did NOT move the conformance skips** —
+      9,608 → 9,605 after T7a. The earlier claim that T7a would "unblock most of the skips" was wrong,
+      and the measurement is what caught it. T7a gave the *engine* the capability; the **`.wast` runner
+      has no linking layer using it** — it still calls `Instance::new(md)` with no imports, so any module
+      with imports fails to build and is skipped.
+    - **What the skips actually need**, counted across the suite: `(import "spectest" …)` **174** — the
+      spec's standard host module (`print*`, `global_i32/i64/f32/f64`, `memory`, `table`); and
+      `(import "a"/"test"/"reexport_f" …)` **362** — modules published by `(register …)`, i.e. genuine
+      wasm→wasm linking. So the unblock needs **both** a `spectest` provider *and* module linking, not
+      host imports alone.
+    - **Design note for the linking work:** sharing a memory/table between instances cannot use the
+      oracle's `*Memory` raw pointer (safety directive). `Rc<RefCell<Memory>>` would put a borrow check
+      on the interpreter's hottest path. The architecturally right answer is the **shared-store model**
+      (what wasmtime does): move memories/tables/globals into one `Store` that all linked instances index
+      into, so instances hold base offsets rather than owned resources. The interpreter already threads
+      `&mut Store` everywhere, so this fits the existing shape — but it is a deliberate refactor of
+      `Instance`, not an incremental add. Decide before starting.
   - **T7c — WASI preview 1:** stdio, args, environ, clocks, `random_get`, `proc_exit`, `poll_oneoff`,
     then the sandboxed filesystem on the handle-stack resolver. `[ ]`
 - **T8 — `wasmrt.h` C ABI (redesign, not transliteration).** ⛔ *Decision-gate (block lifted):*
