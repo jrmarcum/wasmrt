@@ -154,6 +154,59 @@ pub struct Table {
 
 /// The mutable runtime state of an instance, threaded as `&mut` through execution so a
 /// recursive `call` reborrows it cleanly.
+/// Where one instance's index spaces live inside the shared [`Store`] pools.
+///
+/// This is the shared-store model (as wasmtime does it): resources are owned **once** by the
+/// store, and each instance keeps a map from its own index space to the store slot. A
+/// *defined* memory allocates a fresh slot; an *imported* one maps to the exporting
+/// instance's existing slot, so both instances genuinely see the same bytes.
+///
+/// Chosen over the alternatives for concrete reasons: the oracle's `*Memory` raw pointer is
+/// exactly what the safety directive forbids, and `Rc<RefCell<Memory>>` would put a borrow
+/// check on the interpreter's hottest path. A `Vec` index costs one indirection and no
+/// runtime check.
+#[derive(Default, Clone)]
+struct IndexMaps {
+    memories: Vec<usize>,
+    tables: Vec<usize>,
+    globals: Vec<usize>,
+    /// Store slots holding this instance's data-segment "dropped" flags.
+    data: Vec<usize>,
+    /// Store slots holding this instance's element segments.
+    elems: Vec<usize>,
+}
+
+impl IndexMaps {
+    /// Resolve a module-level index to its store slot. Out-of-range yields `usize::MAX`,
+    /// which every pool lookup then rejects as the corresponding "no such resource" trap —
+    /// so a bad index can never silently alias another instance's resource.
+    #[inline]
+    fn get(map: &[usize], i: usize) -> usize {
+        map.get(i).copied().unwrap_or(usize::MAX)
+    }
+    #[inline]
+    fn mem(&self, i: u32) -> usize {
+        Self::get(&self.memories, i as usize)
+    }
+    #[inline]
+    fn table(&self, i: u32) -> usize {
+        Self::get(&self.tables, i as usize)
+    }
+    #[inline]
+    fn global(&self, i: u32) -> usize {
+        Self::get(&self.globals, i as usize)
+    }
+    #[inline]
+    fn data(&self, i: u32) -> usize {
+        Self::get(&self.data, i as usize)
+    }
+    #[inline]
+    fn elem(&self, i: u32) -> usize {
+        Self::get(&self.elems, i as usize)
+    }
+}
+
+/// The resource pools shared by every instance in a linking group.
 struct Store {
     globals: Vec<Value>,
     memories: Vec<Memory>,
@@ -331,20 +384,23 @@ struct FuncBody {
 /// works). Handed to the callback for the duration of the call and no longer.
 pub struct Caller<'a> {
     store: &'a mut Store,
+    /// The CALLING instance's index maps: a host function's `memory(0)` means that
+    /// instance's memory 0, wherever it lives in the shared pools.
+    maps: &'a IndexMaps,
 }
 
 impl Caller<'_> {
     /// Byte length of memory `index`, or `None` if the instance has no such memory.
     #[must_use]
     pub fn memory_len(&self, index: u32) -> Option<usize> {
-        self.store.memories.get(index as usize).map(|m| m.bytes.len())
+        self.store.memories.get(self.maps.mem(index)).map(|m| m.bytes.len())
     }
 
     /// Read `len` bytes of guest memory at `addr`. `None` if the range is out of bounds —
     /// a host function must treat that as the guest's error, not panic on it.
     #[must_use]
     pub fn read(&self, index: u32, addr: u64, len: usize) -> Option<&[u8]> {
-        let m = self.store.memories.get(index as usize)?;
+        let m = self.store.memories.get(self.maps.mem(index))?;
         let start = usize::try_from(addr).ok()?;
         let end = start.checked_add(len)?;
         m.bytes.get(start..end)
@@ -353,7 +409,7 @@ impl Caller<'_> {
     /// Mutable view of `len` bytes of guest memory at `addr`, bounds-checked as [`read`].
     #[must_use]
     pub fn write(&mut self, index: u32, addr: u64, len: usize) -> Option<&mut [u8]> {
-        let m = self.store.memories.get_mut(index as usize)?;
+        let m = self.store.memories.get_mut(self.maps.mem(index))?;
         let start = usize::try_from(addr).ok()?;
         let end = start.checked_add(len)?;
         m.bytes.get_mut(start..end)
@@ -431,6 +487,10 @@ impl Imports {
 pub struct Instance {
     module: Module,
     func_bodies: Vec<FuncBody>,
+    /// Where this instance's index spaces live in the store pools. Identity today (one
+    /// instance per store); module linking will point an imported entry at the exporter's
+    /// slot instead.
+    maps: IndexMaps,
     /// Backing for the module's imported functions, index-aligned with the low end of the
     /// function index space.
     host_funcs: Vec<HostFunc>,
@@ -443,6 +503,8 @@ struct Ctx<'a> {
     module: &'a Module,
     func_bodies: &'a [FuncBody],
     host_funcs: &'a [HostFunc],
+    /// Where this instance's index spaces live in the shared store pools.
+    maps: &'a IndexMaps,
 }
 
 impl Instance {
@@ -599,9 +661,23 @@ impl Instance {
             });
         }
 
+        // This instance owns every slot in its store (nothing is imported from another
+        // instance yet), so each map is the identity. Module linking changes only this
+        // step: an imported entry points at the exporting instance's existing slot instead
+        // of a freshly allocated one, and everything downstream already reads through the
+        // map — which is the whole point of building it now.
+        let maps = IndexMaps {
+            memories: (0..memories.len()).collect(),
+            tables: (0..tables.len()).collect(),
+            globals: (0..globals.len()).collect(),
+            data: (0..data_dropped.len()).collect(),
+            elems: (0..elem_values.len()).collect(),
+        };
+
         Ok(Instance {
             module,
             func_bodies,
+            maps,
             host_funcs: imports.funcs,
             store: Store {
                 globals,
@@ -653,6 +729,7 @@ impl Instance {
             module: &self.module,
             func_bodies: &self.func_bodies,
             host_funcs: &self.host_funcs,
+            maps: &self.maps,
         };
         let r = call_function(&ctx, &mut self.store, func_index, args, 1);
         // Drop an escaping exception's payload rather than pinning it until the next invoke.
@@ -1045,7 +1122,10 @@ fn call_function(
             .ok_or(Trap::MissingImport)?;
         let ft = ctx.module.func_type(func_index).ok_or(Trap::UndefinedFunc)?;
         let mut results = vec![0 as Value; ft.results.len()];
-        let mut caller = Caller { store };
+        let mut caller = Caller {
+            store,
+            maps: ctx.maps,
+        };
         (hf.call)(&mut caller, args, &mut results)?;
         return Ok(results);
     }
@@ -1143,7 +1223,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let Imm::Global(gi) = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                let v = *store.globals.get(gi as usize).ok_or(Trap::UndefinedGlobal)?;
+                let v = *store.globals.get(ctx.maps.global(gi)).ok_or(Trap::UndefinedGlobal)?;
                 frame.push(v);
                 pc += 1;
             }
@@ -1152,7 +1232,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let v = frame.pop();
-                *store.globals.get_mut(gi as usize).ok_or(Trap::UndefinedGlobal)? = v;
+                *store.globals.get_mut(ctx.maps.global(gi)).ok_or(Trap::UndefinedGlobal)? = v;
                 pc += 1;
             }
 
@@ -1358,15 +1438,15 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
             | Op::I64Store32
             | Op::MemorySize
             | Op::MemoryGrow => {
-                exec_memory(frame, store, instr)?;
+                exec_memory(frame, store, ctx.maps, instr)?;
                 pc += 1;
             }
             Op::MemoryCopy => {
-                exec_memory_copy(frame, store, instr)?;
+                exec_memory_copy(frame, store, ctx.maps, instr)?;
                 pc += 1;
             }
             Op::MemoryFill => {
-                exec_memory_fill(frame, store, instr)?;
+                exec_memory_fill(frame, store, ctx.maps, instr)?;
                 pc += 1;
             }
             Op::MemoryInit => {
@@ -1379,7 +1459,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 };
                 *store
                     .data_dropped
-                    .get_mut(d as usize)
+                    .get_mut(ctx.maps.data(d))
                     .ok_or(Trap::UndefinedData)? = true;
                 pc += 1;
             }
@@ -1490,7 +1570,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
 
             // --- Table access ---
             Op::TableGet => {
-                let ti = table_imm(instr)? as usize;
+                let ti = ctx.maps.table(table_imm(instr)?);
                 let i = frame.pop_i32() as u32 as usize;
                 let v = *store
                     .tables
@@ -1503,7 +1583,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 pc += 1;
             }
             Op::TableSet => {
-                let ti = table_imm(instr)? as usize;
+                let ti = ctx.maps.table(table_imm(instr)?);
                 let v = frame.pop();
                 let i = frame.pop_i32() as u32 as usize;
                 let slot = store
@@ -1517,13 +1597,13 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 pc += 1;
             }
             Op::TableSize => {
-                let ti = table_imm(instr)? as usize;
+                let ti = ctx.maps.table(table_imm(instr)?);
                 let len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
                 frame.push_i32(len as i32);
                 pc += 1;
             }
             Op::TableGrow => {
-                let ti = table_imm(instr)? as usize;
+                let ti = ctx.maps.table(table_imm(instr)?);
                 let delta = frame.pop_i32() as u32 as usize;
                 let init = frame.pop();
                 let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
@@ -1542,7 +1622,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 pc += 1;
             }
             Op::TableFill => {
-                let ti = table_imm(instr)? as usize;
+                let ti = ctx.maps.table(table_imm(instr)?);
                 let n = frame.pop_i32() as u32 as usize;
                 let val = frame.pop();
                 let dst = frame.pop_i32() as u32 as usize;
@@ -1556,7 +1636,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let Imm::TableInit { elem, table } = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                let (ei, ti) = (elem as usize, table as usize);
+                let (ei, ti) = (ctx.maps.elem(elem), ctx.maps.table(table));
                 let dropped = *store.elem_dropped.get(ei).ok_or(Trap::UndefinedElement)?;
                 let n = frame.pop_i32() as u32 as usize;
                 let src = frame.pop_i32() as u32 as usize;
@@ -1584,7 +1664,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 };
                 *store
                     .elem_dropped
-                    .get_mut(e as usize)
+                    .get_mut(ctx.maps.elem(e))
                     .ok_or(Trap::UndefinedElement)? = true;
                 pc += 1;
             }
@@ -1592,7 +1672,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let Imm::TableCopy { dst, src } = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                let (di, si) = (dst as usize, src as usize);
+                let (di, si) = (ctx.maps.table(dst), ctx.maps.table(src));
                 let n = frame.pop_i32() as u32 as usize;
                 let s = frame.pop_i32() as u32 as usize;
                 let d = frame.pop_i32() as u32 as usize;
@@ -1827,7 +1907,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let Imm::Simd(s) = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                exec_simd(frame, store, s)?;
+                exec_simd(frame, store, ctx.maps, s)?;
                 pc += 1;
             }
 
@@ -1836,7 +1916,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let Imm::Atomic(at) = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                exec_atomic(frame, store, at)?;
+                exec_atomic(frame, store, ctx.maps, at)?;
                 pc += 1;
             }
 
@@ -1897,8 +1977,8 @@ fn mem_range(base: u64, n: u64, len: usize) -> Option<usize> {
 
 /// Read `n` (1..=8) bytes little-endian from memory `ma.memory` at (popped address + offset),
 /// zero-extended into a `u64`. The caller sign/zero-extends into the target slot.
-fn load_bytes(frame: &mut Frame, store: &Store, ma: crate::opcode::MemArg, n: usize) -> Result<u64> {
-    let mem = store.memories.get(ma.memory as usize).ok_or(Trap::NoMemory)?;
+fn load_bytes(frame: &mut Frame, store: &Store, maps: &IndexMaps, ma: crate::opcode::MemArg, n: usize) -> Result<u64> {
+    let mem = store.memories.get(maps.mem(ma.memory)).ok_or(Trap::NoMemory)?;
     let addr = frame.pop_mem(mem.is64);
     let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
     let end = ea.checked_add(n as u64).ok_or(Trap::MemoryOutOfBounds)?;
@@ -1918,11 +1998,12 @@ fn load_bytes(frame: &mut Frame, store: &Store, ma: crate::opcode::MemArg, n: us
 fn store_bytes(
     frame: &mut Frame,
     store: &mut Store,
+    maps: &IndexMaps,
     ma: crate::opcode::MemArg,
     n: usize,
     val: u64,
 ) -> Result<()> {
-    let mem = store.memories.get_mut(ma.memory as usize).ok_or(Trap::NoMemory)?;
+    let mem = store.memories.get_mut(maps.mem(ma.memory)).ok_or(Trap::NoMemory)?;
     let addr = frame.pop_mem(mem.is64);
     let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
     let end = ea.checked_add(n as u64).ok_or(Trap::MemoryOutOfBounds)?;
@@ -1937,7 +2018,7 @@ fn store_bytes(
 }
 
 /// Loads/stores + `memory.size`/`grow`.
-fn exec_memory(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+fn exec_memory(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     match instr.op {
         Op::MemorySize => {
             let Imm::MemIndex(mi) = instr.imm else {
@@ -1952,7 +2033,7 @@ fn exec_memory(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()
             }
             return Ok(());
         }
-        Op::MemoryGrow => return memory_grow(frame, store, instr),
+        Op::MemoryGrow => return memory_grow(frame, store, maps, instr),
         _ => {}
     }
     let Imm::Mem(ma) = instr.imm else {
@@ -1960,107 +2041,107 @@ fn exec_memory(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()
     };
     match instr.op {
         Op::I32Load => {
-            let v = load_bytes(frame, store, ma, 4)?;
+            let v = load_bytes(frame, store, maps, ma, 4)?;
             frame.push_i32(v as u32 as i32);
         }
         Op::I64Load => {
-            let v = load_bytes(frame, store, ma, 8)?;
+            let v = load_bytes(frame, store, maps, ma, 8)?;
             frame.push_i64(v as i64);
         }
         Op::F32Load => {
-            let v = load_bytes(frame, store, ma, 4)?;
+            let v = load_bytes(frame, store, maps, ma, 4)?;
             frame.push(Value::from(v));
         }
         Op::F64Load => {
-            let v = load_bytes(frame, store, ma, 8)?;
+            let v = load_bytes(frame, store, maps, ma, 8)?;
             frame.push(Value::from(v));
         }
         Op::I32Load8S => {
-            let v = load_bytes(frame, store, ma, 1)?;
+            let v = load_bytes(frame, store, maps, ma, 1)?;
             frame.push_i32(i32::from(v as u8 as i8));
         }
         Op::I32Load8U => {
-            let v = load_bytes(frame, store, ma, 1)?;
+            let v = load_bytes(frame, store, maps, ma, 1)?;
             frame.push_i32(i32::from(v as u8));
         }
         Op::I32Load16S => {
-            let v = load_bytes(frame, store, ma, 2)?;
+            let v = load_bytes(frame, store, maps, ma, 2)?;
             frame.push_i32(i32::from(v as u16 as i16));
         }
         Op::I32Load16U => {
-            let v = load_bytes(frame, store, ma, 2)?;
+            let v = load_bytes(frame, store, maps, ma, 2)?;
             frame.push_i32(i32::from(v as u16));
         }
         Op::I64Load8S => {
-            let v = load_bytes(frame, store, ma, 1)?;
+            let v = load_bytes(frame, store, maps, ma, 1)?;
             frame.push_i64(i64::from(v as u8 as i8));
         }
         Op::I64Load8U => {
-            let v = load_bytes(frame, store, ma, 1)?;
+            let v = load_bytes(frame, store, maps, ma, 1)?;
             frame.push_i64(i64::from(v as u8));
         }
         Op::I64Load16S => {
-            let v = load_bytes(frame, store, ma, 2)?;
+            let v = load_bytes(frame, store, maps, ma, 2)?;
             frame.push_i64(i64::from(v as u16 as i16));
         }
         Op::I64Load16U => {
-            let v = load_bytes(frame, store, ma, 2)?;
+            let v = load_bytes(frame, store, maps, ma, 2)?;
             frame.push_i64(i64::from(v as u16));
         }
         Op::I64Load32S => {
-            let v = load_bytes(frame, store, ma, 4)?;
+            let v = load_bytes(frame, store, maps, ma, 4)?;
             frame.push_i64(i64::from(v as u32 as i32));
         }
         Op::I64Load32U => {
-            let v = load_bytes(frame, store, ma, 4)?;
+            let v = load_bytes(frame, store, maps, ma, 4)?;
             frame.push_i64(i64::from(v as u32));
         }
         Op::I32Store => {
             let val = u64::from(frame.pop_i32() as u32);
-            store_bytes(frame, store, ma, 4, val)?;
+            store_bytes(frame, store, maps, ma, 4, val)?;
         }
         Op::I64Store => {
             let val = frame.pop_i64() as u64;
-            store_bytes(frame, store, ma, 8, val)?;
+            store_bytes(frame, store, maps, ma, 8, val)?;
         }
         Op::F32Store => {
             let val = frame.pop() as u64 & 0xffff_ffff;
-            store_bytes(frame, store, ma, 4, val)?;
+            store_bytes(frame, store, maps, ma, 4, val)?;
         }
         Op::F64Store => {
             let val = frame.pop() as u64;
-            store_bytes(frame, store, ma, 8, val)?;
+            store_bytes(frame, store, maps, ma, 8, val)?;
         }
         Op::I32Store8 => {
             let val = u64::from(frame.pop_i32() as u32);
-            store_bytes(frame, store, ma, 1, val)?;
+            store_bytes(frame, store, maps, ma, 1, val)?;
         }
         Op::I32Store16 => {
             let val = u64::from(frame.pop_i32() as u32);
-            store_bytes(frame, store, ma, 2, val)?;
+            store_bytes(frame, store, maps, ma, 2, val)?;
         }
         Op::I64Store8 => {
             let val = frame.pop_i64() as u64;
-            store_bytes(frame, store, ma, 1, val)?;
+            store_bytes(frame, store, maps, ma, 1, val)?;
         }
         Op::I64Store16 => {
             let val = frame.pop_i64() as u64;
-            store_bytes(frame, store, ma, 2, val)?;
+            store_bytes(frame, store, maps, ma, 2, val)?;
         }
         Op::I64Store32 => {
             let val = frame.pop_i64() as u64;
-            store_bytes(frame, store, ma, 4, val)?;
+            store_bytes(frame, store, maps, ma, 4, val)?;
         }
         _ => return Err(Trap::UnsupportedInstruction),
     }
     Ok(())
 }
 
-fn memory_grow(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+fn memory_grow(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     let Imm::MemIndex(mi) = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
-    let mi = mi as usize;
+    let mi = maps.mem(mi);
     let is64 = store.memories.get(mi).ok_or(Trap::NoMemory)?.is64;
     let delta = frame.pop_mem(is64);
     let mem = &mut store.memories[mi];
@@ -2088,11 +2169,11 @@ fn memory_grow(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()
     Ok(())
 }
 
-fn exec_memory_copy(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+fn exec_memory_copy(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     let Imm::MemCopy { dst, src } = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
-    let (dst, src) = (dst as usize, src as usize);
+    let (dst, src) = (maps.mem(dst), maps.mem(src));
     let dst64 = store.memories.get(dst).ok_or(Trap::NoMemory)?.is64;
     let src64 = store.memories.get(src).ok_or(Trap::NoMemory)?.is64;
     let n = frame.pop_mem(dst64 && src64);
@@ -2110,11 +2191,11 @@ fn exec_memory_copy(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Resu
     Ok(())
 }
 
-fn exec_memory_fill(frame: &mut Frame, store: &mut Store, instr: &Instr) -> Result<()> {
+fn exec_memory_fill(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     let Imm::MemIndex(mi) = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
-    let mi = mi as usize;
+    let mi = maps.mem(mi);
     let is64 = store.memories.get(mi).ok_or(Trap::NoMemory)?.is64;
     let n = frame.pop_mem(is64);
     let byte = frame.pop_i32() as u8;
@@ -2129,7 +2210,7 @@ fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Store, instr: &Ins
     let Imm::MemInit { data, mem } = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
-    let (mi, di) = (mem as usize, data as usize);
+    let (mi, di) = (ctx.maps.mem(mem), ctx.maps.data(data));
     let is64 = store.memories.get(mi).ok_or(Trap::NoMemory)?.is64;
     let dropped = *store.data_dropped.get(di).ok_or(Trap::UndefinedData)?;
     let empty: &[u8] = &[];
@@ -2895,8 +2976,8 @@ fn fneg_f64(x: f64) -> f64 {
 
 /// Pop an address and bounds-check `n` bytes for a SIMD memory op; returns the
 /// effective byte offset into memory `ma.memory` (memory64-aware, overflow-safe).
-fn simd_mem_ea(frame: &mut Frame, store: &Store, ma: crate::opcode::MemArg, n: u64) -> Result<usize> {
-    let mem = store.memories.get(ma.memory as usize).ok_or(Trap::NoMemory)?;
+fn simd_mem_ea(frame: &mut Frame, store: &Store, maps: &IndexMaps, ma: crate::opcode::MemArg, n: u64) -> Result<usize> {
+    let mem = store.memories.get(maps.mem(ma.memory)).ok_or(Trap::NoMemory)?;
     let addr = frame.pop_mem(mem.is64);
     let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
     let end = ea.checked_add(n).ok_or(Trap::MemoryOutOfBounds)?;
@@ -2988,9 +3069,9 @@ macro_rules! simd_extadd {
     }};
 }
 macro_rules! simd_load_extend {
-    ($f:expr, $store:expr, $mem:expr, $srcty:ty, $srcsz:expr, $n:expr, $pk:ident, $dst:ty) => {{
-        let ea = simd_mem_ea($f, $store, $mem, 8)?;
-        let m = &$store.memories[$mem.memory as usize];
+    ($f:expr, $store:expr, $maps:expr, $mem:expr, $srcty:ty, $srcsz:expr, $n:expr, $pk:ident, $dst:ty) => {{
+        let ea = simd_mem_ea($f, $store, $maps, $mem, 8)?;
+        let m = &$store.memories[$maps.mem($mem.memory)];
         let src: [$srcty; $n] = core::array::from_fn(|i| {
             <$srcty>::from_le_bytes(m.bytes[ea + i * $srcsz..ea + i * $srcsz + $srcsz].try_into().unwrap())
         });
@@ -3001,20 +3082,20 @@ macro_rules! simd_load_extend {
 /// Execute a `0xFD` SIMD instruction. Covers the entire fixed-width + relaxed SIMD
 /// set; an unknown sub-opcode traps `UnsupportedInstruction`.
 #[allow(clippy::too_many_lines)]
-fn exec_simd(frame: &mut Frame, store: &mut Store, s: crate::opcode::Simd) -> Result<()> {
+fn exec_simd(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, s: crate::opcode::Simd) -> Result<()> {
     let lane = s.lane as usize;
     match s.sub {
         // --- const / load / store ---
         0x0c => frame.push(s.bytes), // v128.const
         0x00 => {
-            let ea = simd_mem_ea(frame, store, s.mem, 16)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 16)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             frame.push(u128::from_le_bytes(m.bytes[ea..ea + 16].try_into().unwrap()));
         }
         0x0b => {
             let v = frame.pop();
-            let ea = simd_mem_ea(frame, store, s.mem, 16)?;
-            store.memories[s.mem.memory as usize].bytes[ea..ea + 16].copy_from_slice(&v.to_le_bytes());
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 16)?;
+            store.memories[maps.mem(s.mem.memory)].bytes[ea..ea + 16].copy_from_slice(&v.to_le_bytes());
         }
         // --- shuffle / swizzle ---
         0x0d => {
@@ -3434,45 +3515,45 @@ fn exec_simd(frame: &mut Frame, store: &mut Store, s: crate::opcode::Simd) -> Re
             frame.push(p_f64x2([f64::from(s4[0]), f64::from(s4[1])]));
         }
         // --- widening loads / splat / zero ---
-        0x01 => simd_load_extend!(frame, store, s.mem, i8, 1, 8, p_i16x8, i16),
-        0x02 => simd_load_extend!(frame, store, s.mem, u8, 1, 8, p_u16x8, u16),
-        0x03 => simd_load_extend!(frame, store, s.mem, i16, 2, 4, p_i32x4, i32),
-        0x04 => simd_load_extend!(frame, store, s.mem, u16, 2, 4, p_u32x4, u32),
-        0x05 => simd_load_extend!(frame, store, s.mem, i32, 4, 2, p_i64x2, i64),
-        0x06 => simd_load_extend!(frame, store, s.mem, u32, 4, 2, p_u64x2, u64),
+        0x01 => simd_load_extend!(frame, store, maps, s.mem, i8, 1, 8, p_i16x8, i16),
+        0x02 => simd_load_extend!(frame, store, maps, s.mem, u8, 1, 8, p_u16x8, u16),
+        0x03 => simd_load_extend!(frame, store, maps, s.mem, i16, 2, 4, p_i32x4, i32),
+        0x04 => simd_load_extend!(frame, store, maps, s.mem, u16, 2, 4, p_u32x4, u32),
+        0x05 => simd_load_extend!(frame, store, maps, s.mem, i32, 4, 2, p_i64x2, i64),
+        0x06 => simd_load_extend!(frame, store, maps, s.mem, u32, 4, 2, p_u64x2, u64),
         0x07 => {
-            let ea = simd_mem_ea(frame, store, s.mem, 1)?;
-            let x = store.memories[s.mem.memory as usize].bytes[ea];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 1)?;
+            let x = store.memories[maps.mem(s.mem.memory)].bytes[ea];
             frame.push(p_u8x16([x; 16]));
         }
         0x08 => {
-            let ea = simd_mem_ea(frame, store, s.mem, 2)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 2)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             let x = u16::from_le_bytes(m.bytes[ea..ea + 2].try_into().unwrap());
             frame.push(p_u16x8([x; 8]));
         }
         0x09 => {
-            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 4)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             let x = u32::from_le_bytes(m.bytes[ea..ea + 4].try_into().unwrap());
             frame.push(p_u32x4([x; 4]));
         }
         0x0a => {
-            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 8)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             let x = u64::from_le_bytes(m.bytes[ea..ea + 8].try_into().unwrap());
             frame.push(p_u64x2([x; 2]));
         }
         0x5c => {
-            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 4)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             let mut b = [0u8; 16];
             b[0..4].copy_from_slice(&m.bytes[ea..ea + 4]);
             frame.push(Value::from_le_bytes(b));
         }
         0x5d => {
-            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 8)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             let mut b = [0u8; 16];
             b[0..8].copy_from_slice(&m.bytes[ea..ea + 8]);
             frame.push(Value::from_le_bytes(b));
@@ -3480,50 +3561,50 @@ fn exec_simd(frame: &mut Frame, store: &mut Store, s: crate::opcode::Simd) -> Re
         // --- load_lane / store_lane ---
         0x54 => {
             let mut a = v_u8x16(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 1)?;
-            a[lane] = store.memories[s.mem.memory as usize].bytes[ea];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 1)?;
+            a[lane] = store.memories[maps.mem(s.mem.memory)].bytes[ea];
             frame.push(p_u8x16(a));
         }
         0x55 => {
             let mut a = v_u16x8(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 2)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 2)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             a[lane] = u16::from_le_bytes(m.bytes[ea..ea + 2].try_into().unwrap());
             frame.push(p_u16x8(a));
         }
         0x56 => {
             let mut a = v_u32x4(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 4)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             a[lane] = u32::from_le_bytes(m.bytes[ea..ea + 4].try_into().unwrap());
             frame.push(p_u32x4(a));
         }
         0x57 => {
             let mut a = v_u64x2(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
-            let m = &store.memories[s.mem.memory as usize];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 8)?;
+            let m = &store.memories[maps.mem(s.mem.memory)];
             a[lane] = u64::from_le_bytes(m.bytes[ea..ea + 8].try_into().unwrap());
             frame.push(p_u64x2(a));
         }
         0x58 => {
             let a = v_u8x16(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 1)?;
-            store.memories[s.mem.memory as usize].bytes[ea] = a[lane];
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 1)?;
+            store.memories[maps.mem(s.mem.memory)].bytes[ea] = a[lane];
         }
         0x59 => {
             let a = v_u16x8(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 2)?;
-            store.memories[s.mem.memory as usize].bytes[ea..ea + 2].copy_from_slice(&a[lane].to_le_bytes());
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 2)?;
+            store.memories[maps.mem(s.mem.memory)].bytes[ea..ea + 2].copy_from_slice(&a[lane].to_le_bytes());
         }
         0x5a => {
             let a = v_u32x4(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 4)?;
-            store.memories[s.mem.memory as usize].bytes[ea..ea + 4].copy_from_slice(&a[lane].to_le_bytes());
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 4)?;
+            store.memories[maps.mem(s.mem.memory)].bytes[ea..ea + 4].copy_from_slice(&a[lane].to_le_bytes());
         }
         0x5b => {
             let a = v_u64x2(frame.pop());
-            let ea = simd_mem_ea(frame, store, s.mem, 8)?;
-            store.memories[s.mem.memory as usize].bytes[ea..ea + 8].copy_from_slice(&a[lane].to_le_bytes());
+            let ea = simd_mem_ea(frame, store, maps, s.mem, 8)?;
+            store.memories[maps.mem(s.mem.memory)].bytes[ea..ea + 8].copy_from_slice(&a[lane].to_le_bytes());
         }
         // --- relaxed SIMD (deterministic choices per wazmrt) ---
         0x105 => {
@@ -3678,11 +3759,12 @@ fn atomic_align_log2(sub: u32) -> u32 {
 fn atomic_ea(
     frame: &mut Frame,
     store: &Store,
+    maps: &IndexMaps,
     at: crate::opcode::Atomic,
     width: u64,
     need_shared: bool,
 ) -> Result<usize> {
-    let mem = store.memories.get(at.mem.memory as usize).ok_or(Trap::NoMemory)?;
+    let mem = store.memories.get(maps.mem(at.mem.memory)).ok_or(Trap::NoMemory)?;
     let base = frame.pop_mem(mem.is64);
     if need_shared && !mem.shared {
         return Err(Trap::ExpectedSharedMemory);
@@ -3699,18 +3781,18 @@ fn atomic_ea(
 }
 
 /// Execute a `0xFE` atomic instruction (single-threaded semantics).
-fn exec_atomic(frame: &mut Frame, store: &mut Store, at: crate::opcode::Atomic) -> Result<()> {
+fn exec_atomic(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, at: crate::opcode::Atomic) -> Result<()> {
     let sub = at.sub;
     if sub == 0x03 {
         return Ok(()); // atomic.fence — nothing to order single-threaded
     }
     let w = 1u64 << atomic_align_log2(sub);
-    let mi = at.mem.memory as usize;
+    let mi = maps.mem(at.mem.memory);
     match sub {
         0x00 => {
             // memory.atomic.notify [addr count] -> [woken] (always 0 single-threaded)
             let _count = frame.pop_i32();
-            let _ea = atomic_ea(frame, store, at, w, false)?;
+            let _ea = atomic_ea(frame, store, maps, at, w, false)?;
             frame.push_i32(0);
         }
         0x01 | 0x02 => {
@@ -3721,13 +3803,13 @@ fn exec_atomic(frame: &mut Frame, store: &mut Store, at: crate::opcode::Atomic) 
             } else {
                 frame.pop_i64() as u64
             };
-            let ea = atomic_ea(frame, store, at, w, true)?;
+            let ea = atomic_ea(frame, store, maps, at, w, true)?;
             let cur = atomic_read(&store.memories[mi].bytes, ea, w);
             frame.push_i32(if cur != expected { 1 } else { 2 });
         }
         0x10..=0x16 => {
             // atomic load [addr] -> [T]
-            let ea = atomic_ea(frame, store, at, w, false)?;
+            let ea = atomic_ea(frame, store, maps, at, w, false)?;
             let v = atomic_read(&store.memories[mi].bytes, ea, w);
             if atomic_is64(sub) {
                 frame.push_i64(v as i64);
@@ -3742,7 +3824,7 @@ fn exec_atomic(frame: &mut Frame, store: &mut Store, at: crate::opcode::Atomic) 
             } else {
                 u64::from(frame.pop_i32() as u32)
             };
-            let ea = atomic_ea(frame, store, at, w, false)?;
+            let ea = atomic_ea(frame, store, maps, at, w, false)?;
             atomic_write(&mut store.memories[mi].bytes, ea, w, val);
         }
         0x1e..=0x4e => {
@@ -3760,7 +3842,7 @@ fn exec_atomic(frame: &mut Frame, store: &mut Store, at: crate::opcode::Atomic) 
                 } else {
                     u64::from(frame.pop_i32() as u32)
                 };
-                let ea = atomic_ea(frame, store, at, w, false)?;
+                let ea = atomic_ea(frame, store, maps, at, w, false)?;
                 let old = atomic_read(&store.memories[mi].bytes, ea, w);
                 if old == mask_width(expected, w) {
                     atomic_write(&mut store.memories[mi].bytes, ea, w, repl);
@@ -3777,7 +3859,7 @@ fn exec_atomic(frame: &mut Frame, store: &mut Store, at: crate::opcode::Atomic) 
                 } else {
                     u64::from(frame.pop_i32() as u32)
                 };
-                let ea = atomic_ea(frame, store, at, w, false)?;
+                let ea = atomic_ea(frame, store, maps, at, w, false)?;
                 let old = atomic_read(&store.memories[mi].bytes, ea, w);
                 let new = match group {
                     0 => old.wrapping_add(val),
