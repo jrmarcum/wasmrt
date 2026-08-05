@@ -3,6 +3,9 @@
 //! Grows across the roadmap (`cmem/roadmap.md`). Today it summarizes + type-checks a module,
 //! calls an export, runs a WASI preview-1 program, assembles `.wat`, and runs `.wast` scripts.
 
+// The CLI carries no `unsafe` either; `forbid` keeps it that way (`cmem/design-decisions.md`).
+#![forbid(unsafe_code)]
+
 use std::process::ExitCode;
 
 use wasmrt_core::interp::{self, Instance, Value};

@@ -42,7 +42,7 @@ validates; `run` executes an export; `wasi` runs a preview-1 program with `--dir
 The interp value slot is 128-bit
 (`Value = u128`) so a `v128` is one slot; a memory carries its own index type (`i64` addresses on a
 64-bit memory) while **tables stay 32-bit**; `delegate` is rejected everywhere (oracle-faithful).
-**272 workspace tests** green, clippy clean, all four build surfaces. Each task ships a crates.io
+**274 workspace tests** green, clippy clean, all four build surfaces. Each task ships a crates.io
 release ([releasing.md](releasing.md)) + a flip on the public `ROADMAP.md` matrix — with the full `cmem/`
 sync committed **before** the publish handoff (owner directive, 2026-07-31; see `releasing.md`).
 

@@ -1375,20 +1375,37 @@ pub fn path_symlink(
         Ok(t) => PathBuf::from(t),
         Err(_) => return ret(results, err::INVAL),
     };
-    #[cfg(unix)]
-    let r = std::os::unix::fs::symlink(&t, &link);
-    #[cfg(windows)]
-    let r = {
-        // Windows needs to know at creation whether the target is a directory.
-        if w.dir.join(&t).is_dir() {
-            std::os::windows::fs::symlink_dir(&t, &link)
-        } else {
-            std::os::windows::fs::symlink_file(&t, &link)
-        }
-    };
-    match r {
+    match make_symlink(&t, &link, w.dir.join(&t).is_dir()) {
         Ok(()) => ret(results, err::SUCCESS),
-        Err(e) => ret(results, errno_for(&e)),
+        Err(e) => ret(results, e),
+    }
+}
+
+/// Create a symlink. The one filesystem call with no portable spelling in `std`, so each
+/// platform gets its own body — and a host that has neither says **`NOSYS`** rather than
+/// reporting a success it did not perform.
+///
+/// `target_is_dir` is only consulted on Windows, which must be told at creation time which
+/// kind of link it is making.
+fn make_symlink(target: &Path, link: &Path, target_is_dir: bool) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        let _ = target_is_dir;
+        std::os::unix::fs::symlink(target, link).map_err(|e| errno_for(&e))
+    }
+    #[cfg(windows)]
+    {
+        if target_is_dir {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+        .map_err(|e| errno_for(&e))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link, target_is_dir);
+        Err(err::NOSYS)
     }
 }
 

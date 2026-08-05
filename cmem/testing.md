@@ -24,10 +24,10 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 
 | | T6 gate (2026-08-03) | post-linking (08-04) | **current (08-05)** |
 | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | **59,261** |
-| failed | 871 | 1,521 | **851** |
-| skipped | 9,608 | 6,821 | **4,720** |
-| **pass rate** | 98.4% | 97.4% | **98.6%** of 60,112 adjudicated |
+| **passed** | 54,509 | 56,541 | **59,395** |
+| failed | 871 | 1,521 | **843** |
+| skipped | 9,608 | 6,821 | **4,586** |
+| **pass rate** | 98.4% | 97.4% | **98.6%** of 60,238 adjudicated |
 
 The dip at 08-04 was capability, not regression: wiring `register` + `spectest` moved 2,784 assertions
 out of *skipped*, and ~649 of them were already-broken code that had been hidden behind a skip. The
@@ -39,22 +39,34 @@ conflation that is *unobservable* with a single instance per store. Regression t
 nothing.
 
 **Skips are never folded into passes.** A construct this build cannot put to the test is not a pass —
-that is the runner's honesty rule (`wast.rs`), and it is why the number is trustworthy. The skip count is
-dominated by modules needing **host imports**, which `Instance::new` still rejects; expect it to fall
-sharply at T7.
+that is the runner's honesty rule (`wast.rs`), and it is why the number is trustworthy. The residual
+4,586 skips are dominated by **imported memories and tables**, which the shared store now models but the
+`.wast` runner's `spectest` provider does not yet supply.
 
-Worst remaining files: `simd_const` 47, `binary` 43 (×2 copies), `type-subtyping` 36, `table_copy64` 33,
-`i31` 30, `const` 26, `float_literals` 26. **Owner's call (2026-08-03): stop here and re-check after
-T7** rather than grinding the assembler edges first.
+Worst remaining files (2026-08-05): `simd_const` 46, `binary` 44 (×2 copies), `type-subtyping` 36,
+`i31` 30, `const` 26, `float_literals` 26, `table_copy64` 22, `token` 22. The ranked pre-T8 punch list —
+what each costs and what to do about it — is in `known-issues.md`.
 
 The first run scored 96.7% and surfaced four bugs the hand vectors could not — a panic, an element-segment
 encoding no decoder could read, truncated out-of-range constants, and mis-placed digit separators (all in
 `roadmap.md`'s T6-gate entry, all pinned by regression tests). **That is the argument for the suite:** it
 tests the assembler against the decoder, validator and interpreter at a scale hand vectors cannot reach.
 
-## Current test state (2026-08-03, v0.7.0)
+## Current test state (2026-08-05, post-T7)
 
-**218 `wasmrt-core` unit tests, all green** under native + (compile) `wasm32` no_std; clippy clean.
+**274 workspace tests, all green** under native + (compile) `wasm32` no_std; clippy clean on all four
+build surfaces. T7 added 56 over v0.7.0's 218: host imports and the shared store (incl. the two
+**two-instance** regressions above), the WASI process surface, and the sandbox — whose resolver tests
+carry a canary *outside* the preopen and assert the **outcome** (no walk may produce a path that reads
+it) rather than a particular errno, so they survive a change of mechanism.
+
+**Two lint-shaped guarantees, both mutation-verified** (a lint nobody has watched fail is not
+enforcement): `#![forbid(unsafe_code)]` in `wasmrt-core` and the CLI — adding an `unsafe` block fails
+the build; and the sandbox's `..` guard — deleting it fails the canary test.
+
+**Run the `wasm32` no_std target, not just the native one.** The `#![forbid]` work surfaced a
+`path_symlink` that compiled only under `cfg(unix)`/`cfg(windows)`; no test caught it, the second target
+did.
 
 **The T6 layers added 95.** The **`.wast` runner** added 15 (including the one that pins the honesty
 rule: an unknown mnemonic inside an `assert_invalid` must **skip**, not pass). The **assembler** added 55

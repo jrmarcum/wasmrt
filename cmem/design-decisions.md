@@ -49,11 +49,23 @@ for two — you can no longer tell a safety regression from a behavior bug. Esta
 (conformance + parity green), *then* harden. Hence the order: finish **T7**, review the known issues,
 *then* take this on before/with **T8**.
 
-**Baseline as of 2026-08-04 (measured, v0.7.0):** **zero `unsafe` blocks or `unsafe fn` in the whole
-workspace.** The only two occurrences of the token are `#[unsafe(no_mangle)]` in `wasmrt-capi` (an
-Edition 2024 *attribute syntax* asserting symbol-name uniqueness — not an unsafe block) and the word
-"unsafely" in an `interp.rs` comment. The property currently holds **by discipline, not by enforcement**:
-there is no `unsafe_code` lint in `[workspace.lints]`. Making it structural is the cheap win.
+**✅ ENFORCED as of 2026-08-05 — the rule is now mechanical, not aspirational.**
+
+- `wasmrt-core`: **`#![forbid(unsafe_code)]`**. `forbid`, not `deny`, deliberately — `deny` can be
+  switched off by an `#[allow]` further down, which is exactly how such a rule erodes.
+- `wasmrt` (CLI): **`#![forbid(unsafe_code)]`** — it had none either.
+- `wasmrt-capi`: **`#![deny(unsafe_code)]`** plus one site-local `#[allow]` on `#[unsafe(no_mangle)]`,
+  carrying a written justification (the obligation is symbol-name uniqueness, discharged by the
+  `wasmrt_` prefix; it dereferences nothing). `deny` rather than `forbid` precisely so each future
+  exception is written down at its site and shows up in review.
+- **Verified by mutation:** adding `unsafe { … }` to `rng.rs` fails the build with *"usage of an
+  `unsafe` block"*. A lint nobody has watched fail is not enforcement.
+
+The lints cost nothing today — the measured baseline was already **zero `unsafe` blocks or `unsafe fn`
+workspace-wide** — which is the whole reason to add them *now*: the next one becomes a compile error
+rather than a review comment. **If a future need looks genuinely unavoidable** (the `openat` question in
+`security-model.md` is the live one), relaxing the line is an **owner decision**, never a local
+work-around.
 
 **What "unsafe constructs from Zig" actually means in a Rust port** — the literal `unsafe` keyword is the
 *least* of it, and today's spec-suite run proved the point. The real inherited-hazard surface is:
@@ -67,6 +79,11 @@ there is no `unsafe_code` lint in `[workspace.lints]`. Making it structural is t
    oracle would have hit UB. Also found by the suite: out-of-range `i32.const` becoming 0, and
    `v128.const i8x16 0x100` becoming all-zero lanes. Wrong values are worse than rejections.
 3. **Unchecked index/length arithmetic** that happens to be in-bounds today.
+
+4. **Fall-through arms that fail to compile off the dev platform.** The `#![forbid]` work surfaced one:
+   `path_symlink` defined its result only under `#[cfg(unix)]`/`#[cfg(windows)]`, so the `wasm32` no_std
+   build broke. Fixed with an explicit third arm returning `NOSYS`. The dual-target build is what caught
+   it — **run it, not just the native one**, before calling a change done.
 
 **The T8 nuance to settle before starting.** The C ABI *cannot* be zero-unsafe: `extern "C"` entry points
 receive raw pointers from C callers and must dereference them. So the realistic target is

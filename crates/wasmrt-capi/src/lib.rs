@@ -11,11 +11,25 @@
 //! **ABI rule (do not drift):** type pointer params as real pointers / `#[repr(C)]` structs
 //! (`*const u32`, `*mut c_void`), never a hardcoded `i32` — lowers correctly on both wasm32
 //! and 64-bit native. See `cmem/architecture.md`.
+//!
+//! **Safety posture:** `wasmrt-core` is `#![forbid(unsafe_code)]`. This crate cannot be —
+//! a C ABI is an unsafe boundary by definition — so it is `deny` instead, and **every**
+//! `unsafe` must carry a comment saying what obligation it discharges and why no safe
+//! spelling exists. `deny` (not `forbid`) precisely so each exception is written down at its
+//! site and shows up in review, rather than the whole file opting out.
+
+#![deny(unsafe_code)]
 
 /// C ABI: the wasmrt ABI version. Mirrors wazmrt's `wazmrt_abi_version`.
 ///
 /// Edition 2024 makes `no_mangle` an `unsafe(...)` attribute — it asserts the symbol name is
 /// unique across the final link. `extern "C"` for the C calling convention.
+///
+/// **Justification for the `allow`** (required by the crate-level `deny`): exporting a symbol
+/// under a fixed C name is the entire purpose of this crate, and there is no safe spelling of
+/// it. The obligation is symbol-name uniqueness, discharged by the `wasmrt_` prefix on every
+/// export. This is not a memory-safety `unsafe` and dereferences nothing.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn wasmrt_abi_version() -> u32 {
     wasmrt_core::abi_version()

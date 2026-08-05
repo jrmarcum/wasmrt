@@ -5,7 +5,38 @@ v0.1.0–v0.7.0). This records the **inherited concerns** from the frozen wazmrt
 intentional divergences**, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
 (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
-## Spec-suite punch-list (2026-08-05, post shared-store fixes — 98.6%, 851 failing)
+## 📋 Pre-T8 review (2026-08-05) — the punch list the owner asked to discuss
+
+Suite: **59,395 passed / 843 failed / 4,586 skipped — 98.6%** of 60,238 adjudicated.
+Workspace: **274 tests**, clippy clean, all four build surfaces green.
+
+**Fixed during the review:**
+
+- **`v128.const` in a const-expr was a validator/interpreter DISAGREEMENT** (`validate.rs` ~344). The
+  interpreter has evaluated it since v0.6.5; the validator still rejected it, so a module with a `v128`
+  global was refused as invalid *despite running correctly*. This is the harder class to notice — not
+  unsafe (validation runs first), just a **false rejection**. Fixed + pinned by two tests, including one
+  asserting the other ~230 `0xfd` opcodes are still refused. **+134 passes, −8 failures, −134 skips.**
+- **`path_symlink` did not compile off unix/windows** — `let r` existed only under two `cfg`s, so the
+  `wasm32` no_std target broke. Caught by the dual-target build during the `#![forbid]` work, not by any
+  test. Now an explicit third arm returning `NOSYS`.
+
+**Open, ranked by what they cost:**
+
+| # | Item | Cost / risk | Recommendation |
+| --- | --- | --- | --- |
+| 1 | **Resolver TOCTOU residual** — Rust `std` has no dir-relative open, so the walk accumulates a path; escape properties intact, **inode pinning is not**. See `security-model.md`. | Needs a *second process* writing inside the preopen. Not guest-reachable. | **Owner decision.** Accept + document, or spend `cap-std`, or a narrow audited `unsafe` shim. Nothing else blocks on it. |
+| 2 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. | ~30 `i31.wast` failures + some of `type-subtyping`. Consistent, so no disagreement — an honest missing feature. | Fix at T9 hardening, or sooner if a loader needs GC globals. |
+| 3 | **Literal/text edges** — `simd_const` 46, `binary` 44 ×2, `const`/`float_literals` 26 each, `token` 22. | Assembler **over-accepts** malformed literals the spec wants rejected. No wrong values at runtime. | Grind at T9; each is small and independent. |
+| 4 | **64-bit table index type** (`(table $t i64 …)`) — `table_copy64` 22, `table_init64` 3. | Out of scope by a recorded invariant ("tables stay 32-bit", matching the oracle). | Leave unless a loader needs it — it is a **scope change**, not a bug. |
+| 5 | **Proposals not targeted** — `custom-page-sizes` 21+18, `exact` 18, `memory64-imports` 20. | Not in the feature set. | Leave; revisit only if the spec promotes them. |
+| 6 | **Debug-build stack depth** — deep recursion can overflow the native stack before the 512-frame cap fires (release is correct). | Debug only. Deliberately not "fixed" by lowering the cap (oracle parity). | Revisit at T8 alongside the C ABI's own re-entrancy limits. |
+
+**Not an issue, recorded so it is not re-litigated:** `delegate` is rejected by assembler, validator and
+interpreter alike — deliberate, oracle-faithful. `legacy/try_delegate.wast` failing is the *correct*
+outcome.
+
+## Spec-suite punch-list (2026-08-05, post shared-store fixes — 851 failing)
 
 The table/memory family below is **FIXED**. Three defects, all one root cause plus one assembler gap:
 

@@ -340,8 +340,21 @@ fn validate_const_expr(
                 }
                 stack.pop();
             }
-            // v128.const (0xfd 0x0c) and the GC constant instructions (0xfb …) are
-            // deferred to v0.5.x — reject as not-a-constant-expression for now.
+            // `v128.const` — the SIMD prefix. The interpreter has evaluated this in a
+            // const-expr since v0.6.5, so rejecting it here was a **false rejection**: a
+            // module with a `v128` global validated as invalid despite running correctly.
+            // Nothing but `v128.const` is constant in the 0xfd family.
+            0xfd => {
+                if r.read_var_u32()? != 0x0c {
+                    return Err(ValidateError::ConstantExpressionRequired);
+                }
+                r.read_bytes(16)?;
+                push(&mut stack, V::V128)?;
+            }
+            // The GC constant instructions (`struct.new`, `array.new*`, `ref.i31`, 0xfb …)
+            // stay rejected, and the interpreter's `eval_const_expr` rejects them too — so
+            // validator and engine agree. That is a missing feature, tracked in
+            // `cmem/known-issues.md`, not a disagreement.
             _ => return Err(ValidateError::ConstantExpressionRequired),
         }
     }
@@ -1778,6 +1791,37 @@ mod tests {
         let mut v = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
         v.extend_from_slice(rest);
         v
+    }
+
+    /// The validator and the interpreter must agree on what a constant expression is. When
+    /// they disagree the engine is not unsafe — validation runs first — but a *valid* module
+    /// gets refused, which is the harder bug to notice. `v128.const` was exactly that from
+    /// v0.6.5 (when the interpreter learned it) until 2026-08-05.
+    #[test]
+    fn a_v128_global_initializer_is_a_constant_expression() {
+        // globals: one v128 global initialized to v128.const 0…0.
+        let mut sec = vec![0x01, 0x7b, 0x00, 0xfd, 0x0c];
+        sec.extend_from_slice(&[0u8; 16]);
+        sec.push(0x0b);
+        let mut bytes = vec![0x06, u8::try_from(sec.len()).unwrap()];
+        bytes.extend_from_slice(&sec);
+        let md = decode(&m(&bytes)).expect("decode");
+        assert!(
+            validate(&md).is_ok(),
+            "a v128 global must validate — the interpreter already evaluates it"
+        );
+    }
+
+    /// The 0xfd prefix carries ~230 opcodes and only `v128.const` is constant; the rest must
+    /// still be refused, or the check above would have opened the door to all of them.
+    #[test]
+    fn a_non_const_simd_op_is_still_not_a_constant_expression() {
+        // v128.not (0xfd 0x4d) in a global initializer.
+        let sec = vec![0x01, 0x7b, 0x00, 0xfd, 0x4d, 0x0b];
+        let mut bytes = vec![0x06, u8::try_from(sec.len()).unwrap()];
+        bytes.extend_from_slice(&sec);
+        let Ok(md) = decode(&m(&bytes)) else { return };
+        assert!(validate(&md).is_err(), "only v128.const is constant");
     }
 
     #[test]

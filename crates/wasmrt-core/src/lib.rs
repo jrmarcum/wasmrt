@@ -14,6 +14,17 @@
 //! T6 text → T7 wasi). This file is the T0 scaffold: the crate compiles empty on every
 //! target surface.
 #![cfg_attr(not(feature = "std"), no_std)]
+// **The safety directive, made mechanical** (owner, 2026-08-05; `cmem/design-decisions.md`).
+// The oracle is Zig and leans on raw pointers, manual lifetimes and an arena; none of that
+// posture may migrate here. `forbid` rather than `deny` on purpose: `deny` can be switched
+// off by an `#[allow]` further down, which is exactly how such a rule erodes. This crate has
+// carried zero `unsafe` constructs since v0.1.0, so the lint costs nothing today and makes
+// the next one a compile error rather than a review comment.
+//
+// If a future need looks genuinely unavoidable (the `openat` question in
+// `cmem/security-model.md` is the live one), that is an owner decision to relax this line
+// deliberately — not something to work around locally.
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
