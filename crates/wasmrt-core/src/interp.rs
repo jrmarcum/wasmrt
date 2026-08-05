@@ -207,7 +207,8 @@ impl IndexMaps {
 }
 
 /// The resource pools shared by every instance in a linking group.
-struct Store {
+#[derive(Default)]
+struct Pools {
     globals: Vec<Value>,
     memories: Vec<Memory>,
     tables: Vec<Table>,
@@ -383,7 +384,7 @@ struct FuncBody {
 /// it can read arguments out of guest memory and write results back (how every WASI call
 /// works). Handed to the callback for the duration of the call and no longer.
 pub struct Caller<'a> {
-    store: &'a mut Store,
+    store: &'a mut Pools,
     /// The CALLING instance's index maps: a host function's `memory(0)` means that
     /// instance's memory 0, wherever it lives in the shared pools.
     maps: &'a IndexMaps,
@@ -456,6 +457,10 @@ impl fmt::Debug for HostFunc {
 pub struct Imports {
     pub funcs: Vec<HostFunc>,
     pub globals: Vec<Value>,
+    /// Function imports satisfied by **another instance's export** (module linking), added
+    /// with [`Imports::with_instance_func`]. These follow the host functions in the module's
+    /// import order.
+    wasm_funcs: Vec<FuncTarget>,
 }
 
 impl Imports {
@@ -480,31 +485,81 @@ impl Imports {
         self.globals.push(v);
         self
     }
+
+    /// Satisfy a function import with **another instance's** function (module linking).
+    /// The callee runs against its own instance, so it sees the exporter's memory and
+    /// globals — which is what makes `(register …)` linking behave correctly.
+    #[must_use]
+    pub fn with_instance_func(mut self, instance: InstanceId, func: u32) -> Imports {
+        self.wasm_funcs.push(FuncTarget::Wasm {
+            instance: instance.0,
+            func,
+        });
+        self
+    }
 }
 
-/// An instantiated module ready to run. Owns its `Module` (so it outlives the input and the
-/// "instance retains its module" invariant holds by construction).
-pub struct Instance {
+/// What backs one of an instance's **imported** functions.
+#[derive(Clone, Copy)]
+enum FuncTarget {
+    /// A host callback, at this index in the store's host-function pool.
+    Host(usize),
+    /// Another instance's function (module linking) — it runs against **its own** instance,
+    /// so its memory and globals are the exporter's, not the importer's.
+    Wasm { instance: usize, func: u32 },
+}
+
+/// One instance's immutable code and index maps.
+///
+/// Deliberately separate from [`Pools`]: a cross-instance call needs `&code[callee]` while
+/// still holding `&mut pools`, and two disjoint fields of [`Store`] borrow cleanly where two
+/// halves of one struct would not. That is what makes wasm→wasm calls work without `Rc`,
+/// `RefCell`, or `unsafe`.
+struct InstanceData {
     module: Module,
     func_bodies: Vec<FuncBody>,
-    /// Where this instance's index spaces live in the store pools. Identity today (one
-    /// instance per store); module linking will point an imported entry at the exporter's
-    /// slot instead.
     maps: IndexMaps,
-    /// Backing for the module's imported functions, index-aligned with the low end of the
-    /// function index space.
+    /// One entry per **imported** function, in declaration order.
+    imports: Vec<FuncTarget>,
+}
+
+/// A group of instances that share resources — the unit of linking.
+///
+/// Modelled on wasmtime: the store owns every memory, table and global exactly once, and
+/// instances reference them by index. Two instances that share a memory hold the same slot
+/// in their maps, so a write through one is visible through the other by construction.
+#[derive(Default)]
+pub struct Store {
+    code: Vec<InstanceData>,
     host_funcs: Vec<HostFunc>,
+    pools: Pools,
+}
+
+/// Identifies an instance inside a [`Store`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceId(usize);
+
+/// An instantiated module ready to run — a [`Store`] holding exactly one instance.
+///
+/// The convenience shape for the common single-module case; use [`Store`] directly when
+/// modules need to import from one another.
+pub struct Instance {
     store: Store,
+    id: InstanceId,
 }
 
 /// Immutable execution context (read-only during a call); the mutable [`Store`] is threaded
 /// separately as `&mut` so a recursive `call` reborrows it cleanly.
 struct Ctx<'a> {
     module: &'a Module,
-    func_bodies: &'a [FuncBody],
-    host_funcs: &'a [HostFunc],
     /// Where this instance's index spaces live in the shared store pools.
     maps: &'a IndexMaps,
+    /// Every instance's code, so a `call` into an imported wasm function can reach the
+    /// callee's instance.
+    code: &'a [InstanceData],
+    host_funcs: &'a [HostFunc],
+    /// Which instance this frame belongs to.
+    inst: usize,
 }
 
 impl Instance {
@@ -526,6 +581,64 @@ impl Instance {
     /// [`Trap::MissingImport`] if a count does not match what the module declares, or
     /// [`Trap::UnsupportedImportKind`] for an imported memory/table (module linking, T7b).
     pub fn new_with_imports(module: Module, imports: Imports) -> Result<Instance> {
+        let mut store = Store::default();
+        let id = store.instantiate(module, imports)?;
+        Ok(Instance { store, id })
+    }
+
+    /// The wrapped module.
+    #[must_use]
+    pub fn module(&self) -> &Module {
+        self.store.module_of(self.id)
+    }
+
+    /// Invoke an exported function by name.
+    ///
+    /// # Errors
+    /// [`Trap::UndefinedExport`] if there is no such export, or whatever the guest traps
+    /// with.
+    pub fn invoke(&mut self, name: &str, args: &[Value]) -> Result<Vec<Value>> {
+        self.store.invoke(self.id, name, args)
+    }
+
+    /// Invoke a function by its index in the function index space.
+    ///
+    /// # Errors
+    /// [`Trap::UndefinedFunc`] for a bad index, [`Trap::BadArgCount`] on arity mismatch, or
+    /// whatever the guest traps with.
+    pub fn invoke_index(&mut self, func_index: u32, args: &[Value]) -> Result<Vec<Value>> {
+        self.store.invoke_index(self.id, func_index, args)
+    }
+}
+
+impl Store {
+    /// A store with no instances.
+    #[must_use]
+    pub fn new() -> Store {
+        Store::default()
+    }
+
+    /// The module behind an instance.
+    #[must_use]
+    pub fn module_of(&self, id: InstanceId) -> &Module {
+        &self.code[id.0].module
+    }
+
+    /// Find an exported function's index in an instance, for linking against it.
+    #[must_use]
+    pub fn export_func(&self, id: InstanceId, name: &str) -> Option<u32> {
+        self.code[id.0].module.exports.iter().find_map(|e| {
+            (e.name == name && e.ty.kind() == crate::types::ExternKind::Func).then_some(e.index)
+        })
+    }
+
+    /// Instantiate a module into this store, linking `imports` against its declared imports.
+    ///
+    /// # Errors
+    /// [`Trap::MissingImport`] if a count does not match, [`Trap::UnsupportedImportKind`]
+    /// for an import kind this store cannot yet back, or a trap from evaluating an
+    /// initializer or applying an active segment.
+    pub fn instantiate(&mut self, module: Module, imports: Imports) -> Result<InstanceId> {
         if module.functions.len() != module.code.len() {
             return Err(Trap::UndefinedFunc);
         }
@@ -549,7 +662,11 @@ impl Instance {
         if n_mems > 0 || n_tables > 0 {
             return Err(Trap::UnsupportedImportKind);
         }
-        if imports.funcs.len() != n_funcs || imports.globals.len() != n_globals {
+        // A function import may be backed by a host callback OR another instance's export,
+        // so both pools count toward the declared total.
+        if imports.funcs.len() + imports.wasm_funcs.len() != n_funcs
+            || imports.globals.len() != n_globals
+        {
             return Err(Trap::MissingImport);
         }
 
@@ -661,80 +778,87 @@ impl Instance {
             });
         }
 
-        // This instance owns every slot in its store (nothing is imported from another
-        // instance yet), so each map is the identity. Module linking changes only this
-        // step: an imported entry points at the exporting instance's existing slot instead
-        // of a freshly allocated one, and everything downstream already reads through the
-        // map — which is the whole point of building it now.
+        // Move this instance's resources into the shared pools and record where they
+        // landed. A DEFINED resource takes a fresh slot; the maps are what let an imported
+        // one point at another instance's existing slot instead — everything downstream
+        // already reads through them.
+        let base = |n: usize, len: usize| (n..n + len).collect::<Vec<_>>();
         let maps = IndexMaps {
-            memories: (0..memories.len()).collect(),
-            tables: (0..tables.len()).collect(),
-            globals: (0..globals.len()).collect(),
-            data: (0..data_dropped.len()).collect(),
-            elems: (0..elem_values.len()).collect(),
+            memories: base(self.pools.memories.len(), memories.len()),
+            tables: base(self.pools.tables.len(), tables.len()),
+            globals: base(self.pools.globals.len(), globals.len()),
+            data: base(self.pools.data_dropped.len(), data_dropped.len()),
+            elems: base(self.pools.elem_values.len(), elem_values.len()),
         };
+        self.pools.memories.extend(memories);
+        self.pools.tables.extend(tables);
+        self.pools.globals.extend(globals);
+        self.pools.data_dropped.extend(data_dropped);
+        self.pools.elem_values.extend(elem_values);
+        self.pools.elem_dropped.extend(elem_dropped);
 
-        Ok(Instance {
+        // Host functions join the store-wide pool; each import records where its backing is.
+        let mut targets = Vec::with_capacity(imports.funcs.len());
+        for f in imports.funcs {
+            targets.push(FuncTarget::Host(self.host_funcs.len()));
+            self.host_funcs.push(f);
+        }
+        // Any wasm→wasm import the caller pre-resolved comes after the host ones.
+        targets.extend(imports.wasm_funcs);
+
+        let id = InstanceId(self.code.len());
+        self.code.push(InstanceData {
             module,
             func_bodies,
             maps,
-            host_funcs: imports.funcs,
-            store: Store {
-                globals,
-                memories,
-                tables,
-                data_dropped,
-                elem_values,
-                elem_dropped,
-                gc_heap: Vec::new(),
-                exn_store: Vec::new(),
-                pending_exn: None,
-            },
-        })
+            imports: targets,
+        });
+        Ok(id)
     }
 
-    /// The wrapped module.
-    #[must_use]
-    pub fn module(&self) -> &Module {
-        &self.module
+    /// Invoke an instance's exported function by name.
+    ///
+    /// # Errors
+    /// [`Trap::UndefinedExport`] if there is no such export, or whatever the guest traps
+    /// with.
+    pub fn invoke(&mut self, id: InstanceId, name: &str, args: &[Value]) -> Result<Vec<Value>> {
+        let func_index = self.export_func(id, name).ok_or(Trap::UndefinedExport)?;
+        self.invoke_index(id, func_index, args)
     }
 
-    fn find_exported_func(&self, name: &str) -> Option<u32> {
-        self.module.exports.iter().find_map(|e| {
-            if e.name == name && e.ty.kind() == crate::types::ExternKind::Func {
-                Some(e.index)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Invoke an exported function by name.
-    pub fn invoke(&mut self, name: &str, args: &[Value]) -> Result<Vec<Value>> {
-        let func_index = self.find_exported_func(name).ok_or(Trap::UndefinedExport)?;
-        self.invoke_index(func_index, args)
-    }
-
-    /// Invoke a function by its index in the function index space.
-    pub fn invoke_index(&mut self, func_index: u32, args: &[Value]) -> Result<Vec<Value>> {
-        let ft = self.module.func_type(func_index).ok_or(Trap::UndefinedFunc)?;
+    /// Invoke a function by its index in an instance's function index space.
+    ///
+    /// # Errors
+    /// [`Trap::UndefinedFunc`] for a bad index, [`Trap::BadArgCount`] on arity mismatch, or
+    /// whatever the guest traps with.
+    pub fn invoke_index(
+        &mut self,
+        id: InstanceId,
+        func_index: u32,
+        args: &[Value],
+    ) -> Result<Vec<Value>> {
+        let ft = self.code[id.0]
+            .module
+            .func_type(func_index)
+            .ok_or(Trap::UndefinedFunc)?;
         if args.len() != ft.params.len() {
             return Err(Trap::BadArgCount);
         }
         // The EH state is per-invocation: an exception that escaped a previous call must not
         // be visible to this one, and the exnrefs it boxed are unreachable once it returns.
-        self.store.pending_exn = None;
-        self.store.exn_store.clear();
-        let ctx = Ctx {
-            module: &self.module,
-            func_bodies: &self.func_bodies,
-            host_funcs: &self.host_funcs,
-            maps: &self.maps,
-        };
-        let r = call_function(&ctx, &mut self.store, func_index, args, 1);
+        self.pools.pending_exn = None;
+        self.pools.exn_store.clear();
+        // Borrow the code immutably and the pools mutably — disjoint fields, which is what
+        // lets a nested cross-instance call take another `&code[…]` without conflict.
+        let Store {
+            code,
+            host_funcs,
+            pools,
+        } = self;
+        let r = call_function(code, host_funcs, pools, id.0, func_index, args, 1);
         // Drop an escaping exception's payload rather than pinning it until the next invoke.
         if r.is_err() {
-            self.store.pending_exn = None;
+            pools.pending_exn = None;
         }
         r
     }
@@ -956,7 +1080,7 @@ impl Frame<'_> {
     /// - a `try_table` clause branches **out of** the try_table to the clause's label;
     /// - a legacy `catch` runs **inside** the try, whose label stays on the stack so
     ///   `rethrow` can still name it.
-    fn throw_exception(&mut self, store: &mut Store, exn: &Exception) -> Result<Option<usize>> {
+    fn throw_exception(&mut self, store: &mut Pools, exn: &Exception) -> Result<Option<usize>> {
         let body = self.body;
         for d in 0..self.labels.len() {
             let idx = self.labels.len() - 1 - d;
@@ -1055,7 +1179,7 @@ impl Frame<'_> {
 
     /// Raise `exn` from this frame: resume at the catching handler, or park it as the
     /// instance's pending exception and unwind to the caller.
-    fn raise(&mut self, store: &mut Store, exn: Exception) -> Result<usize> {
+    fn raise(&mut self, store: &mut Pools, exn: Exception) -> Result<usize> {
         match self.throw_exception(store, &exn)? {
             Some(target) => Ok(target),
             None => {
@@ -1068,7 +1192,7 @@ impl Frame<'_> {
     /// Handle an error propagating out of a `call`. If it is an unwinding exception this frame
     /// catches, return the resumption pc; otherwise re-raise, so a real trap — or an exception
     /// no handler here matches — keeps unwinding.
-    fn on_call_error(&mut self, store: &mut Store, e: Trap) -> Result<usize> {
+    fn on_call_error(&mut self, store: &mut Pools, e: Trap) -> Result<usize> {
         if e != Trap::UncaughtException {
             return Err(e);
         }
@@ -1102,9 +1226,18 @@ fn block_arity(ctx: &Ctx, bt: BlockType, want_params: bool) -> u32 {
     }
 }
 
+/// Call a function in instance `inst`.
+///
+/// Takes `code` and `pools` as **separate** borrows rather than one `&mut Store`: a
+/// cross-instance call needs another `&code[callee]` while this frame still holds
+/// `&mut pools`, and two immutable borrows of `code` coexist happily. That is the whole
+/// reason the store is split this way — it makes wasm→wasm calls work with no `Rc`, no
+/// `RefCell` and no `unsafe`.
 fn call_function(
-    ctx: &Ctx,
-    store: &mut Store,
+    code: &[InstanceData],
+    host_funcs: &[HostFunc],
+    store: &mut Pools,
+    inst: usize,
     func_index: u32,
     args: &[Value],
     depth: usize,
@@ -1112,25 +1245,35 @@ fn call_function(
     if depth > MAX_CALL_DEPTH {
         return Err(Trap::CallStackExhausted);
     }
+    let data = code.get(inst).ok_or(Trap::UndefinedFunc)?;
     // Imported functions occupy the LOW indices of the function space, so an index below
-    // the import count is a host call and everything above it shifts down by that count.
-    let imported = ctx.module.imported_func_count();
+    // the import count is an import and everything above it shifts down by that count.
+    let imported = data.module.imported_func_count();
     if func_index < imported {
-        let hf = ctx
-            .host_funcs
-            .get(func_index as usize)
-            .ok_or(Trap::MissingImport)?;
-        let ft = ctx.module.func_type(func_index).ok_or(Trap::UndefinedFunc)?;
-        let mut results = vec![0 as Value; ft.results.len()];
-        let mut caller = Caller {
-            store,
-            maps: ctx.maps,
+        return match *data.imports.get(func_index as usize).ok_or(Trap::MissingImport)? {
+            FuncTarget::Host(h) => {
+                let hf = host_funcs.get(h).ok_or(Trap::MissingImport)?;
+                let ft = data
+                    .module
+                    .func_type(func_index)
+                    .ok_or(Trap::UndefinedFunc)?;
+                let mut results = vec![0 as Value; ft.results.len()];
+                let mut caller = Caller {
+                    store,
+                    maps: &data.maps,
+                };
+                (hf.call)(&mut caller, args, &mut results)?;
+                Ok(results)
+            }
+            // Module linking: run the callee against ITS OWN instance, so it sees the
+            // exporter's memory and globals rather than the caller's.
+            FuncTarget::Wasm { instance, func } => {
+                call_function(code, host_funcs, store, instance, func, args, depth + 1)
+            }
         };
-        (hf.call)(&mut caller, args, &mut results)?;
-        return Ok(results);
     }
     let defined = (func_index - imported) as usize;
-    let body = ctx.func_bodies.get(defined).ok_or(Trap::UndefinedFunc)?;
+    let body = data.func_bodies.get(defined).ok_or(Trap::UndefinedFunc)?;
 
     let mut locals = vec![0 as Value; body.num_locals];
     let n_args = args.len().min(locals.len());
@@ -1142,14 +1285,21 @@ fn call_function(
         vstack: Vec::new(),
         labels: vec![plain_label(false, body.ty.results.len() as u32, body.ir.len(), 0)],
     };
-    run(&mut frame, ctx, store, depth)?;
+    let ctx = Ctx {
+        module: &data.module,
+        maps: &data.maps,
+        code,
+        host_funcs,
+        inst,
+    };
+    run(&mut frame, &ctx, store, depth)?;
 
     let n = body.ty.results.len();
     let base = frame.stack_base(n)?;
     Ok(frame.vstack[base..].to_vec())
 }
 
-fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<()> {
+fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<()> {
     let body = frame.body;
     let ir = &body.ir;
     let mut pc = 0usize;
@@ -1399,7 +1549,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let np = ft.params.len();
                 let base = frame.stack_base(np)?;
                 let args = frame.vstack[base..].to_vec();
-                let results = match call_function(ctx, store, f, &args, depth + 1) {
+                let results = match call_function(ctx.code, ctx.host_funcs, store, ctx.inst, f, &args, depth + 1) {
                     Ok(r) => r,
                     Err(e) => {
                         // An exception unwinding out of the callee may be caught here.
@@ -1516,7 +1666,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 let ft = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
                 let base = frame.stack_base(ft.params.len())?;
                 let args = frame.vstack[base..].to_vec();
-                let results = match call_function(ctx, store, f, &args, depth + 1) {
+                let results = match call_function(ctx.code, ctx.host_funcs, store, ctx.inst, f, &args, depth + 1) {
                     Ok(r) => r,
                     Err(e) => {
                         pc = frame.on_call_error(store, e)?;
@@ -1556,7 +1706,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Store, depth: usize) -> Result<
                 }
                 let base = frame.stack_base(got.params.len())?;
                 let args = frame.vstack[base..].to_vec();
-                let results = match call_function(ctx, store, f, &args, depth + 1) {
+                let results = match call_function(ctx.code, ctx.host_funcs, store, ctx.inst, f, &args, depth + 1) {
                     Ok(r) => r,
                     Err(e) => {
                         pc = frame.on_call_error(store, e)?;
@@ -1977,7 +2127,7 @@ fn mem_range(base: u64, n: u64, len: usize) -> Option<usize> {
 
 /// Read `n` (1..=8) bytes little-endian from memory `ma.memory` at (popped address + offset),
 /// zero-extended into a `u64`. The caller sign/zero-extends into the target slot.
-fn load_bytes(frame: &mut Frame, store: &Store, maps: &IndexMaps, ma: crate::opcode::MemArg, n: usize) -> Result<u64> {
+fn load_bytes(frame: &mut Frame, store: &Pools, maps: &IndexMaps, ma: crate::opcode::MemArg, n: usize) -> Result<u64> {
     let mem = store.memories.get(maps.mem(ma.memory)).ok_or(Trap::NoMemory)?;
     let addr = frame.pop_mem(mem.is64);
     let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
@@ -1997,7 +2147,7 @@ fn load_bytes(frame: &mut Frame, store: &Store, maps: &IndexMaps, ma: crate::opc
 /// popped by the caller; this pops the address.
 fn store_bytes(
     frame: &mut Frame,
-    store: &mut Store,
+    store: &mut Pools,
     maps: &IndexMaps,
     ma: crate::opcode::MemArg,
     n: usize,
@@ -2018,7 +2168,7 @@ fn store_bytes(
 }
 
 /// Loads/stores + `memory.size`/`grow`.
-fn exec_memory(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
+fn exec_memory(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     match instr.op {
         Op::MemorySize => {
             let Imm::MemIndex(mi) = instr.imm else {
@@ -2137,7 +2287,7 @@ fn exec_memory(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &I
     Ok(())
 }
 
-fn memory_grow(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
+fn memory_grow(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     let Imm::MemIndex(mi) = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
@@ -2169,7 +2319,7 @@ fn memory_grow(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &I
     Ok(())
 }
 
-fn exec_memory_copy(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
+fn exec_memory_copy(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     let Imm::MemCopy { dst, src } = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
@@ -2191,7 +2341,7 @@ fn exec_memory_copy(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, inst
     Ok(())
 }
 
-fn exec_memory_fill(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, instr: &Instr) -> Result<()> {
+fn exec_memory_fill(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &Instr) -> Result<()> {
     let Imm::MemIndex(mi) = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
@@ -2206,7 +2356,7 @@ fn exec_memory_fill(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, inst
     Ok(())
 }
 
-fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Store, instr: &Instr) -> Result<()> {
+fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, instr: &Instr) -> Result<()> {
     let Imm::MemInit { data, mem } = instr.imm else {
         return Err(Trap::UnsupportedInstruction);
     };
@@ -2275,7 +2425,7 @@ fn default_field(storage: StorageType) -> Value {
 }
 
 /// Validate a non-null GC reference and return its heap index, or trap.
-fn gc_object_index(store: &Store, r: Value) -> Result<usize> {
+fn gc_object_index(store: &Pools, r: Value) -> Result<usize> {
     if r == NULL_REF {
         return Err(Trap::NullReference);
     }
@@ -2287,7 +2437,7 @@ fn gc_object_index(store: &Store, r: Value) -> Result<usize> {
 }
 
 /// Allocate a GC object, returning its reference value (its heap index).
-fn alloc_object(store: &mut Store, type_index: u32, fields: Vec<Value>) -> Result<Value> {
+fn alloc_object(store: &mut Pools, type_index: u32, fields: Vec<Value>) -> Result<Value> {
     let idx = store.gc_heap.len();
     if idx >= MAX_GC_OBJECTS {
         return Err(Trap::GcHeapExhausted);
@@ -2321,7 +2471,7 @@ fn head_matches(module: &Module, actual: RefHeap, actual_ti: Option<u32>, target
 }
 
 /// Does GC reference value `v` match target reference type `rt` (`ref.test`/`ref.cast`)?
-fn ref_matches(module: &Module, store: &Store, v: Value, rt: RefType) -> bool {
+fn ref_matches(module: &Module, store: &Pools, v: Value, rt: RefType) -> bool {
     if v == NULL_REF {
         return rt.nullable;
     }
@@ -2976,7 +3126,7 @@ fn fneg_f64(x: f64) -> f64 {
 
 /// Pop an address and bounds-check `n` bytes for a SIMD memory op; returns the
 /// effective byte offset into memory `ma.memory` (memory64-aware, overflow-safe).
-fn simd_mem_ea(frame: &mut Frame, store: &Store, maps: &IndexMaps, ma: crate::opcode::MemArg, n: u64) -> Result<usize> {
+fn simd_mem_ea(frame: &mut Frame, store: &Pools, maps: &IndexMaps, ma: crate::opcode::MemArg, n: u64) -> Result<usize> {
     let mem = store.memories.get(maps.mem(ma.memory)).ok_or(Trap::NoMemory)?;
     let addr = frame.pop_mem(mem.is64);
     let ea = addr.checked_add(ma.offset).ok_or(Trap::MemoryOutOfBounds)?;
@@ -3082,7 +3232,7 @@ macro_rules! simd_load_extend {
 /// Execute a `0xFD` SIMD instruction. Covers the entire fixed-width + relaxed SIMD
 /// set; an unknown sub-opcode traps `UnsupportedInstruction`.
 #[allow(clippy::too_many_lines)]
-fn exec_simd(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, s: crate::opcode::Simd) -> Result<()> {
+fn exec_simd(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, s: crate::opcode::Simd) -> Result<()> {
     let lane = s.lane as usize;
     match s.sub {
         // --- const / load / store ---
@@ -3758,7 +3908,7 @@ fn atomic_align_log2(sub: u32) -> u32 {
 /// memory when `need_shared`. Returns the effective byte offset into `at.mem.memory`.
 fn atomic_ea(
     frame: &mut Frame,
-    store: &Store,
+    store: &Pools,
     maps: &IndexMaps,
     at: crate::opcode::Atomic,
     width: u64,
@@ -3781,7 +3931,7 @@ fn atomic_ea(
 }
 
 /// Execute a `0xFE` atomic instruction (single-threaded semantics).
-fn exec_atomic(frame: &mut Frame, store: &mut Store, maps: &IndexMaps, at: crate::opcode::Atomic) -> Result<()> {
+fn exec_atomic(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, at: crate::opcode::Atomic) -> Result<()> {
     let sub = at.sub;
     if sub == 0x03 {
         return Ok(()); // atomic.fence — nothing to order single-threaded
@@ -5442,6 +5592,164 @@ mod tests {
         ]);
         let md = decode(&m).unwrap();
         assert_eq!(Instance::new(md).err(), Some(Trap::UnsupportedImportKind));
+    }
+
+    // --- module linking (T7b) ---
+
+    #[test]
+    fn one_instance_calls_anothers_export() {
+        // Provider exports `get` returning 7; consumer imports it and adds 35.
+        let provider = crate::wat::assemble(
+            br#"(module (func (export "get") (result i32) (i32.const 7)))"#,
+        )
+        .unwrap();
+        let consumer = crate::wat::assemble(
+            br#"(module
+                  (import "p" "get" (func $get (result i32)))
+                  (func (export "run") (result i32)
+                    (i32.add (call $get) (i32.const 35))))"#,
+        )
+        .unwrap();
+
+        let mut store = Store::new();
+        let p = store
+            .instantiate(decode(&provider).unwrap(), Imports::new())
+            .unwrap();
+        let get = store.export_func(p, "get").unwrap();
+        let c = store
+            .instantiate(
+                decode(&consumer).unwrap(),
+                Imports::new().with_instance_func(p, get),
+            )
+            .unwrap();
+        assert_eq!(as_i32(store.invoke(c, "run", &[]).unwrap()[0]), 42);
+    }
+
+    #[test]
+    fn a_linked_callee_sees_its_own_memory_not_the_callers() {
+        // THE property that makes linking correct: the callee runs against ITS OWN
+        // instance. Both modules have a memory; the provider's holds 11 at address 0 and
+        // the consumer's holds 22. Calling the provider's reader must yield 11 — if the
+        // callee ran against the caller's instance it would wrongly read 22.
+        let provider = crate::wat::assemble(
+            br#"(module
+                  (memory 1)
+                  (data (i32.const 0) "\0b\00\00\00")
+                  (func (export "peek") (result i32) (i32.load (i32.const 0))))"#,
+        )
+        .unwrap();
+        let consumer = crate::wat::assemble(
+            br#"(module
+                  (import "p" "peek" (func $peek (result i32)))
+                  (memory 1)
+                  (data (i32.const 0) "\16\00\00\00")
+                  (func (export "run") (result i32)
+                    (i32.mul (call $peek) (i32.const 100))))"#,
+        )
+        .unwrap();
+
+        let mut store = Store::new();
+        let p = store
+            .instantiate(decode(&provider).unwrap(), Imports::new())
+            .unwrap();
+        let peek = store.export_func(p, "peek").unwrap();
+        let c = store
+            .instantiate(
+                decode(&consumer).unwrap(),
+                Imports::new().with_instance_func(p, peek),
+            )
+            .unwrap();
+        // 11 * 100 — the provider's memory, not the consumer's 22.
+        assert_eq!(as_i32(store.invoke(c, "run", &[]).unwrap()[0]), 1100);
+    }
+
+    #[test]
+    fn linked_instances_keep_separate_globals() {
+        // Each instance's mutable global is its own slot in the shared pools.
+        let provider = crate::wat::assemble(
+            br#"(module
+                  (global $g (mut i32) (i32.const 5))
+                  (func (export "bump") (result i32)
+                    (global.set $g (i32.add (global.get $g) (i32.const 1)))
+                    (global.get $g)))"#,
+        )
+        .unwrap();
+        let consumer = crate::wat::assemble(
+            br#"(module
+                  (import "p" "bump" (func $bump (result i32)))
+                  (global $g (mut i32) (i32.const 100))
+                  (func (export "run") (result i32)
+                    (global.set $g (i32.add (global.get $g) (i32.const 1)))
+                    (i32.add (call $bump) (global.get $g))))"#,
+        )
+        .unwrap();
+
+        let mut store = Store::new();
+        let p = store
+            .instantiate(decode(&provider).unwrap(), Imports::new())
+            .unwrap();
+        let bump = store.export_func(p, "bump").unwrap();
+        let c = store
+            .instantiate(
+                decode(&consumer).unwrap(),
+                Imports::new().with_instance_func(p, bump),
+            )
+            .unwrap();
+        // provider 5->6, consumer 100->101 => 107. Sharing a global slot would give 2 or 202.
+        assert_eq!(as_i32(store.invoke(c, "run", &[]).unwrap()[0]), 107);
+    }
+
+    #[test]
+    fn a_trap_propagates_across_a_link() {
+        let provider =
+            crate::wat::assemble(br#"(module (func (export "boom") (result i32) (unreachable)))"#)
+                .unwrap();
+        let consumer = crate::wat::assemble(
+            br#"(module
+                  (import "p" "boom" (func $boom (result i32)))
+                  (func (export "run") (result i32) (call $boom)))"#,
+        )
+        .unwrap();
+        let mut store = Store::new();
+        let p = store
+            .instantiate(decode(&provider).unwrap(), Imports::new())
+            .unwrap();
+        let boom = store.export_func(p, "boom").unwrap();
+        let c = store
+            .instantiate(
+                decode(&consumer).unwrap(),
+                Imports::new().with_instance_func(p, boom),
+            )
+            .unwrap();
+        assert_eq!(store.invoke(c, "run", &[]), Err(Trap::Unreachable));
+    }
+
+    #[test]
+    fn mutual_recursion_across_instances_hits_the_depth_cap() {
+        // A calls B calls A … must exhaust the call-stack guard rather than the host stack
+        // or a borrow panic — the failure mode an Rc<RefCell> design would have had.
+        let a_src = crate::wat::assemble(
+            br#"(module
+                  (import "b" "ping" (func $ping (result i32)))
+                  (func (export "pong") (result i32) (call $ping)))"#,
+        )
+        .unwrap();
+        let b_src = crate::wat::assemble(
+            br#"(module (func (export "ping") (result i32) (i32.const 1)))"#,
+        )
+        .unwrap();
+        let mut store = Store::new();
+        let b = store
+            .instantiate(decode(&b_src).unwrap(), Imports::new())
+            .unwrap();
+        let ping = store.export_func(b, "ping").unwrap();
+        let a = store
+            .instantiate(
+                decode(&a_src).unwrap(),
+                Imports::new().with_instance_func(b, ping),
+            )
+            .unwrap();
+        assert_eq!(as_i32(store.invoke(a, "pong", &[]).unwrap()[0]), 1);
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {
