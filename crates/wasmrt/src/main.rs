@@ -1,7 +1,7 @@
 //! `wasmrt` — the command-line interface.
 //!
-//! Grows across the roadmap (`cmem/roadmap.md`). Today (T3, v0.4.0) it summarizes a
-//! decoded module; run/assemble/validate/WASI arrive in later stages.
+//! Grows across the roadmap (`cmem/roadmap.md`). Today it summarizes + type-checks a module,
+//! calls an export, runs a WASI preview-1 program, assembles `.wat`, and runs `.wast` scripts.
 
 use std::process::ExitCode;
 
@@ -26,9 +26,78 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("run") => run_export(&args[2..]),
+        Some("wasi") => run_wasi_module(&args[2..]),
         Some("wat") => assemble_wat(&args[2..]),
         Some("wast") => run_wast(&args[2..]),
         Some(path) => summarize(path),
+    }
+}
+
+/// `wasmrt wasi <file.wasm> [args...]` — run a WASI preview-1 program's `_start`.
+///
+/// Exits with the guest's `proc_exit` code when it calls one, so shell pipelines see the
+/// status the program intended.
+fn run_wasi_module(rest: &[String]) -> ExitCode {
+    let Some(path) = rest.first() else {
+        eprintln!("wasmrt: usage: wasmrt wasi <file.wasm> [args...]");
+        return ExitCode::FAILURE;
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("wasmrt: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let md = match module::decode(&bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("wasmrt: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = validate(&md) {
+        eprintln!("wasmrt: {path}: invalid module: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // A CSPRNG that cannot be seeded must fail loudly rather than run predictably.
+    let Some(ctx) = wasmrt_core::wasi::WasiCtx::new() else {
+        eprintln!("wasmrt: no OS entropy available; refusing to run with a predictable RNG");
+        return ExitCode::FAILURE;
+    };
+    // argv[0] is the module path, then whatever follows on our command line.
+    let ctx = ctx
+        .with_args(std::iter::once(path.clone()).chain(rest[1..].iter().cloned()))
+        .with_env(std::env::vars());
+    let shared = wasmrt_core::wasi::shared(ctx);
+
+    let imports = match wasmrt_core::wasi::link(&md, &shared) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("wasmrt: {path}: cannot link WASI: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut inst = match Instance::new_with_imports(md, imports) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("wasmrt: {path}: instantiation failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let r = inst.invoke("_start", &[]);
+    // `proc_exit` unwinds as a host trap, so consult the recorded code before treating the
+    // error as a failure — an exit is a normal way for a WASI program to finish.
+    if let Some(code) = shared.borrow().exit_code() {
+        return ExitCode::from(u8::try_from(code & 0xff).unwrap_or(1));
+    }
+    match r {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("wasmrt: {path}: trap: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -158,12 +227,15 @@ fn print_help() {
     println!(
         "wasmrt {} — a fast, small WebAssembly runtime\n\n\
          USAGE:\n    \
-         wasmrt <file.wasm>              decode a module and print a summary\n    \
-         wasmrt run <file.wasm> <fn> [args...]  run an exported function\n    \
-         wasmrt -h | --help              show this help\n    \
-         wasmrt -v | --version           show the version\n\n\
-         `run` executes integer-compute functions today (float/memory/etc. arrive in later\n\
-         releases). More (assemble / WASI) is on the roadmap.",
+         wasmrt <file.wasm>                     decode, summarize and type-check a module\n    \
+         wasmrt run <file.wasm> <fn> [args...]  call an exported function\n    \
+         wasmrt wasi <file.wasm> [args...]      run a WASI preview-1 program (_start)\n    \
+         wasmrt wat <file.wat> [-o out.wasm]    assemble the text format to a binary\n    \
+         wasmrt wast <file|dir>... [-v]         run .wast spec scripts\n    \
+         wasmrt -h | --help                     show this help\n    \
+         wasmrt -v | --version                  show the version\n\n\
+         `wasi` covers stdio, args, environ, clocks, random and proc_exit; the sandboxed\n\
+         filesystem lands next, so file calls report NOSYS for now.",
         wasmrt_core::VERSION
     );
 }

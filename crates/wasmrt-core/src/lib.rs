@@ -29,6 +29,7 @@ pub mod wast;
 pub mod pin;
 
 // WASI + the secure sandbox resolve real OS paths → they require `std`.
+pub mod rng;
 #[cfg(feature = "std")]
 pub mod wasi;
 
