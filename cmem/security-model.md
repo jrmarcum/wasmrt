@@ -24,14 +24,50 @@ signatures design-only).
 - **Mandated adversarial test:** the guest authors the symlink topology; a canary file *outside* the
   preopen is the oracle and must never be read (`examples/wasi_symlink_traversal.zig`).
 
-### Rust divergence (allowed — same behavior, better mechanism)
+### ⚠️ Rust divergence — CORRECTED 2026-08-05, and it is a real one
 
-wazmrt's `#17/#18/#23` are **Zig-0.16-std-specific** workarounds (a Windows `openFile(.follow=false)`
-host-crash forces a stat-then-open-with-follow, leaving a narrow **final-component** TOCTOU residual on
-`path_open`). Rust's std / `cap-std` / `openat2(RESOLVE_BENEATH)` can do the atomic no-follow open and
-**close that residual for free.** The invariant "resolve through held handles, never a full path string"
-is what carries over — not the Zig workarounds. (**Decided 2026-08-04: zero-dep handle-stack walker**; see
-`design-decisions.md`.)
+**The earlier claim in this file was wrong and is retracted.** It read: *"Rust's std / `cap-std` /
+`openat2(RESOLVE_BENEATH)` can do the atomic no-follow open and close that residual for free."* Grouping
+`std` with the other two was the error, and it was load-bearing — the whole T7c-2 plan rested on it.
+
+**Rust's `std` has no dir-relative open.** No `openat`, no `O_PATH` handle to re-open through, on any
+platform (verified against the 1.99-nightly sysroot, 2026-08-05). `std` can do a no-follow *stat*
+(`symlink_metadata`), which is a different primitive: it tells you what a name pointed at a moment ago,
+it does not pin the inode. Inode pinning is the whole of what makes the oracle's walk TOCTOU-safe.
+
+That leaves three project constraints that **cannot all hold at once**:
+
+1. **zero dependency** (owner, 2026-08-04 — rejected `cap-std`/`openat2`);
+2. **no `unsafe`** (owner's safety directive — a `libc::openat` decl is `unsafe` by construction);
+3. **resolve through held handles, never a full path string**.
+
+**Shipped, pending the owner's call:** 1 and 2 held, 3 relaxed to a **component-accumulated path**
+(`wasi/fs.rs::walk`). What this costs is precisely bounded, and is much less than dropping 3 sounds:
+
+- **Unaffected — every escape property still holds by construction**, because they are *lexical* and
+  hold on an accumulated path exactly as on a handle stack: `..` cannot pop below the bottom; an
+  absolute symlink target re-bases to the preopen root; a symlink's target is expanded through the same
+  loop; device/NT-namespace components and embedded NULs are refused (now **up front**, before touching
+  the filesystem, so a refusal never depends on filesystem state or leaks whether a prefix exists);
+  `SYMLINK_MAX` bounds cycles.
+- **Lost — inode pinning only.** A *concurrent writer inside the preopen* could swap a component
+  between the walk and the syscall. The guest cannot be that writer (preview 1 here is single-threaded),
+  so this needs a second process holding write access to the sandbox — which is the embedder's choice of
+  what to preopen.
+- **Compensating control:** `verify_beneath` canonicalizes the resolved directory after the walk and
+  re-checks it against the canonical preopen root, so a swap that *did* land still cannot yield a path
+  outside the sandbox. **It closes the escape, not the race.**
+
+**OPEN DECISION for the owner (blocks nothing; revisit at T8/T9):** spend a dependency (`cap-std`) or a
+narrow, audited `unsafe` FFI shim (`openat`/`openat2` on unix, `NtCreateFile` on Windows) to close the
+residual — or accept it and document the deployment assumption. Note wazmrt itself still has a narrow
+**final-component** residual on `path_open` (`#17/#18/#23`, a Windows Zig-std workaround), so the port is
+not obviously behind the oracle here; it trades a narrower residual for a wider one.
+
+**Mandated adversarial test — DONE and it bites:** `wasi/fs.rs` keeps a canary outside the preopen and
+asserts no walk can ever produce a path that reads it, over absolute / relative / chained / symlinked-
+directory escapes. It asserts the **outcome** (never reads `SECRET`) rather than a particular errno, so
+it survives a change of mechanism. Verified by mutation: deleting the `..` guard makes it fail.
 
 ## Authenticity — pin verification (reproduce; signatures still design-only)
 

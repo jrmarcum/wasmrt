@@ -10,10 +10,11 @@ so the oracle split has collapsed to that one item (see `design-decisions.md`, `
 is in scope** (owner, 2026-07-27). **T0–T6 ALL DONE.** T5's ten interpreter slices (v0.6.0 integer →
 v0.6.9 exception handling) completed the interpreter's wasm-proposal coverage; **v0.7.0 then finished T4
 (the deferred SIMD/atomic/GC/EH validation arms) and all of T6 (the text toolchain) together.** wasmrt
-now assembles, decodes, type-checks and runs WebAssembly. **T7a (host imports), T7b (module linking on
-the shared store) and T7c-1 (WASI p1 minus the filesystem) are DONE (2026-08-05)**, scoring **98.6% on
-the official spec testsuite** (59,261 / 851 / 4,720). **Next: T7c-2 — the sandboxed filesystem on the
-handle-stack resolver — then the known-issues review the owner asked for before T8.**
+now assembles, decodes, type-checks and runs WebAssembly. **ALL of T7 is DONE (2026-08-05, unreleased)** —
+host imports, module linking on the shared store, and WASI preview 1 including the sandboxed filesystem —
+scoring **98.6% on the official spec testsuite** (59,261 / 851 / 4,720). **Next: the known-issues review
+the owner asked for before T8, together with the safety pass** (`unsafe_code = "forbid"` in core), which
+now also has to settle the resolver's open TOCTOU decision below.
 
 ## ✅ v0.7.0 — SHIPPED and published (2026-08-03)
 
@@ -356,8 +357,30 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
       into, so instances hold base offsets rather than owned resources. The interpreter already threads
       `&mut Store` everywhere, so this fits the existing shape — but it is a deliberate refactor of
       `Instance`, not an incremental add. Decide before starting.
-  - **T7c — WASI preview 1:** stdio, args, environ, clocks, `random_get`, `proc_exit`, `poll_oneoff`,
-    then the sandboxed filesystem on the handle-stack resolver. `[ ]`
+  - **T7c — WASI preview 1. ✅ DONE (2026-08-05).** T7c-1: stdio, `args_*`, `environ_*`, clocks,
+    `random_get` (ChaCha20), `proc_exit`. **T7c-2: the sandboxed filesystem** — `wasi/fs.rs` carries the
+    fd table, the rights lattice, the resolver, and ~20 `fd_*`/`path_*` calls; the CLI gained
+    `--dir <host>[::<guest>]` / `--ro-dir`. **With no `--dir` every path call is `BADF`** — there is no
+    implicit cwd, so the default is total denial. `[x]`
+    - **⚠️ The 2026-08-04 resolver decision rested on a FALSE premise, corrected 2026-08-05:**
+      `cmem/security-model.md` had claimed Rust's `std` could do the atomic no-follow open. **It cannot
+      — `std` has no dir-relative open on any platform** (no `openat`, no re-openable `O_PATH` handle;
+      verified against the 1.99-nightly sysroot). `symlink_metadata` is a no-follow *stat*, which does
+      not pin an inode. So **zero-dep + no-`unsafe` + hold-real-handles cannot all be true**; the port
+      keeps the first two and accumulates a path instead. **Every escape property is unaffected** (they
+      are lexical: `..` cannot pop below the bottom, absolute targets re-base to the preopen root,
+      symlink targets go through the same loop, `SYMLINK_MAX` bounds cycles); **only inode pinning is
+      lost**, which needs a second process writing inside the sandbox to exploit. `verify_beneath`
+      re-checks the canonical result against the canonical root as a compensating control. **Open
+      decision for the owner at T8/T9:** spend `cap-std` or a narrow audited `unsafe` shim, or accept
+      and document. Full argument in `cmem/security-model.md`.
+    - **The mandated canary test is real and bites:** it asserts *no walk can produce a path that reads
+      the canary* — the outcome, not an errno — over absolute, relative, chained, and symlinked-directory
+      escapes. Mutation-checked: deleting the `..` guard fails it. End-to-end through the CLI, a guest
+      granted one directory reads its own file and gets **76 `NOTCAPABLE`** for `../canary.txt`.
+    - Deliberately **`NOSYS`, not a silent success**: `fd_allocate`, `fd_filestat_set_times`,
+      `path_filestat_set_times`, and the socket calls. A guest that needs them must learn we did not
+      do them. 272 workspace tests (was 254), clippy clean.
 - **T8 — `wasmrt.h` C ABI (redesign, not transliteration).** ⛔ *Decision-gate (block lifted):*
   **finalize `wasmrt.h`** with the owner first (naming, store simplification, `{id}`-handle model) —
   from `docs/port/wasmrt.h.draft`. Then implement `#[no_mangle] extern "C"` over core: lightweight `{id}`

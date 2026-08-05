@@ -35,11 +35,35 @@ use crate::rng::ChaCha20Rng;
 
 // --- errno (WASI preview 1) ---------------------------------------------------
 
-pub const ERRNO_SUCCESS: i32 = 0;
-pub const ERRNO_BADF: i32 = 8;
-pub const ERRNO_FAULT: i32 = 21;
-pub const ERRNO_INVAL: i32 = 28;
-pub const ERRNO_NOSYS: i32 = 52;
+/// Preview-1 `errno` values. These are the ABI's own numbering, not the host's.
+pub mod errno {
+    pub const SUCCESS: i32 = 0;
+    pub const ACCES: i32 = 2;
+    pub const BADF: i32 = 8;
+    pub const EXIST: i32 = 20;
+    pub const FAULT: i32 = 21;
+    pub const INVAL: i32 = 28;
+    pub const IO: i32 = 29;
+    pub const ISDIR: i32 = 31;
+    pub const LOOP: i32 = 32;
+    pub const NOENT: i32 = 44;
+    pub const NOSYS: i32 = 52;
+    pub const NOTDIR: i32 = 54;
+    pub const NOTEMPTY: i32 = 55;
+    /// The sandbox said no: the path would leave the preopen, or the fd lacks the right.
+    pub const NOTCAPABLE: i32 = 76;
+    pub const PERM: i32 = 63;
+    pub const SPIPE: i32 = 70;
+}
+
+pub const ERRNO_SUCCESS: i32 = errno::SUCCESS;
+pub const ERRNO_BADF: i32 = errno::BADF;
+pub const ERRNO_FAULT: i32 = errno::FAULT;
+pub const ERRNO_INVAL: i32 = errno::INVAL;
+pub const ERRNO_NOSYS: i32 = errno::NOSYS;
+pub const ERRNO_NOTCAPABLE: i32 = errno::NOTCAPABLE;
+
+pub mod fs;
 
 /// Preview-1 file descriptors for the standard streams.
 const FD_STDIN: i32 = 0;
@@ -82,6 +106,9 @@ pub struct WasiCtx {
     rng: ChaCha20Rng,
     /// Set by `proc_exit`; the CLI reports it as the process status.
     exit: Option<i32>,
+    /// The guest's file descriptors. Slots 0/1/2 are stdio; preopens are added by
+    /// [`WasiCtx::preopen_dir`] and are the **only** way a guest reaches the filesystem.
+    fds: fs::FdTable,
 }
 
 impl WasiCtx {
@@ -100,6 +127,7 @@ impl WasiCtx {
             stderr: Sink::Inherit,
             rng: ChaCha20Rng::from_os()?,
             exit: None,
+            fds: fs::FdTable::new(),
         })
     }
 
@@ -116,6 +144,7 @@ impl WasiCtx {
             stderr: Sink::Capture(Vec::new()),
             rng: ChaCha20Rng::from_seed(seed, [0u8; 12]),
             exit: None,
+            fds: fs::FdTable::new(),
         }
     }
 
@@ -184,6 +213,48 @@ impl WasiCtx {
     pub fn exit_code(&self) -> Option<i32> {
         self.exit
     }
+
+    /// Grant the guest access to `host_path`, which it will see as `guest_name`.
+    ///
+    /// **This is the only way a guest reaches the filesystem.** With no preopen, every
+    /// `path_*` call returns `BADF` and the sandbox is total. `rights` is the ceiling for
+    /// the whole subtree — pass [`fs::rights::READ_ONLY`] and nothing opened beneath it can
+    /// write, because `path_open` intersects each new fd with the directory's inheriting
+    /// rights.
+    ///
+    /// The host path is canonicalized once, here, so every later walk starts from a root
+    /// that is already free of symlinks and `..`.
+    ///
+    /// # Errors
+    /// The preview-1 errno if `host_path` is not a readable directory.
+    pub fn preopen_dir(
+        &mut self,
+        host_path: &std::path::Path,
+        guest_name: &str,
+        rights: u64,
+    ) -> Result<i32, i32> {
+        let host = fs::canonical_root(host_path)?;
+        Ok(self.fds.insert(fs::FdEntry::Dir(fs::DirFd {
+            host,
+            preopen_name: Some(String::from(guest_name)),
+            rights_base: rights,
+            rights_inheriting: rights,
+        })))
+    }
+
+    /// Builder form of [`WasiCtx::preopen_dir`], for the common read-write case.
+    ///
+    /// # Errors
+    /// The preview-1 errno if the directory cannot be preopened.
+    pub fn with_preopen(
+        mut self,
+        host_path: &std::path::Path,
+        guest_name: &str,
+        rights: u64,
+    ) -> Result<WasiCtx, i32> {
+        self.preopen_dir(host_path, guest_name, rights)?;
+        Ok(self)
+    }
 }
 
 /// A shared handle to the context: every host closure holds one, and the borrow is taken
@@ -228,6 +299,12 @@ fn read_iovecs(c: &Caller<'_>, ptr: u32, count: u32) -> Option<Vec<(u32, u32)>> 
         out.push((read_u32(c, base)?, read_u32(c, base.checked_add(4)?)?));
     }
     Some(out)
+}
+
+/// Whether `fd` is one of the three standard streams, which the context owns directly
+/// rather than the fd table.
+fn is_stdio(fd: i32) -> bool {
+    fd == FD_STDIN || fd == FD_STDOUT || fd == FD_STDERR
 }
 
 fn arg(args: &[Value], i: usize) -> i32 {
@@ -421,26 +498,61 @@ fn dispatch(
             // a WASI-specific `Trap` variant — the engine stays unaware of WASI.
             Err(Trap::HostTrap)
         }
-        "fd_write" => fd_write(ctx, c, args, results),
-        "fd_read" => fd_read(ctx, c, args, results),
-        "fd_close" => errno(results, ERRNO_SUCCESS),
-        // The standard streams are not seekable.
-        "fd_seek" | "fd_tell" => errno(results, ERRNO_BADF),
-        "fd_fdstat_get" => {
-            // fdstat: filetype u8, pad u8, flags u16, rights_base u64, rights_inheriting u64.
-            // Reporting a character device makes libc treat stdio as unbuffered/non-seekable.
-            let buf = arg(args, 1) as u32;
-            let Some(dst) = c.write(MEM, u64::from(buf), 24) else {
-                return errno(results, ERRNO_FAULT);
-            };
-            dst.fill(0);
-            dst[0] = 2; // filetype = character_device
+        // stdio keeps its own path (the sinks live on the context, not in the fd table);
+        // anything else is a real file and goes to the filesystem layer.
+        "fd_write" if is_stdio(arg(args, 0)) => fd_write(ctx, c, args, results),
+        "fd_read" if is_stdio(arg(args, 0)) => fd_read(ctx, c, args, results),
+        "fd_write" => fs::fd_write_file(&mut ctx.borrow_mut().fds, c, args, results, None),
+        "fd_read" => fs::fd_read_file(&mut ctx.borrow_mut().fds, c, args, results, None),
+        "fd_pwrite" => {
+            let at = args.get(3).map_or(0, |&v| crate::interp::as_i64(v)) as u64;
+            fs::fd_write_file(&mut ctx.borrow_mut().fds, c, args, results, Some(at))
+        }
+        "fd_pread" => {
+            let at = args.get(3).map_or(0, |&v| crate::interp::as_i64(v)) as u64;
+            fs::fd_read_file(&mut ctx.borrow_mut().fds, c, args, results, Some(at))
+        }
+        "fd_close" => {
+            let fd = arg(args, 0);
+            if is_stdio(fd) || ctx.borrow_mut().fds.close(fd) {
+                errno(results, ERRNO_SUCCESS)
+            } else {
+                errno(results, ERRNO_BADF)
+            }
+        }
+        "fd_renumber" => {
+            let ok = ctx.borrow_mut().fds.renumber(arg(args, 0), arg(args, 1));
+            errno(results, if ok { ERRNO_SUCCESS } else { ERRNO_BADF })
+        }
+        "fd_seek" => fs::fd_seek(&mut ctx.borrow_mut().fds, c, args, results),
+        "fd_tell" => fs::fd_tell(&mut ctx.borrow_mut().fds, c, args, results),
+        "fd_fdstat_get" => fs::fd_fdstat_get(&ctx.borrow().fds, c, args, results),
+        "fd_filestat_get" => fs::fd_filestat_get(&ctx.borrow().fds, c, args, results),
+        "fd_filestat_set_size" => {
+            fs::fd_filestat_set_size(&mut ctx.borrow_mut().fds, args, results)
+        }
+        "fd_readdir" => fs::fd_readdir(&ctx.borrow().fds, c, args, results),
+        "fd_prestat_get" => fs::fd_prestat_get(&ctx.borrow().fds, c, args, results),
+        "fd_prestat_dir_name" => fs::fd_prestat_dir_name(&ctx.borrow().fds, c, args, results),
+        "path_open" => fs::path_open(&mut ctx.borrow_mut().fds, c, args, results),
+        "path_create_directory" => fs::path_create_directory(&ctx.borrow().fds, c, args, results),
+        "path_remove_directory" => fs::path_remove_directory(&ctx.borrow().fds, c, args, results),
+        "path_unlink_file" => fs::path_unlink_file(&ctx.borrow().fds, c, args, results),
+        "path_filestat_get" => fs::path_filestat_get(&ctx.borrow().fds, c, args, results),
+        "path_readlink" => fs::path_readlink(&ctx.borrow().fds, c, args, results),
+        "path_symlink" => fs::path_symlink(&ctx.borrow().fds, c, args, results),
+        "path_rename" => fs::path_rename_or_link(&ctx.borrow().fds, c, args, results, false),
+        "path_link" => fs::path_rename_or_link(&ctx.borrow().fds, c, args, results, true),
+        // Advisory or already-durable: nothing to do, and reporting success is honest
+        // because there is no writeback cache of our own to flush.
+        "fd_fdstat_set_flags" | "sched_yield" | "fd_advise" | "fd_sync" | "fd_datasync" => {
             errno(results, ERRNO_SUCCESS)
         }
-        "fd_fdstat_set_flags" | "sched_yield" => errno(results, ERRNO_SUCCESS),
-        // No preopens yet, so every probe is BADF — which is exactly how a libc start-up
-        // learns there is no filesystem and stops asking.
-        "fd_prestat_get" | "fd_prestat_dir_name" => errno(results, ERRNO_BADF),
+        // Deliberately NOSYS rather than a silent success: a guest that needs a real
+        // preallocation or a set-times must learn we did not do it.
+        "fd_allocate" | "fd_filestat_set_times" | "path_filestat_set_times" => {
+            errno(results, ERRNO_NOSYS)
+        }
         "args_sizes_get" => {
             let items = ctx.borrow().args.clone();
             sizes_get(&items, c, args, results)
@@ -506,6 +618,136 @@ mod tests {
 
     fn i32_of(r: &Result<Vec<Value>, Trap>) -> i32 {
         crate::interp::as_i32(r.as_ref().expect("trapped")[0])
+    }
+
+    // --- the filesystem, end to end through the real ABI ------------------------
+    //
+    // The resolver has its own unit tests; these prove the syscalls actually route through
+    // it, which is a separate claim. A guest that opens a file by name and writes to it
+    // exercises path_open -> walk -> OpenOptions -> fd table -> fd_write in one go.
+
+    /// A guest that `path_open`s `$path` under preopen fd 3 and writes `written!` to it.
+    /// Returns the first non-zero errno, negated, or 0 on success.
+    fn fs_guest(path: &str, oflags: i32) -> String {
+        alloc::format!(
+            r#"(module
+              (import "wasi_snapshot_preview1" "path_open"
+                (func $open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+              (import "wasi_snapshot_preview1" "fd_write"
+                (func $write (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 64) "{path}")
+              (data (i32.const 96) "written!")
+              (func (export "_start") (result i32)
+                (local $e i32)
+                (local.set $e (call $open
+                  (i32.const 3) (i32.const 0) (i32.const 64) (i32.const {len})
+                  (i32.const {oflags})
+                  (i64.const 0x1FFFFFFF) (i64.const 0x1FFFFFFF)
+                  (i32.const 0) (i32.const 0)))
+                (if (local.get $e) (then (return (i32.sub (i32.const 0) (local.get $e)))))
+                (i32.store (i32.const 16) (i32.const 96))
+                (i32.store (i32.const 20) (i32.const 8))
+                (call $write (i32.load (i32.const 0)) (i32.const 16) (i32.const 1)
+                             (i32.const 8))))"#,
+            len = path.len(),
+        )
+    }
+
+    /// `path_open`'s CREAT flag.
+    const O_CREAT: i32 = 1;
+
+    #[test]
+    fn a_guest_can_create_and_write_a_file_inside_its_preopen() {
+        let s = fs::Scratch::new("e2e-write");
+        let ctx = WasiCtx::deterministic([7; 32])
+            .with_preopen(&s.0, "/sandbox", fs::rights::ALL)
+            .expect("preopen");
+        let (_, r) = run_wasi(&fs_guest("out.txt", O_CREAT), ctx);
+        assert_eq!(i32_of(&r), 0, "the guest reported an errno");
+        assert_eq!(
+            std::fs::read(s.join("out.txt")).expect("guest should have created it"),
+            b"written!"
+        );
+    }
+
+    #[test]
+    fn a_guest_cannot_escape_its_preopen_through_path_open() {
+        let outer = fs::Scratch::new("e2e-escape");
+        let root = outer.join("sandbox");
+        std::fs::create_dir(&root).unwrap();
+        let ctx = WasiCtx::deterministic([7; 32])
+            .with_preopen(&root, "/sandbox", fs::rights::ALL)
+            .expect("preopen");
+        let (_, r) = run_wasi(&fs_guest("../escaped.txt", O_CREAT), ctx);
+        assert_eq!(
+            i32_of(&r),
+            -ERRNO_NOTCAPABLE,
+            "path_open must refuse to climb out"
+        );
+        assert!(
+            !outer.join("escaped.txt").exists(),
+            "the guest wrote OUTSIDE its preopen"
+        );
+    }
+
+    #[test]
+    fn a_read_only_preopen_refuses_the_write_and_the_restriction_propagates() {
+        let s = fs::Scratch::new("e2e-ro");
+        std::fs::write(s.join("out.txt"), b"original").unwrap();
+        let ctx = WasiCtx::deterministic([7; 32])
+            .with_preopen(&s.0, "/sandbox", fs::rights::READ_ONLY)
+            .expect("preopen");
+        // The *open* still succeeds: `path_open` intersects the guest's requested rights
+        // with what the directory passes down, so it gets a read-only fd rather than an
+        // error. The refusal lands one step later, at the write — which is why the guest
+        // returns it positively (the negated values are path_open's).
+        let (_, r) = run_wasi(&fs_guest("out.txt", 0), ctx);
+        assert_eq!(
+            i32_of(&r),
+            ERRNO_NOTCAPABLE,
+            "the write through a read-only preopen should be refused"
+        );
+        assert_eq!(
+            std::fs::read(s.join("out.txt")).unwrap(),
+            b"original",
+            "a read-only preopen was written through"
+        );
+    }
+
+    #[test]
+    fn with_no_preopen_the_filesystem_is_simply_absent() {
+        // The default context grants nothing, so every path call is BADF — there is no
+        // ambient authority to fall back on.
+        let (_, r) = run_wasi(&fs_guest("anything.txt", O_CREAT), WasiCtx::deterministic([7; 32]));
+        assert_eq!(i32_of(&r), -ERRNO_BADF);
+    }
+
+    #[test]
+    fn a_preopen_reports_its_guest_name_to_the_libc_startup() {
+        let s = fs::Scratch::new("e2e-prestat");
+        let mut ctx = WasiCtx::deterministic([7; 32]);
+        let fd = ctx
+            .preopen_dir(&s.0, "/data", fs::rights::ALL)
+            .expect("preopen");
+        assert_eq!(fd, 3, "preopens start after stdio");
+        let src = r#"(module
+          (import "wasi_snapshot_preview1" "fd_prestat_get"
+            (func $pre (param i32 i32) (result i32)))
+          (import "wasi_snapshot_preview1" "fd_prestat_dir_name"
+            (func $name (param i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (func (export "_start") (result i32)
+            (local $e i32)
+            (local.set $e (call $pre (i32.const 3) (i32.const 0)))
+            (if (local.get $e) (then (return (i32.sub (i32.const 0) (local.get $e)))))
+            ;; name length lands at offset 4; ask for it, then confirm fd 4 is not a preopen
+            (local.set $e (call $name (i32.const 3) (i32.const 32) (i32.load (i32.const 4))))
+            (if (local.get $e) (then (return (i32.sub (i32.const 0) (local.get $e)))))
+            (i32.load (i32.const 4))))"#;
+        let (sh, r) = run_wasi(src, ctx);
+        assert_eq!(i32_of(&r), 5, "/data is five bytes");
+        drop(sh);
     }
 
     #[test]
@@ -690,13 +932,14 @@ mod tests {
     #[test]
     fn an_unimplemented_call_reports_nosys() {
         // Not a trap: the guest sees the errno and can cope, which is what real hosts do.
+        // (This used `path_open` until the filesystem landed; sockets are the remaining
+        // genuinely-unimplemented surface.)
         let src = r#"(module
-            (import "wasi_snapshot_preview1" "path_open"
-              (func $open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+            (import "wasi_snapshot_preview1" "sock_accept"
+              (func $a (param i32 i32 i32) (result i32)))
             (memory 1)
             (func (export "_start") (result i32)
-              (call $open (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
-                          (i64.const 0) (i64.const 0) (i32.const 0) (i32.const 0))))"#;
+              (call $a (i32.const 0) (i32.const 0) (i32.const 0))))"#;
         let (_c, r) = run_wasi(src, WasiCtx::deterministic([0; 32]));
         assert_eq!(i32_of(&r), ERRNO_NOSYS);
     }

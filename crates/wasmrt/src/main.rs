@@ -33,13 +33,62 @@ fn main() -> ExitCode {
     }
 }
 
+/// One `--dir` / `--ro-dir` grant: the host directory, the name the guest sees, and
+/// whether it is read-only.
+struct Preopen {
+    host: String,
+    guest: String,
+    read_only: bool,
+}
+
+/// Pull the leading `--dir` / `--ro-dir` flags off the command line, returning the preopens
+/// as `(host, guest, read_only)` plus whatever is left.
+///
+/// `--dir <host>` maps the directory under its own name; `--dir <host>::<guest>` renames it
+/// for the guest. `::` rather than `:` because a Windows host path starts `C:`.
+///
+/// Parsing stops at the first non-flag, so a guest argument that happens to look like
+/// `--dir` is passed through to the guest rather than granting it access to anything.
+fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, &[String]), String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let ro = match args[i].as_str() {
+            "--dir" => false,
+            "--ro-dir" => true,
+            _ => break,
+        };
+        let Some(spec) = args.get(i + 1) else {
+            return Err(format!("{} needs a directory", args[i]));
+        };
+        let (host, guest) = match spec.split_once("::") {
+            Some((h, g)) => (h.to_string(), g.to_string()),
+            None => (spec.clone(), spec.clone()),
+        };
+        out.push(Preopen { host, guest, read_only: ro });
+        i += 2;
+    }
+    Ok((out, &args[i..]))
+}
+
 /// `wasmrt wasi <file.wasm> [args...]` — run a WASI preview-1 program's `_start`.
 ///
 /// Exits with the guest's `proc_exit` code when it calls one, so shell pipelines see the
 /// status the program intended.
 fn run_wasi_module(rest: &[String]) -> ExitCode {
+    // Preopens come first, so everything after the module path is the guest's own argv and
+    // is never mistaken for a host flag.
+    let (dirs, rest) = match take_dir_flags(rest) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("wasmrt: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let Some(path) = rest.first() else {
-        eprintln!("wasmrt: usage: wasmrt wasi <file.wasm> [args...]");
+        eprintln!(
+            "wasmrt: usage: wasmrt wasi [--dir <host>[::<guest>]] [--ro-dir …] <file.wasm> [args...]"
+        );
         return ExitCode::FAILURE;
     };
     let bytes = match std::fs::read(path) {
@@ -67,9 +116,22 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
     // argv[0] is the module path, then whatever follows on our command line.
-    let ctx = ctx
+    let mut ctx = ctx
         .with_args(std::iter::once(path.clone()).chain(rest[1..].iter().cloned()))
         .with_env(std::env::vars());
+    // **The guest reaches nothing it was not explicitly granted.** With no `--dir`, every
+    // path call returns BADF; there is no implicit cwd preopen.
+    for p in &dirs {
+        let rights = if p.read_only {
+            wasmrt_core::wasi::fs::rights::READ_ONLY
+        } else {
+            wasmrt_core::wasi::fs::rights::ALL
+        };
+        if let Err(e) = ctx.preopen_dir(std::path::Path::new(&p.host), &p.guest, rights) {
+            eprintln!("wasmrt: cannot preopen {}: errno {e}", p.host);
+            return ExitCode::FAILURE;
+        }
+    }
     let shared = wasmrt_core::wasi::shared(ctx);
 
     let imports = match wasmrt_core::wasi::link(&md, &shared) {
@@ -229,13 +291,16 @@ fn print_help() {
          USAGE:\n    \
          wasmrt <file.wasm>                     decode, summarize and type-check a module\n    \
          wasmrt run <file.wasm> <fn> [args...]  call an exported function\n    \
-         wasmrt wasi <file.wasm> [args...]      run a WASI preview-1 program (_start)\n    \
+         wasmrt wasi [--dir D] <file.wasm> […]  run a WASI preview-1 program (_start)\n    \
          wasmrt wat <file.wat> [-o out.wasm]    assemble the text format to a binary\n    \
          wasmrt wast <file|dir>... [-v]         run .wast spec scripts\n    \
          wasmrt -h | --help                     show this help\n    \
          wasmrt -v | --version                  show the version\n\n\
-         `wasi` covers stdio, args, environ, clocks, random and proc_exit; the sandboxed\n\
-         filesystem lands next, so file calls report NOSYS for now.",
+         `wasi` covers stdio, args, environ, clocks, random, proc_exit and the sandboxed\n\
+         filesystem. A guest reaches ONLY what you preopen:\n    \
+           --dir <host>[::<guest>]     grant read-write access to a directory\n    \
+           --ro-dir <host>[::<guest>]  grant read-only access (propagates to the subtree)\n\
+         With no --dir, every path call returns BADF — there is no implicit cwd.",
         wasmrt_core::VERSION
     );
 }
