@@ -114,10 +114,22 @@ bump + public trackers + **full `cmem/` sync** + release commit (checklist steps
 hands over the publish commands. Established rhythm since v0.1.0; the pre-publish doc-sync gate added
 2026-07-31 (v0.6.4) after earlier releases shipped with docs lagging a turn behind.
 
-## Status (2026-08-05)
+## Status (2026-08-06)
 
-- **✅ v0.8.0 PUBLISHED and pushed (2026-08-05, release commit `81d1c24`, tag `v0.8.0`) — no release is
-  pending.** It ships **all of
+- **🚀 v0.9.0 is PREPARED and AWAITING PUBLISH (2026-08-06).** T8 — the **`wasmrt.h` C ABI** — is done
+  with all three gates green (`abi_symbols.c` 74/74, `c_smoke.c` compiled by a C compiler against the
+  shipped header, and Miri over a randomized lifecycle fuzz). Also ships **proposal gating** +
+  **configurable resource ceilings**, a **`Linker` in core**, and two **silent-wrong-output** fixes
+  (dropped table initializers; element-segment form 4 rewriting a segment's type). Conformance
+  **61,033 / 738 / 3,075 — 98.8%**; 351 workspace tests. Version bumped, `ROADMAP.md`/`CHANGELOG.md`/
+  `README.md` and the full `cmem/` sync all committed **before** this handoff, per the 🔒 rule below.
+  **`abi_version()` is now 1** (was 0) — the C ABI is finalized, and `WASMRT_ABI_VERSION` in the header
+  must stay equal to it (a test pins the pair).
+- **Next release after v0.9.0: T9 — licensing, docs, size minimization, all gates green** (0.10.0).
+
+### Previous
+
+- **✅ v0.8.0 PUBLISHED and pushed (2026-08-05, release commit `81d1c24`, tag `v0.8.0`).** It ships **all of
   T7** — host imports, module linking on a shared store, and WASI preview 1 **including the sandboxed
   filesystem** with `--dir`/`--ro-dir` — plus the **safety pass** (`#![forbid(unsafe_code)]` in core and
   the CLI) and the **literal/text edges**. Spec-suite conformance at release: **98.8%** (61,013 passing /

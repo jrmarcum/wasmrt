@@ -1,5 +1,15 @@
 # Roadmap
 
+## Status (2026-08-06) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE.**
+
+**T8 (the `wasmrt.h` C ABI) landed 2026-08-06 as v0.9.0**, with all three of its gates green —
+`abi_symbols.c` (74/74 symbols), `c_smoke.c` (compiled by a C compiler against the shipped header), and
+**Miri** over a randomized lifecycle fuzz. wasmrt is now embeddable from C. The release also added
+**proposal gating** and **configurable resource ceilings** (the owner chose real gating over
+limits-only), a **`Linker` in core** shared by the C ABI / native crate / WASI / `.wast` runner, and
+fixed **two silent-wrong-output defects** that work surfaced. Suite **61,033 / 738 / 3,075 — 98.8%**.
+**Next: T9 — licensing, docs, size, and all gates green.** Detail in the T8 entry below.
+
 ## Status (2026-07-27) — PORT phase; gate OPEN, oracle FROZEN
 
 The conversion has **begun**. The `wazmrt` oracle reached full parity and is **frozen** at
@@ -386,12 +396,74 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     - Deliberately **`NOSYS`, not a silent success**: `fd_allocate`, `fd_filestat_set_times`,
       `path_filestat_set_times`, and the socket calls. A guest that needs them must learn we did not
       do them. 272 workspace tests (was 254), clippy clean.
-- **T8 — `wasmrt.h` C ABI (redesign, not transliteration).** ⛔ *Decision-gate (block lifted):*
-  **finalize `wasmrt.h`** with the owner first (naming, store simplification, `{id}`-handle model) —
-  from `docs/port/wasmrt.h.draft`. Then implement `#[no_mangle] extern "C"` over core: lightweight `{id}`
-  handles (no wasm-c-api refcount model), caller-based host callbacks, `#[repr(C)]` boundary structs, real
-  pointers. Gate: `tests/c_smoke.c` (decode→instantiate→call→memory→global→trap) + `tests/abi_symbols.c`
-  link-completeness + lifecycle fuzz under **Miri**. `[ ]`
+- **T8 — `wasmrt.h` C ABI. ✅ DONE 2026-08-06 (v0.9.0). ALL THREE GATES GREEN.** ~74 exported functions,
+  wasmtime-*shaped* under our own names. **Decision-gate RESOLVED with the owner 2026-08-06** — the four
+  answers are recorded in `design-decisions.md`; the two that changed the plan were **real proposal
+  gating** (not just resource limits) and **the linker in core** (not in the C-ABI crate). `[x]`
+  - **The draft did not survive contact with the code.** Four things in `docs/port/wasmrt.h.draft` were
+    written before the port existed and did not match it: per-proposal config toggles (core had *no*
+    feature gating, so they would have been silent no-ops), `wasmrt_linker_t` (core resolves imports
+    **positionally**, by declaration order — name resolution existed only inside `wasi::link`),
+    a store-attached WASI config (core builds WASI **per module**), and `wasmrt_trap_message`
+    promising "+ backtrace text" (there are no backtraces). Each was fixed rather than papered over.
+  - **T8a — proposal gating (`features.rs`).** 14 flags, one per proposal wasmrt actually implements,
+    **all ON by default**, plus a `Features::mvp()` floor. Gating fires at **validation**, never at
+    execution, so nothing half-checked reaches the interpreter. Three things keep it honest: (1) **there
+    is no `tail_call` flag** — `return_call`/`return_call_indirect` (`0x12`/`0x13`) are not in the opcode
+    table at all, so the draft's `wasmrt_config_set_tail_call` would have gated *nothing* while reading
+    as a security control; (2) **one `op_feature` table**, consulted once per instruction, so an arm
+    cannot be gated in one place and forgotten in another; (3) **types are gated as well as opcodes** —
+    `(local v128)`, a `(struct …)` type, an i64 memory and a passive segment all name a proposal with no
+    instruction in sight. Incoherent sets (`gc` without `function_references`) are **reported, not
+    repaired**. 14 gate vectors, each checked BOTH ways. **Spec suite unchanged** — the all-features path
+    short-circuits before any gate.
+  - **T8a2 — `ResourceLimits`.** The five compile-time ceilings (memory bytes, table elems, call depth,
+    GC objects, exn boxes) became per-store configuration, defaults byte-identical. `max_call_depth`
+    **stays 512 for oracle parity**: an embedder hitting the debug-build stack finding lowers it per
+    store rather than the shipped default drifting.
+  - **T8b — `Linker` in core** (owner's choice, so the C ABI / native crate / WASI / `.wast` runner share
+    **one** resolution authority). Name-keyed, with namespace catch-alls (WASI routes ~45 calls by name)
+    and a `define_fallback` — which is also what makes `define_unknown_imports_as_traps` implementable.
+    `wasi::link` keeps its exact behaviour: the wasmtk corpus is **byte-identical across all 376
+    modules**. New `Store::export_global`/`has_export`/`memory`/`global`/`func_type`/`export_index`.
+  - **T8b2 — two SILENT-WRONG-OUTPUT defects the linker work surfaced** (the worst category by
+    `INDEX.md`'s own standard). Exposed because `export_global` made `table.wast`'s module buildable:
+    **(1) table initializer expressions were DROPPED** — `(table 3 funcref (ref.func $f))` assembled to a
+    table of nulls, and the `0x40 0x00 tabletype expr` binary form was rejected as an undefined value
+    type (7 `elem.wast` modules were failing on exactly that); **(2) element-segment form 4 hardcodes
+    `funcref`** and has no reftype field, so `(elem (i32.const 0) (ref func) …)` on table 0 had its type
+    silently rewritten — it now promotes to form 6. Fixing (1) made non-nullable table element types
+    expressible for the first time, which exposed that the active-element check compared **families**
+    with nullability normalized away; §3.5.9 is **subtyping**, so `funcref` no longer satisfies
+    `(ref func)`.
+  - **T8c/d — the header + implementation.** Two handle kinds: opaque pointers you own (one `_delete`
+    each), and **checked value handles** you never free. Each value handle carries the identity of the
+    store that issued it, so one from another store — or a deleted one — is **rejected rather than
+    followed**; the `+1` in the packing keeps `wasmrt_func_t f = {0};` permanently invalid. **All
+    raw-pointer work is confined to `ffi.rs`**, justified once and rejecting null everywhere, so the 74
+    exports are ordinary safe Rust and `deny(unsafe_code)` stays meaningful instead of becoming 74
+    rubber stamps. **The env-finalizer hazard is closed by construction**: an instance keeps the callback
+    it linked, so the environment lives behind an `Rc` shared by the linker *and* every closure — the
+    finalizer runs when the last holder goes, in whatever order the embedder deletes things.
+    Other header decisions: **one `set_feature(enum)` rather than 14 named setters** (adding a proposal
+    must not add a symbol); **v128 and the GC types cannot cross the boundary** — a call whose signature
+    contains one returns an **error**, never a wrong value; **the trap frame API ships its final shape
+    but always reports ZERO frames** (byte offsets are not recorded yet, and an approximate frame is
+    worse than none — fixing the shape now avoids a breaking change at T9); `wasmrt_trap_new` was added
+    after clippy found `trap_obj` dead, which exposed that the header told callbacks to return a trap
+    with no way to make one. `abi_version()` 0 → **1**.
+  - **T8e — the gates, all three green.** **`tests/abi_symbols.c` 74/74 symbols resolve** (link
+    completeness: a function declared but not exported fails the BUILD). **`tests/c_smoke.c` PASSED** —
+    compiled by clang against the shipped header, which proves what no Rust test can: that `wasmrt.h` is
+    valid C and its declarations match the exported symbols. **Miri 26/26 including `lifecycle_fuzz`**,
+    which drives randomized creation/use/destruction orders (including discouraged ones) and touches
+    handles whose store is gone — a normal allocator cannot tell a use-after-free from a pass.
+    **Mutation-verified:** deleting the store-tag check makes the cross-store test fail. Runners:
+    `scripts/c-gate.sh`, `scripts/miri-gate.sh`.
+  - **Conformance: 61,013/751/3,094 → 61,033/738/3,075 (98.8%)** — `table.wast` 12 failures → 2,
+    `elem.wast` 17 → 13, `linking.wast` +4 passes. The one file that got worse is `i31.wast`
+    (+1 visible failure, −1 skip): a module that now builds and meets the already-logged GC-const-expr
+    gap. 351 workspace tests, clippy clean, all four surfaces.
 - **T9 — Licensing, docs, size, and all gates green.** Add `LICENSE-MIT`/`LICENSE-APACHE`/`NOTICE`/
   `third_party/LICENSES.md` (name wazmrt→wasmrt, "Jon Marcum" 2026); minimize every artifact (`opt-level=z`
   + LTO + `codegen-units=1` + strip + `wasm-opt -Oz`); cold-vs-steady bench. Gate: DoD below. `[ ]`

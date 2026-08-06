@@ -18,20 +18,29 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-05, post-T7 linking + the shared-store fixes)
+## Spec-suite conformance — current (2026-08-06, post-T8)
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (2026-08-03) | post-linking (08-04) | **current (08-05)** |
-| --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | **61,013** |
-| failed | 871 | 1,521 | **751** |
-| skipped | 9,608 | 6,821 | **3,094** |
-| **pass rate** | 98.4% | 97.4% | **98.8%** of 61,764 adjudicated |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | **T8 (08-06)** |
+| --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | **61,033** |
+| failed | 871 | 1,521 | 751 | **738** |
+| skipped | 9,608 | 6,821 | 3,094 | **3,075** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | **98.8%** of 61,771 adjudicated |
 
 The dip at 08-04 was capability, not regression: wiring `register` + `spectest` moved 2,784 assertions
 out of *skipped*, and ~649 of them were already-broken code that had been hidden behind a skip. The
 08-05 column is that debt paid off — see the shared-store punch-list in `known-issues.md`.
+
+**The 08-06 (T8) column moved for one reason worth remembering: making the linker resolve a registered
+module's exported globals made previously-unbuildable modules build, and what they exposed was two
+silent-wrong-output defects** (dropped table initializers, and element-segment form 4 rewriting a
+segment's type). `table.wast` 12 failures → 2, `elem.wast` 17 → 13, `linking.wast` +4 passes. **A
+module that fails to build costs exactly one `skipped`** — not one per assertion — which is why the
+*total* adjudicated count moves when modules start building; do not read that as assertions vanishing.
+The one file that got worse is `i31.wast` (+1 visible failure, −1 skip): a module that now builds and
+meets the already-logged GC-const-expr gap. Capability up, honestly accounted.
 
 **Two-instance rule.** Every conformance defect fixed on 08-05 was a store-index/module-index
 conflation that is *unobservable* with a single instance per store. Regression tests touching pools
@@ -83,7 +92,34 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-05, post-T7)
+## Current test state (2026-08-06, post-T8)
+
+**351 workspace tests, all green** (325 core + 26 capi), clippy clean on all four build surfaces.
+T8 added 70 over v0.8.0's 281: the proposal-gate vectors (14 modules, each checked **both** ways —
+valid with all features on, and refused *naming that exact proposal* with one flag cleared, because a
+one-sided "assert it errors" test proves nothing about *why*), the resource-ceiling tests, 14 linker
+tests, 7 regressions for the table-initializer defects, and 26 C-ABI tests.
+
+**The three C-ABI gates are real, and each catches something the others cannot:**
+
+- **`tests/abi_symbols.c` — 74/74.** Takes the address of every function the header declares, forcing
+  the linker to resolve it. A function DECLARED but not EXPORTED fails the build; nothing else catches
+  that, because compiling a declaration always succeeds.
+- **`tests/c_smoke.c` — behaviour, from real C.** Compiled by a C compiler against the shipped header,
+  so it proves two things no Rust test can: that `wasmrt.h` is valid C, and that its declarations match
+  the exported symbols.
+- **Miri (`scripts/miri-gate.sh`) — 26/26 including `lifecycle_fuzz`**, which drives randomized
+  creation/use/destruction orders (including the ones the header discourages) and touches handles whose
+  store is already gone. **A normal allocator cannot tell a use-after-free from a pass** — it hands back
+  freed memory that still looks right. The fuzz is seeded and reproducible on purpose: one that finds a
+  fault on Tuesday and cannot reproduce it on Wednesday has found nothing. It scales itself down under
+  `cfg!(miri)`, so the gate finishes in ~18s rather than minutes.
+
+**Mutation-verified:** deleting the store-tag check from handle unpacking makes
+`a_handle_from_another_store_is_rejected_not_aliased` fail — so the handle checking is load-bearing,
+not decoration. (The same standard `tests/README.md` sets: a gate that cannot fail is decoration.)
+
+### Superseded — post-T7 state (2026-08-05)
 
 **281 workspace tests, all green** under native + (compile) `wasm32` no_std; clippy clean on all four
 build surfaces. T7 plus the literal/text pass added 63 over v0.7.0's 218: host imports and the shared store (incl. the two

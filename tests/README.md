@@ -3,22 +3,33 @@
 Test suite for wasmrt — the Rust ports/equivalents of wazmrt's `tests/` plus the
 port's parity gates.
 
-**Status: PREP placeholder.** No test code yet — the port gate is closed
-(see `../cmem/roadmap.md`), and the C-ABI tests depend on the finalized
-`wasmrt.h` (held for review). This README fixes the intended set so testing
-matches the oracle. Definition of done = **full Rust↔oracle parity on both
-targets** (see `../cmem/testing.md`).
+**Status: the C-ABI gates are LIVE as of T8 / v0.9.0 (2026-08-06).** Definition of
+done = **full Rust↔oracle parity on both targets** (see `../cmem/testing.md`).
 
-## Planned tests
+## C-ABI gates — built, and each catches what the others cannot
 
-### C-ABI (equivalents of wazmrt `tests/c_smoke.c` + `c_abi_symbols.c`)
-- **`c_smoke.c`** — links the wasmrt **cdylib**/static lib and exercises `wasmrt.h`
-  behavior from C: compile → instantiate (with a host import) → call an export →
-  read linear memory → read a global → trap + message. The behavioral gate.
-- **`abi_symbols.c`** — takes the address of every function `wasmrt.h` declares:
-  a **link-time completeness gate** (a missing symbol fails the build). Regenerate
-  from the finalized header.
-- Both depend on the finalized `wasmrt.h`.
+Run both with **`../scripts/c-gate.sh`** (add `--release` for the release lib).
+
+- **`abi_symbols.c` ✅ 74/74 symbols resolve.** Takes the address of every function
+  `wasmrt.h` declares, forcing the linker to resolve it. A function DECLARED in the
+  header but never EXPORTED fails the **build** — the one failure mode nothing else
+  catches, because compiling a declaration always succeeds. **Keep it in step with
+  the header: a new declaration means a new line here.**
+- **`c_smoke.c` ✅ PASSED.** Compiled by a C compiler against the *shipped* header,
+  so it proves two things no Rust test can — that `wasmrt.h` is valid C, and that
+  its declarations match the exported symbols. Drives config → compile → link a
+  host import → instantiate → call → memory both ways → global → trap → teardown,
+  and checks that a foreign-store handle is refused. Its module bytes are embedded
+  rather than loaded, so the gate has no fixture dependency and fails for exactly
+  one reason: the ABI.
+- **Miri ✅ 26/26** via **`../scripts/miri-gate.sh`**, including `lifecycle_fuzz`
+  (in `crates/wasmrt-capi/src/tests.rs`), which drives randomized creation, use and
+  destruction orders — including the ones the header discourages — and touches
+  handles whose store is already gone. A normal allocator hands back freed memory
+  that still looks right; Miri calls it an error.
+
+**These gates can fail** — the standard this file sets below. Mutation-verified:
+deleting the store-tag check from handle unpacking makes the cross-store test fail.
 
 ### Rust unit + parity (in-crate `#[cfg(test)]` + here)
 - **Unit tests** mirroring wazmrt's ~132 distinct tests (decode/validate/interp/

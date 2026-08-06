@@ -11,7 +11,54 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 
 ## [Unreleased]
 
-_Next: T8 — the `wasmrt.h` C ABI._
+_Next: T9 — licensing, docs, size minimization, and all gates green._
+
+## [0.9.0] — the `wasmrt.h` C ABI (stage T8)
+
+wasmrt is now **embeddable from C**. This release adds the finalized `wasmrt.h` surface, the engine
+configuration it needs, and a shared linker underneath both — plus two silent-wrong-output fixes that
+the work surfaced.
+
+### Added — the C ABI
+
+- **`wasmrt.h`** — ~74 functions, wasmtime-*shaped* under our own names. Engine/config, store, module
+  compile + introspection, a name-based linker with caller-based host callbacks, WASI preview 1,
+  export calls, linear memory (raw view *and* bounds-checked copies), globals, traps and errors.
+- **Checked value handles instead of a refcount object model.** `wasmrt_func_t` and friends are small
+  copyable integers you never free. Each carries the identity of the store that issued it, so a handle
+  from another store — or from a deleted one — is **rejected rather than followed** into someone else's
+  resources. A zero-initialized handle (`wasmrt_func_t f = {0};`) is never valid.
+- **Configurable proposals.** `wasmrt_config_set_feature` genuinely gates 14 WebAssembly proposals; a
+  disabled one makes a module **invalid** at compile time, never part-way through execution. There is
+  deliberately **no tail-call toggle** — base tail calls are not implemented, so a flag for them would
+  gate nothing while reading as a control.
+- **Configurable resource ceilings** — max memory bytes, table elements, call depth, GC objects, and
+  exception boxes. Previously compile-time constants, and unreachable from an embedder.
+- **`Linker` in `wasmrt-core`**, resolving imports by name in declaration order. The C ABI, the native
+  Rust crate, WASI and the `.wast` runner now share one resolution authority.
+
+### Fixed — two silent-wrong-output defects
+
+Both produced a module that assembled, ran, and answered **wrongly** rather than being refused.
+
+- **Table initializer expressions were dropped.** `(table 3 funcref (ref.func $f))` assembled to a table
+  of nulls. The `0x40 0x00 tabletype expr` form is now parsed, encoded, decoded, validated and applied
+  at instantiation; the binary form was previously rejected outright as an undefined value type.
+- **Element-segment form 4 hardcodes `funcref`** and carries no type selector, so
+  `(elem (i32.const 0) (ref func) …)` silently had its type rewritten. It now promotes to form 6.
+- **Active element segments are checked by subtyping**, not by family with nullability normalized away —
+  so a nullable `funcref` segment no longer satisfies a non-nullable `(ref func)` table.
+
+### Conformance
+
+Spec testsuite **61,033 passing / 738 failing / 3,075 skipped — 98.8%** across all 284 files (up from
+61,013 / 751 / 3,094): `table.wast` 12 failures → 2, `elem.wast` 17 → 13.
+
+### Gates
+
+`tests/abi_symbols.c` (74/74 symbols resolve — link completeness), `tests/c_smoke.c` (compiled by a C
+compiler against the shipped header, so it proves the header is valid C and matches the library), and
+**Miri** over a randomized lifecycle fuzz. 351 workspace tests.
 
 ## [0.8.0] — WASI preview 1, host imports and module linking (stage T7)
 

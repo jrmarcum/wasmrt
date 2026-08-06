@@ -49,9 +49,25 @@ C-ABI surface must expose it.
 
 - **Strategy:** clean lean **`wasmrt_*` C ABI (wasmtime-*shaped*, our names) + a native `wasmrt` Rust
   crate.** No exact-wasmtime-symbol compat shim. Owner owns the loaders and updates them.
-- **Draft:** `docs/port/wasmrt.h.draft` (v0, ~40 fns). The "held until wazmrt finalizes" review-block is
-  **lifted** (oracle frozen 2026-07-27) → finalize the header with the owner at the **C-ABI task (T8** in
-  `roadmap.md`) before writing `wasmrt-capi`.
+- **✅ SHIPPED at T8 / v0.9.0 (2026-08-06): `crates/wasmrt-capi/include/wasmrt.h`**, ~74 functions. That
+  is now the authority; `docs/port/wasmrt.h.draft` is a **historical artifact** — do not read it as the
+  current shape. **Four things in the draft did not survive contact with the code**: its per-proposal
+  config toggles (core had no gating at all, so they would have been silent no-ops — gating was built
+  for real), `wasmrt_linker_t` (core resolved imports *positionally*; a name-based `Linker` now lives in
+  core), a store-attached WASI config (WASI is per-module), and `wasmrt_trap_message` promising
+  "+ backtrace text" (there are none — the frame API ships its shape but reports 0 until T9). The
+  draft's `wasmrt_config_set_tail_call` was **dropped outright**: that proposal is unimplemented, so the
+  toggle would have gated nothing while reading as a security control.
+- **What the loaders get.** Everything the ~38-fn survey called for: engine/store/linker, host functions
+  with a **caller** handle (`wasmrt_caller_read`/`_write`), `define_wasi`,
+  `define_unknown_imports_as_traps`, reactor `_initialize`, call-by-name with typed args, **raw
+  `wasmrt_memory_data` + size** for hand-rolled Canonical ABI marshalling, exported-global reads, and
+  traps/errors with messages. Plus two the survey did not ask for and embedders will want: **restricting
+  which proposals a guest may use**, and **capping its memory / call depth / GC objects**.
+- **One caveat to carry into the loader ports:** `wasmrt_caller_get_memory` always returns `false`. A
+  durable memory handle must be tagged against a live store, and during a callback the store is
+  mid-borrow. Use `wasmrt_caller_read`/`_write`/`_memory_size` inside callbacks — which is what the
+  loaders actually need; the handle form exists so the wasmtime-shaped call sequence compiles.
 
 Three substrates today; **all 10 loaders are eventual targets, phased by effort:**
 

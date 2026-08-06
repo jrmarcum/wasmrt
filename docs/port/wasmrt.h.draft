@@ -1,4 +1,13 @@
 /*
+
+> **⚠️ HISTORICAL (superseded 2026-08-06).** The finalized C ABI is
+> `crates/wasmrt-capi/include/wasmrt.h`. Four things in this draft did NOT survive contact with the
+> real code — its per-proposal config toggles (which would have been silent no-ops), `wasmrt_linker_t`
+> (core resolved imports positionally), the store-attached WASI config (WASI is per-module), and the
+> promise of trap backtrace text (there are none yet). `wasmrt_config_set_tail_call` was dropped
+> outright: that proposal is unimplemented, so the toggle would have gated nothing. Kept for the
+> design history only. See `cmem/loaders.md` and `cmem/roadmap.md` (T8).
+
  * wasmrt.h — DRAFT PROPOSAL (v0, for review; not yet in the repo).
  *
  * SPDX-License-Identifier: MIT OR Apache-2.0

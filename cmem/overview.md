@@ -17,13 +17,13 @@ Only tail calls have no wazmrt oracle → conform those against **wasmtime + the
 (see [testing.md](testing.md), [design-decisions.md](design-decisions.md)). Full deep-read of wazmrt is
 in `docs/port/00-synthesis.md` (+ 6 subsystem maps).
 
-## Status (2026-08-05) — PORT phase; **assemble → decode → validate → run → WASI all working**
+## Status (2026-08-06) — PORT phase; **assemble → decode → validate → run → WASI → embed-from-C all working**
 
 The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the port is underway,
 released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
 **memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
 
-**Done — T0–T7 (v0.1.0 → v0.8.0):**
+**Done — T0–T8 (v0.1.0 → v0.9.0):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
   surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
 - **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`
@@ -69,9 +69,18 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   (`#![forbid(unsafe_code)]` in core + the CLI) and closed the **literal/text edges**, which took the
   suite to **98.8%** (61,013 passing) with **all 284 files parsing for the first time**.
 
-**Next: T8 — the `wasmrt.h` C ABI.** Its decision-gate is finalizing the header shape with the owner
-before any code is written; the draft lives in `docs/port/`.
-See the task list in [roadmap.md](roadmap.md). **281 workspace tests** green; clippy clean; native +
+- **T8 (v0.9.0)** — **the `wasmrt.h` C ABI**: ~74 exported functions, wasmtime-*shaped* under our own
+  names, so wasmrt is embeddable from C. The wasm-c-api refcount object model is **designed out** in
+  favour of **checked value handles** that carry the identity of the store that issued them, so a stale
+  or foreign handle is refused rather than followed. All raw-pointer work is confined to one audited
+  module, and the whole surface runs under **Miri**. Also: **proposal gating** (14 flags, enforced at
+  validation) and **configurable resource ceilings**, plus a **`Linker` in core** shared by the C ABI,
+  the native crate, WASI and the `.wast` runner — whose arrival surfaced and fixed **two
+  silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
+  rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
+
+**Next: T9 — licensing, docs, size minimization, and all gates green.**
+See the task list in [roadmap.md](roadmap.md). **351 workspace tests** green; clippy clean; native +
 `wasm32` no_std all build.
 
 ## Planned repo / crate layout

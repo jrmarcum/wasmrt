@@ -4,6 +4,31 @@ The Rust architecture for `wasmrt`. It reproduces wazmrt's **decode → validate
 pipeline and its **dual-target contract**, in idiomatic Rust. Detail: `docs/port/` (esp.
 `00-synthesis.md`, `02-decode-core.md`, `03-validate-interp.md`, `06-build-docs-licensing.md`).
 
+**Added at T8 / v0.9.0 — the crate tree is now complete.** `wasmrt-capi` is real: **~74 exported
+functions** over core, plus `features` (proposal gating) and `linker` (name-based import resolution) in
+`wasmrt-core`. Three shapes are load-bearing:
+
+- **Two handle kinds, and the split IS the ownership story.** Opaque pointers the caller owns (one
+  `_delete` each) versus **checked value handles** (`wasmrt_func_t` and friends) that are never freed.
+  Each value handle packs the identity of the store that issued it, so a handle from another store — or
+  a deleted one — is **rejected, never followed** into another instance's resources. This is what
+  replaces the wasm-c-api refcount model (wazmrt's highest-risk file): the same property, obtained by
+  construction rather than by six hand-held invariants. The `+1` in the packing keeps a
+  zero-initialized handle permanently invalid.
+- **`crates/wasmrt-capi/src/ffi.rs` is the crate's ONLY raw-pointer boundary.** Every primitive is
+  justified once, rejects null, and never invents a length. The 74 exports are ordinary safe Rust
+  calling into it — which is what keeps `deny(unsafe_code)` a real constraint instead of 74 rubber
+  stamps. `wasmrt-core` stays `#![forbid(unsafe_code)]`.
+- **The env-finalizer lifecycle is closed by construction.** An instance keeps the host callback it
+  linked against, so deleting the linker first would finalize an environment a live instance still
+  points at. The environment lives behind an `Rc` shared by the linker *and* every closure linked from
+  it, so the finalizer runs when the last holder drops — in whatever order the embedder tears down. No
+  documented ordering requirement, and therefore none to get wrong.
+
+Gating happens at **validation**, never at execution (`validate_with_features`), so a refused proposal
+can never be half-checked. `ResourceLimits` lives on `Pools`, which the runtime already threads down
+every execution path, so every site that must consult a ceiling already holds one.
+
 **Realized so far (through T7 / v0.8.0):** the workspace + all three crates exist; `wasmrt-core`
 has `types`, `reader`, `opcode`, `module` (decode), `validate` (core-language type-checker), and `interp`
 (switch interpreter — integer + float compute + linear memory incl. **multi-memory** and **memory64** +

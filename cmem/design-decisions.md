@@ -171,7 +171,23 @@ all now — each is decided when the port reaches the task that needs it.
   rather than checking for it, which is how wazmrt's **#17** gets closed *by construction*. Rejected
   `cap-std`/`openat2`: a large dependency tree against the smallest-binary goal, strongest on Linux and
   uneven elsewhere, and it would be wasmrt's first runtime dependency.
-- `wasmrt.h` review (naming, the store simplification, the `{id}`-handle model). The "held until wazmrt
-  finalizes" condition is now **met** (oracle frozen) → **gate at the start of the C-ABI task** (finalize
-  the draft with the owner before writing `wasmrt-capi`).
+- ~~`wasmrt.h` review (naming, the store simplification, the `{id}`-handle model).~~ **✅ RESOLVED
+  (owner, 2026-08-06) — four answers, two of which changed the plan:**
+  1. **Config gates proposals FOR REAL**, not just resource limits. The draft's per-proposal toggles
+     would have been silent no-ops (core had no feature gating at all), so the owner chose to build the
+     gating rather than drop the toggles — new work threaded through the validator. Limits are
+     configurable too. **Corollary the owner should not be surprised by later: there is no `tail_call`
+     flag**, because `return_call`/`return_call_indirect` are not implemented; a toggle for them would
+     gate nothing while reading as a security control.
+  2. **The linker lives in `wasmrt-core`**, not in the C-ABI crate — so the C ABI, the native Rust
+     crate, WASI and the `.wast` runner share **one** name-resolution authority. Binding two same-kind
+     imports in the wrong order links fine and misroutes every call, so it is written once.
+  3. **Memory: raw `uint8_t*` primary + bounds-checked `read`/`write`.** Zero-copy is what the loaders'
+     hand-rolled Canonical ABI marshalling needs; the checked pair is there for embedders who would
+     rather not reason about the invalidation rule.
+  4. **Trap frames: ship the API shape now, real backtraces at T9.** `wasmrt_trap_frame_count` returns
+     0 until byte offsets are recorded. Committing the shape now avoids a breaking ABI change later,
+     and reporting nothing is better than reporting a plausible-looking wrong frame.
+
+  Delivered 2026-08-06 as v0.9.0 (T8); the resulting invariants are in [architecture.md](architecture.md).
 - core+capi crate split (recommended) vs. a single multi-target crate. → **gate at the scaffold task.**

@@ -35,7 +35,7 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | **0.6.x** | Interpret | execution, one feature slice at a time — compute, memory, tables/reftypes, WasmGC, SIMD, multi-memory, threads/atomics, memory64, exception handling | ✅ |
 | **0.7.0** | Text toolchain + Validate (complete) | `.wat` assembler + `.wast` runner, bringing the official spec testsuite online; plus the SIMD / atomics / GC / EH typing arms, so the type-checker covers everything the interpreter runs | ✅ |
 | **0.8.0** | WASI + CLI | host imports + module linking on a shared store + WASI preview 1 **including the sandboxed filesystem** (`--dir` / `--ro-dir` preopens); plus `#![forbid(unsafe_code)]` in the engine | ✅ |
-| 0.9.0 | C ABI | the `wasmrt.h` embedding surface | ⬜ |
+| **0.9.0** | C ABI | the `wasmrt.h` embedding surface — checked handles, caller-based host callbacks, configurable proposals + resource ceilings; gated by c-smoke, link-completeness and Miri | ✅ |
 | 0.10.0 | Hardening | licensing, size minimization, all gates green | ⬜ |
 | **1.0.0** | **Parity** | **full parity with the wazmrt oracle** | ⬜ |
 
@@ -60,7 +60,9 @@ Checked off as each capability lands and passes its gate.
 | Exception handling (exnref + legacy) | ✅ | 0.6 |
 | Type-check every construct above | ✅ | 0.7 |
 | Host imports (link a module against another) | ✅ | 0.8 |
-| Tail calls | ⬜ | 0.8 |
+| Restrict which proposals a guest may use | ✅ | 0.9 |
+| Configurable resource ceilings (memory, call depth, GC) | ✅ | 0.9 |
+| Tail calls (`return_call`/`return_call_indirect`) | ⬜ | 0.10 |
 
 ### Text & conformance
 | Use case | Status | Lands in |
@@ -74,14 +76,14 @@ Checked off as each capability lands and passes its gate.
 | --- | --- | --- |
 | Run a WASI preview-1 program (stdout/args/env/clock) | ✅ | 0.8 |
 | Sandboxed filesystem (`--dir` / `--ro-dir` preopens) | ✅ | 0.8 |
-| Module pin verification / signatures | ⬜ | 0.9 |
+| Module pin verification / signatures | ⬜ | 0.10 |
 
 ### Embed wasmrt
 | Use case | Status | Lands in |
 | --- | --- | --- |
-| Native shared library via the C ABI (`wasmrt.h`) | ⬜ | 0.9 |
-| Embed wasmrt itself inside another `wasm32` host | ⬜ | 0.9 |
-| Rust embedding via the `wasmrt-core` crate | ⬜ | 0.9 |
+| Native shared library via the C ABI (`wasmrt.h`) | ✅ | 0.9 |
+| Embed wasmrt itself inside another `wasm32` host | ⬜ | 0.10 |
+| Rust embedding via the `wasmrt-core` crate | ✅ | 0.9 |
 
 ## Follow along
 

@@ -6,6 +6,29 @@ wasmrt carries over wazmrt's security design **to replicate**, not to reinvent. 
 running guest may touch — BUILT in wazmrt) and **Authenticity** (is this the code I approved — pin BUILT,
 signatures design-only).
 
+## Two new authority controls at T8 / v0.9.0 (2026-08-06) — reachable from C
+
+Both are **new capability wazmrt does not have**, and both are enforced where they cannot be bypassed:
+
+- **Proposal gating** (`Features`, `wasmrt_config_set_feature`) — an embedder can refuse SIMD, GC,
+  threads, memory64 and 10 more, shrinking the language a guest may use and with it the interpreter
+  surface an attacker can reach. **Enforced at VALIDATION, never at execution**: a module naming a
+  disabled proposal is simply *invalid*, so nothing half-checked ever reaches the interpreter. Types are
+  gated as well as opcodes — a `(local v128)` or a `(struct …)` type is refused even with no instruction
+  in sight, which is the hole a naive opcode-only gate would leave.
+  - **The honesty rule that keeps this a real control:** a flag exists only for a proposal wasmrt
+    actually implements. **There is no `tail_call` flag**, because those opcodes are unimplemented — a
+    toggle for them would gate nothing while *reading to an operator as a security control*, which is
+    strictly worse than its absence.
+  - Incoherent sets (`gc` without `function_references`) are **rejected, not repaired**: silently
+    enabling a dependency would accept modules the embedder meant to refuse.
+- **Resource ceilings** (`ResourceLimits`) — memory bytes, table elements, call depth, GC objects and
+  boxed exceptions are now per-store rather than compile-time, so a host can bound a guest's appetite
+  instead of relying on constants it cannot see. Each is a ceiling, not a reservation.
+
+**Unchanged:** the FS sandbox is still the entire authority story for files, and every property in the
+section below holds exactly as before — the C ABI adds no path a guest can take.
+
 ## Sandbox / Authority — reproduce EXACTLY, keep the guarantee
 
 - Guest can execute nothing (no `proc_exec`/spawn in WASI p1; `proc_exit` self-terminates); cannot

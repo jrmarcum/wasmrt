@@ -5,6 +5,66 @@ v0.1.0–v0.7.0). This records the **inherited concerns** from the frozen wazmrt
 intentional divergences**, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
 (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
+## ✅ Fixed at T8 (2026-08-06) — two SILENT-WRONG-OUTPUT defects
+
+Both are the worst category by this project's own standard (`INDEX.md`: *"prefer a hard
+`Err(Unsupported*)` over silent-wrong"*): the assembler **accepted** the source and produced a module
+that decoded, validated and **ran, giving the wrong answer**. Neither was reachable from the spec suite
+until the T8 linker work made the enclosing modules buildable.
+
+1. **Table initializer expressions were DROPPED.** `parse_table_field` read the limits and element type
+   and ignored everything after, so `(table 3 funcref (ref.func $f))` assembled to a table of **nulls** —
+   `table.get` returned null where every entry should have been `$f`. The `0x40 0x00 tabletype expr`
+   binary form (function-references) was also never emitted, and the decoder rejected it outright as
+   *"byte is not a defined value type"* — **7 modules in `elem.wast` were failing on exactly that**. Now
+   parsed, encoded, decoded, validated and applied at instantiation. Two related refusals added: a plain
+   table with a **non-nullable** element type (uninhabited without an initializer, so the plain form
+   cannot express it) and an **imported** table carrying one (the format has nowhere to put it).
+2. **Element-segment form 4 hardcodes `funcref`.** Of the eight forms, only 2/6 and 5/7 carry a type
+   selector; **form 4 has no reftype field at all**. Emitting it for `(elem (i32.const 0) (ref func) …)`
+   silently rewrote the segment's type to `funcref`. It now promotes to form 6, and the funcidx
+   shorthand (forms 0–3) refuses a non-`funcref` type outright.
+
+**And the third-order consequence, which is the interesting part.** Fixing (1) made non-nullable table
+element types expressible *for the first time* — which exposed that the active-element-segment check
+compared **families with nullability normalized away**. That was harmless only while `(ref func)` could
+not decode. §3.5.9 is **subtyping**, and it is directional: a nullable `funcref` segment must no longer
+satisfy a `(ref func)` table. **Lesson: a check that is "harmless because the case cannot occur" becomes
+a bug the moment the case can occur — and nothing will remind you.**
+
+Suite: `table.wast` 12 failures → **2**, `elem.wast` 17 → **13**, `linking.wast` +4 passes.
+Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is in the emitted bytes
+(behaviour alone would not catch a wrong *encoding* that another decoder must read).
+
+## ✅ Closed at T8 (2026-08-06)
+
+- **Item 6 — the debug-build stack-depth exposure — is ADDRESSED, not fixed.** `max_call_depth` is now
+  per-store configuration (`ResourceLimits`), so an embedder linking the debug `cdylib` can lower it.
+  **The default stays 512 for oracle parity**; lowering the shipped default would diverge from the
+  frozen oracle on legal deeply-recursive programs. Release builds remain correct at the default.
+- **The wasm-c-api refcount risk is designed out**, not merely avoided. wazmrt's highest-risk file holds
+  six memory-safety invariants by hand; `wasmrt.h` uses value handles that carry the identity of the
+  issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
+  followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
+
+## 🔧 Open — noted at T8 (2026-08-06)
+
+- **Trap backtraces are still empty, and the C ABI now says so out loud.** `wasmrt_trap_frame_count`
+  ships its final shape but always returns **0** — per-instruction byte offsets (the `decode_body_tracked`
+  work deferred at T2) are not recorded, and an approximate frame is worse than none. Fixing the API
+  shape now means no breaking change when real frames land at **T9**. This is defect 4 below, unchanged
+  in substance; what changed is that the shape is committed.
+- **`wasmrt_caller_get_memory` returns `false` always.** A durable memory handle must be tagged against
+  a live `wasmrt_store_t`, and during a host callback the store is mid-borrow — there is nothing to tag
+  against. Callbacks use `wasmrt_caller_read`/`_write`/`_memory_size` instead, which is the shape that
+  actually matters (they are what the loaders need). The function exists so the wasmtime-shaped call
+  sequence compiles, and it **reports honestly that it produced nothing** rather than handing back a
+  handle that would fail later. Revisit if a loader genuinely needs the handle form.
+- **Imported memories and tables still cannot be named as linker definitions** (`LinkError::
+  UnsupportedImportKind`). Instances *can* share memories and tables through the store; there is simply
+  no way to publish one under a name yet. Refused loudly, never half-linked. `imports.wast` still skips
+  108 on this.
+
 ## 📋 Pre-T8 review (2026-08-05) — the punch list the owner asked to discuss
 
 Suite: **59,395 passed / 843 failed / 4,586 skipped — 98.6%** of 60,238 adjudicated.

@@ -7,7 +7,7 @@ which already runs the full WebAssembly spec testsuite and a large WASI corpus. 
 **reference oracle**; wasmrt is finished when it reproduces the oracle feature-for-feature, verified by
 parity testing at every step.
 
-> **Status: early — `0.8.0`.** wasmrt can **assemble**, **decode**, **type-check**, and **run**
+> **Status: early — `0.9.0`.** wasmrt can **assemble**, **decode**, **type-check**, and **run**
 > WebAssembly — `wasmrt run fac.wasm fac 10` → `3628800`, `wasmrt wat mod.wat -o mod.wasm`. Execution
 > covers integer + floating-point compute, linear memory (incl. **multi-memory** and **memory64**),
 > tables / `call_indirect` / reference types, **WasmGC**, **SIMD** (the full `v128` set, incl. relaxed),
@@ -15,7 +15,12 @@ parity testing at every step.
 > `wasmrt <file.wasm>` gives a real verdict on any module wasmrt can run.
 >
 > It reads and writes the **text format** and runs the **official spec testsuite**: `wasmrt wast <dir>`
-> scores **98.8% (61,013 assertions passing)**, with every one of the 284 files parsing.
+> scores **98.8% (61,033 assertions passing)**, with every one of the 284 files parsing.
+>
+> It is **embeddable from C** via [`wasmrt.h`](crates/wasmrt-capi/include/wasmrt.h) — compile,
+> link host functions, instantiate, call exports, and read or write guest memory. You can restrict
+> which WebAssembly proposals a guest may use and cap the memory, call depth and GC objects it may
+> consume. Handles are checked, so one from the wrong store is refused rather than followed.
 >
 > It also runs **real WASI programs** — `wasmrt wasi prog.wasm` — with stdio, args, environ, clocks,
 > `random_get` and a **sandboxed filesystem**. A guest reaches only what you preopen:
@@ -23,8 +28,10 @@ parity testing at every step.
 > no `--dir`, every path call returns `BADF` — there is no implicit working directory.
 >
 > The engine is **`#![forbid(unsafe_code)]`**: `wasmrt-core` and the CLI contain no `unsafe` at all, and
-> the compiler enforces it. See **[ROADMAP.md](ROADMAP.md)** for the live use-case matrix (what actually
-> works today) and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
+> the compiler enforces it. The C ABI cannot be — a foreign boundary is unsafe by definition — so every
+> raw pointer it touches goes through one small audited module, and the whole surface runs under
+> **Miri**. See **[ROADMAP.md](ROADMAP.md)** for the live use-case matrix (what actually works today)
+> and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
 
 ## Goals
 
