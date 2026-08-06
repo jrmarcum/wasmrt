@@ -757,6 +757,57 @@ impl Store {
         self.pools.globals.get(data.maps.global(index)).copied()
     }
 
+    /// How many instances this store holds. An [`InstanceId`] is valid here iff its index
+    /// is below this.
+    #[must_use]
+    pub fn instance_count(&self) -> usize {
+        self.code.len()
+    }
+
+    /// The index (in the instance's own index space) of an export of the given kind.
+    #[must_use]
+    pub fn export_index(
+        &self,
+        id: InstanceId,
+        name: &str,
+        kind: crate::types::ExternKind,
+    ) -> Option<u32> {
+        self.code.get(id.0)?.module.exports.iter().find_map(|e| {
+            (e.name == name && e.ty.kind() == kind).then_some(e.index)
+        })
+    }
+
+    /// Shared access to one of an instance's memories, by the instance's own memory index.
+    ///
+    /// Routed through the instance's [`IndexMaps`], so an *imported* memory resolves to the
+    /// exporter's storage — the caller sees the same bytes the guest does.
+    #[must_use]
+    pub fn memory(&self, id: InstanceId, index: u32) -> Option<&Memory> {
+        let data = self.code.get(id.0)?;
+        self.pools.memories.get(data.maps.mem(index))
+    }
+
+    /// Mutable access to one of an instance's memories. See [`Store::memory`].
+    #[must_use]
+    pub fn memory_mut(&mut self, id: InstanceId, index: u32) -> Option<&mut Memory> {
+        let slot = self.code.get(id.0)?.maps.mem(index);
+        self.pools.memories.get_mut(slot)
+    }
+
+    /// Read one of an instance's globals by the instance's own global index. A snapshot —
+    /// see [`Store::export_global`].
+    #[must_use]
+    pub fn global(&self, id: InstanceId, index: u32) -> Option<Value> {
+        let data = self.code.get(id.0)?;
+        self.pools.globals.get(data.maps.global(index)).copied()
+    }
+
+    /// The signature of a function in an instance's function index space.
+    #[must_use]
+    pub fn func_type(&self, id: InstanceId, func_index: u32) -> Option<crate::module::FuncType> {
+        self.code.get(id.0)?.module.func_type(func_index)
+    }
+
     /// Whether an instance exports `name` with the given kind — the link-time existence
     /// check, without reading the value.
     #[must_use]

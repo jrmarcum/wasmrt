@@ -499,13 +499,33 @@ pub fn link(module: &Module, ctx: &SharedCtx) -> Result<Imports, Trap> {
 /// leave the fallback unset.
 pub fn add_to_linker(linker: &mut crate::linker::Linker, ctx: &SharedCtx) {
     let ctx = Rc::clone(ctx);
-    linker.define_fallback(move |_module, name| {
-        let name = String::from(name);
-        let c = Rc::clone(&ctx);
-        crate::linker::host_func(move |caller, args, results| {
-            dispatch(&c, &name, caller, args, results)
-        })
-    });
+    linker.define_fallback(move |_module, name| dispatcher(&ctx, name));
+}
+
+/// The two module names WASI preview 1 is imported under. `wasi_unstable` is the older
+/// spelling; toolchains of different vintages emit one or the other.
+pub const NAMESPACES: [&str; 2] = ["wasi_snapshot_preview1", "wasi_unstable"];
+
+/// Register WASI preview 1 under its **own namespaces only**, leaving every other import
+/// for someone else to define.
+///
+/// This is the form an embedder wants, and the counterpart to [`add_to_linker`]: with
+/// namespaces rather than a fallback, a mistyped `env`-module import is still a link-time
+/// error instead of becoming a WASI stub that answers `NOSYS` at runtime.
+pub fn define_namespaces(linker: &mut crate::linker::Linker, ctx: &SharedCtx) {
+    for ns in NAMESPACES {
+        let ctx = Rc::clone(ctx);
+        linker.define_namespace(ns, move |name| dispatcher(&ctx, name));
+    }
+}
+
+/// One WASI call, bound to its name.
+fn dispatcher(ctx: &SharedCtx, name: &str) -> crate::interp::HostFunc {
+    let name = String::from(name);
+    let c = Rc::clone(ctx);
+    crate::linker::host_func(move |caller, args, results| {
+        dispatch(&c, &name, caller, args, results)
+    })
 }
 
 /// Route one WASI call by name.

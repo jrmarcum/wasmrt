@@ -49,18 +49,23 @@ pub mod wasi;
 /// The crate/runtime version string (`CARGO_PKG_VERSION`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The wasmrt C-ABI version — bumped on any breaking `wasmrt.h` change. Mirrors
-/// wazmrt's `wazmrt_abi_version`. Starts at 0 while the ABI is pre-1.0 (finalized at T8).
+/// The wasmrt C-ABI version — bumped on any breaking `wasmrt.h` change. Mirrors wazmrt's
+/// `wazmrt_abi_version`.
+///
+/// **1 since T8 (2026-08-06)**, when the header was finalized with the owner. It was 0
+/// while the shape was still open. This must equal `WASMRT_ABI_VERSION` in `wasmrt.h`; a
+/// test in `wasmrt-capi` pins the two together, because a caller that binds dynamically has
+/// nothing else to check.
 #[must_use]
 pub const fn abi_version() -> u32 {
-    0
+    1
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn abi_version_is_zero_pre_release() {
-        assert_eq!(super::abi_version(), 0);
+    fn abi_version_is_the_finalized_one() {
+        assert_eq!(super::abi_version(), 1);
     }
 
     #[test]
