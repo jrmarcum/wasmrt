@@ -469,18 +469,43 @@ fn now_nanos() -> u64 {
 /// Currently infallible; returns `Result` so future link-time checks (signature matching,
 /// preopen validation) can report without a breaking change.
 pub fn link(module: &Module, ctx: &SharedCtx) -> Result<Imports, Trap> {
-    let mut imports = Imports::new();
-    for imp in &module.imports {
-        if imp.ty.kind() != crate::types::ExternKind::Func {
-            // A WASI module imports only functions; anything else is the caller's to supply.
-            continue;
-        }
-        let name = String::from(imp.name.as_str());
-        let c = Rc::clone(ctx);
-        imports =
-            imports.with_func(move |caller, args, results| dispatch(&c, &name, caller, args, results));
-    }
-    Ok(imports)
+    let mut linker = crate::linker::Linker::new();
+    add_to_linker(&mut linker, ctx);
+    // A WASI module imports only functions; if it also imports a global or a memory, that
+    // is the caller's to supply, and `Linker::resolve` would refuse. Keep the historical
+    // behaviour — skip the non-function imports — by resolving against a module view that
+    // has none. (`wasmrt wasi` runs preview-1 programs, which import functions only.)
+    let mut view = module.clone();
+    view.imports
+        .retain(|i| i.ty.kind() == crate::types::ExternKind::Func);
+    let store = crate::interp::Store::new();
+    linker
+        .resolve(&store, &view)
+        // Unreachable with a fallback installed — every function import resolves — but
+        // mapped rather than unwrapped so a future change cannot turn into a panic.
+        .map_err(|_| Trap::MissingImport)
+}
+
+/// Register the WASI preview-1 surface on a [`Linker`](crate::linker::Linker).
+///
+/// **Deliberately a fallback, not a named namespace.** Guests spell the module name
+/// `wasi_snapshot_preview1` or `wasi_unstable` depending on their toolchain and vintage,
+/// and the CLI's `wasmrt wasi` subcommand has no other host surface to offer — so every
+/// function import routes here, and an unrecognised *call* answers `NOSYS` rather than the
+/// module failing to instantiate. A guest that merely references a call it never makes
+/// still runs; one that actually makes it learns we did not implement it.
+///
+/// An embedder that wants strict namespace matching should define the surface itself and
+/// leave the fallback unset.
+pub fn add_to_linker(linker: &mut crate::linker::Linker, ctx: &SharedCtx) {
+    let ctx = Rc::clone(ctx);
+    linker.define_fallback(move |_module, name| {
+        let name = String::from(name);
+        let c = Rc::clone(&ctx);
+        crate::linker::host_func(move |caller, args, results| {
+            dispatch(&c, &name, caller, args, results)
+        })
+    });
 }
 
 /// Route one WASI call by name.

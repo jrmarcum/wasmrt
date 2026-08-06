@@ -835,11 +835,17 @@ struct MemoryDef {
     is64: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TableDef {
     min: u32,
     max: Option<u32>,
     elem: V,
+    /// `(table 3 funcref (ref.func $f))` — the function-references initializer expression
+    /// every entry starts as. `None` is the plain form, which starts as null.
+    ///
+    /// **This was silently dropped until 2026-08-06**, so a table declared with an
+    /// initializer assembled to one full of nulls: a *wrong module*, not a rejected one.
+    init: Option<Vec<Sexpr>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1095,6 +1101,24 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         emit_const_expr(&mut out, &g.init, &mut b)?;
         global_inits.push(out);
     }
+    // Table initializers, encoded in this same pre-pass and for the same reason as the
+    // global ones: `emit_const_expr` can intern a type, and the type section must be
+    // complete before any section is written.
+    let table_inits: Vec<Option<Vec<u8>>> = {
+        let tables = b.tables.clone();
+        let mut v = Vec::with_capacity(tables.len());
+        for t in &tables {
+            match &t.init {
+                Some(expr) => {
+                    let mut out = Vec::new();
+                    emit_const_expr(&mut out, expr, &mut b)?;
+                    v.push(Some(out));
+                }
+                None => v.push(None),
+            }
+        }
+        v
+    };
     let elems = core::mem::take(&mut b.elems);
     let mut elem_bytes: Vec<Vec<u8>> = Vec::with_capacity(elems.len());
     for e in &elems {
@@ -1121,6 +1145,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         &bodies,
         &globals,
         &global_inits,
+        &table_inits,
         &elem_bytes,
         &datas,
         &data_offsets,
@@ -1610,6 +1635,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             min: n,
             max: Some(n),
             elem: elem_type,
+            init: None, // the inline `(elem …)` fills it instead
         });
         b.table_names.push(name);
         b.elems.push(ElemDef {
@@ -1626,8 +1652,28 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 
     let (min, max) = parse_table_limits(items, &mut j)?;
     let elem = parse_val_type(nth(items, j)?, &b.type_names)?;
-    let t = TableDef { min, max, elem };
+    // Anything after the element type is the initializer expression (function-references).
+    // Reading it is what stops the assembler emitting a table of nulls for
+    // `(table 3 funcref (ref.func $f))`.
+    let rest = &items[j + 1..];
+    let init = if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_vec())
+    };
+    let t = TableDef {
+        min,
+        max,
+        elem,
+        init,
+    };
     if let Some(r) = import {
+        // The binary format has no initializer on an *imported* table — the exporter
+        // supplies the contents. Refuse rather than drop it, which is the bug this whole
+        // change exists to remove.
+        if t.init.is_some() {
+            return Err(Error::BadModuleField);
+        }
         b.table_imports.push(ImportedTable { r, t });
         b.import_order.push(ImportKind::Table);
     } else {
@@ -1746,7 +1792,12 @@ fn parse_import_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             let elem = parse_val_type(nth(desc, j)?, &b.type_names)?;
             b.table_imports.push(ImportedTable {
                 r,
-                t: TableDef { min, max, elem },
+                t: TableDef {
+                    min,
+                    max,
+                    elem,
+                    init: None,
+                },
             });
             b.import_order.push(ImportKind::Table);
             b.table_names.push(name);
@@ -1870,6 +1921,8 @@ struct Encoded<'a> {
     bodies: &'a [Vec<u8>],
     globals: &'a [GlobalDef],
     global_inits: &'a [Vec<u8>],
+    /// Positional with `b.tables`; `None` where the table has no initializer.
+    table_inits: &'a [Option<Vec<u8>>],
     elems: &'a [Vec<u8>],
     datas: &'a [DataSeg],
     data_offsets: &'a [Option<Vec<u8>>],
@@ -1885,6 +1938,7 @@ fn emit_module(
     bodies: &[Vec<u8>],
     globals: &[GlobalDef],
     global_inits: &[Vec<u8>],
+    table_inits: &[Option<Vec<u8>>],
     elems: &[Vec<u8>],
     datas: &[DataSeg],
     data_offsets: &[Option<Vec<u8>>],
@@ -1894,6 +1948,7 @@ fn emit_module(
         bodies,
         globals,
         global_inits,
+        table_inits,
         elems,
         datas,
         data_offsets,
@@ -2016,9 +2071,21 @@ fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, e: &Encoded) -> Result<()> {
     if !b.tables.is_empty() {
         let mut c = Vec::new();
         uleb(&mut c, b.tables.len() as u64);
-        for t in &b.tables {
-            emit_val_type(&mut c, t.elem)?;
-            emit_limits(&mut c, u64::from(t.min), t.max.map(u64::from), false, false);
+        for (i, t) in b.tables.iter().enumerate() {
+            // §5.5.6 with function-references:
+            //   table ::= tt:tabletype                    (the plain form)
+            //           | 0x40 0x00 tt:tabletype e:expr   (with an initializer)
+            // `0x40` is not a valid valtype byte, so the two forms are unambiguous.
+            if let Some(Some(init)) = e.table_inits.get(i) {
+                c.push(0x40);
+                c.push(0x00);
+                emit_val_type(&mut c, t.elem)?;
+                emit_limits(&mut c, u64::from(t.min), t.max.map(u64::from), false, false);
+                c.extend_from_slice(init);
+            } else {
+                emit_val_type(&mut c, t.elem)?;
+                emit_limits(&mut c, u64::from(t.min), t.max.map(u64::from), false, false);
+            }
         }
         push_section(out, 4, &c);
     }
@@ -3763,7 +3830,22 @@ fn emit_block_type(ctx: &mut Ctx, bt: BlockTy) -> Result<()> {
 /// carries a full *reftype*. Emitting flag 2 with a reftype and const-exprs — the bug the
 /// first conformance run caught — made every `table_copy`/`table_init` module undecodable.
 fn emit_elem_segment(c: &mut Vec<u8>, e: &ElemDef, b: &mut ModuleBuild) -> Result<()> {
-    let explicit_table = e.table_index != 0;
+    // §5.5.12: of the eight forms, only 2/6 (active with an explicit table index) and
+    // 5/7 (passive/declarative) carry a type selector. Forms **0 and 4 hardcode
+    // `funcref`** — form 4 has no reftype field at all.
+    //
+    // So an active segment on table 0 whose element type is anything else — `externref`,
+    // or the non-nullable `(ref func)` a table initializer now makes expressible — CANNOT
+    // use form 4. Emitting it anyway silently rewrote the segment's type to `funcref`:
+    // a wrong module, not a rejected one, and the same class as the dropped table
+    // initializer this change was made to fix. Promote to form 6 instead.
+    let type_is_implicit_funcref = e.elem_type == V::FUNCREF;
+    if !e.use_exprs && !type_is_implicit_funcref {
+        // The funcidx shorthand (forms 0–3) always denotes `funcref`; a different type
+        // cannot be encoded that way at all.
+        return Err(Error::BadModuleField);
+    }
+    let explicit_table = e.table_index != 0 || (e.use_exprs && !type_is_implicit_funcref);
     let flag: u64 = match (&e.offset, e.declarative, e.use_exprs) {
         (Some(_), _, false) => u64::from(explicit_table) * 2, // 0 or 2
         (Some(_), _, true) => 4 + u64::from(explicit_table) * 2, // 4 or 6
@@ -4674,5 +4756,122 @@ mod tests {
             (func (export "f") (result f32) (f32.const 0x1.8p+1)))"#;
         let r = run(src, "f", &[]);
         assert_eq!(crate::interp::as_f32(r[0]), 3.0);
+    }
+
+    // ---- Table initializer expressions (fixed 2026-08-06) ---------------------------
+    //
+    // Both defects here were **silent-wrong output**, the category `cmem/INDEX.md` calls
+    // the worst: the assembler accepted the source and emitted a module that ran and gave
+    // the wrong answer, rather than refusing it.
+
+    #[test]
+    fn a_table_initializer_actually_fills_the_table() {
+        // Was: assembled, dropped the `(ref.func $f)`, and every entry came back null.
+        let src = r#"(module
+            (func $f (result i32) (i32.const 7))
+            (type $s (func (result i32)))
+            (table $t 3 funcref (ref.func $f))
+            (func (export "call1") (result i32) (call_indirect $t (type $s) (i32.const 1))))"#;
+        assert_eq!(crate::interp::as_i32(run(src, "call1", &[])[0]), 7);
+    }
+
+    #[test]
+    fn a_table_initializer_uses_the_0x40_binary_form() {
+        // The encoding matters, not just the behaviour: `0x40 0x00` is what a *different*
+        // decoder needs to see. Assemble, then read the table section back.
+        let bytes = asm_valid(
+            r#"(module (func $f) (table $t 2 funcref (ref.func $f)))"#,
+        );
+        let md = crate::module::decode(&bytes).expect("decode");
+        assert_eq!(md.tables.len(), 1);
+        assert!(
+            md.tables[0].init.is_some(),
+            "the initializer must survive the round trip"
+        );
+        // And the raw bytes carry the marker.
+        let sec = md
+            .section(crate::types::SectionId::Table)
+            .expect("table section");
+        assert_eq!(
+            bytes[sec.offset + 1],
+            0x40,
+            "the table entry must use the 0x40 initializer form"
+        );
+    }
+
+    #[test]
+    fn a_plain_table_may_not_have_a_non_nullable_element_type() {
+        // Without an initializer the entries would start null, which the type forbids —
+        // so the plain form simply cannot express it.
+        let bytes = asm(r#"(module (func $f) (table $t 2 (ref func) (ref.func $f)))"#)
+            .expect("with an initializer it is fine");
+        assert!(crate::module::decode(&bytes).is_ok());
+        // Hand-build the same table WITHOUT the initializer: element type `(ref func)`
+        // (0x64 0x70), limits {min 2}. It must be refused at decode.
+        let mut m = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        m.extend_from_slice(&[0x04, 0x05, 0x01, 0x64, 0x70, 0x00, 0x02]);
+        assert!(
+            crate::module::decode(&m).is_err(),
+            "a non-nullable element type needs an initializer"
+        );
+    }
+
+    #[test]
+    fn an_active_segment_on_table_zero_keeps_a_non_funcref_type() {
+        // Element-segment form 4 has NO reftype field — it hardcodes `funcref`. Emitting
+        // it for a `(ref func)` segment silently rewrote the type. It must promote to
+        // form 6 (explicit table index + reftype) instead.
+        let bytes = asm_valid(
+            r#"(module
+                 (func $f)
+                 (table $t 2 (ref func) (ref.func $f))
+                 (elem (i32.const 0) (ref func) (ref.func $f)))"#,
+        );
+        let md = crate::module::decode(&bytes).expect("decode");
+        assert_eq!(
+            md.elements[0].elem_type,
+            V::FUNCREF_NN,
+            "the segment's non-nullable type must survive; form 4 would flatten it to funcref"
+        );
+    }
+
+    #[test]
+    fn an_externref_active_segment_on_table_zero_also_keeps_its_type() {
+        // The same trap without any function-references involvement.
+        let bytes = asm_valid(
+            r#"(module
+                 (table $t 2 externref)
+                 (elem (i32.const 0) externref (ref.null extern)))"#,
+        );
+        let md = crate::module::decode(&bytes).expect("decode");
+        assert_eq!(md.elements[0].elem_type, V::EXTERNREF);
+    }
+
+    #[test]
+    fn a_nullable_segment_cannot_initialize_a_non_nullable_table() {
+        // §3.5.9 is subtyping, not a family match: `funcref` is not a subtype of
+        // `(ref func)`. This is the spec-suite `assert_invalid` that the old
+        // nullability-normalizing check wrongly accepted.
+        let bytes = asm(
+            r#"(module
+                 (func $f)
+                 (table $t 1 (ref func) (ref.func $f))
+                 (elem (i32.const 0) funcref (ref.func $f)))"#,
+        )
+        .expect("it assembles");
+        let md = crate::module::decode(&bytes).expect("and decodes");
+        assert_eq!(
+            crate::validate::validate(&md),
+            Err(crate::validate::ValidateError::TypeMismatch)
+        );
+    }
+
+    #[test]
+    fn an_imported_table_may_not_carry_an_initializer() {
+        // The binary format has no place to put one — the exporter owns the contents.
+        assert!(asm(
+            r#"(module (func $f) (import "m" "t" (table 1 funcref (ref.func $f))))"#
+        )
+        .is_err());
     }
 }

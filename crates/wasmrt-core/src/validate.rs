@@ -186,8 +186,15 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
                 return Err(ValidateError::UndefinedTable);
             }
             let tet = module.tables[ti].element;
-            // Family match (nullability normalized away).
-            if elem.elem_type.nullable() != tet.nullable() {
+            // §3.5.9: the segment's element type must be a SUBTYPE of the table's, which
+            // is directional and does care about nullability.
+            //
+            // This used to compare families with nullability normalized away. That was
+            // harmless only because a non-nullable table element type could not occur —
+            // the decoder rejected the `0x40` table-with-initializer form outright. Once
+            // that form decodes (2026-08-06), `(table 1 (ref func))` is expressible and a
+            // nullable `funcref` segment must no longer satisfy it.
+            if !subtype_of(module, elem.elem_type, tet) {
                 return Err(ValidateError::TypeMismatch);
             }
             validate_const_expr(module, &elem.offset_expr, V::I32, all_globals, None, features)?;
@@ -241,6 +248,12 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
             if tt.limits.min > mx {
                 return Err(ValidateError::InvalidLimits);
             }
+        }
+        // A table's initializer expression must produce its element type
+        // (function-references). Checked against ALL globals, since a table is defined
+        // after every global in the index space.
+        if let Some(expr) = &tt.init {
+            validate_const_expr(module, expr, tt.element, all_globals, Some(&mut refs), features)?;
         }
     }
 

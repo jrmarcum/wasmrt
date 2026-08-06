@@ -104,10 +104,17 @@ pub struct Limits {
     pub is64: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableType {
     pub element: ValType,
     pub limits: Limits,
+    /// Raw constant-expression bytes (including the terminating `end`) every entry starts
+    /// as — the function-references `0x40 0x00 tabletype expr` form. `None` is the plain
+    /// form, whose entries start null.
+    ///
+    /// Only a *defined* table can carry one; an imported table takes its contents from the
+    /// exporter.
+    pub init: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -670,7 +677,11 @@ fn read_table_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<TableType
     if limits.shared || limits.is64 {
         return Err(DecodeError::MalformedFlag); // tables are 32-bit, unshared
     }
-    Ok(TableType { element, limits })
+    Ok(TableType {
+        element,
+        limits,
+        init: None,
+    })
 }
 
 fn read_global_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<GlobalType> {
@@ -947,8 +958,10 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
                 Extern::Func(ft)
             }
             ExternKind::Table => {
+                // An imported table never carries an initializer — the exporter owns the
+                // contents — so this is always the plain form.
                 let tt = read_table_type(r, &d.type_kinds)?;
-                d.table_space.push(tt);
+                d.table_space.push(tt.clone());
                 Extern::Table(tt)
             }
             ExternKind::Memory => {
@@ -1013,7 +1026,30 @@ fn decode_table_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
     let mut count = r.read_var_u32()?;
     while count > 0 {
         count -= 1;
-        let tt = read_table_type(r, &d.type_kinds)?;
+        // §5.5.6 with function-references, two forms:
+        //   tabletype                       — entries start null
+        //   0x40 0x00 tabletype expr        — entries start as `expr`
+        // `0x40` cannot begin a valtype, so peeking one byte disambiguates. Reading the
+        // second form is what stops a table declared with an initializer from silently
+        // instantiating full of nulls.
+        let mut tt = if r.peek_byte()? == 0x40 {
+            r.read_byte()?; // 0x40
+            if r.read_byte()? != 0x00 {
+                return Err(DecodeError::MalformedFlag);
+            }
+            let mut tt = read_table_type(r, &d.type_kinds)?;
+            tt.init = Some(read_const_expr_bytes(r)?);
+            tt
+        } else {
+            read_table_type(r, &d.type_kinds)?
+        };
+        // A non-nullable element type is uninhabited without an initializer, so the plain
+        // form cannot express it. Rejected here rather than producing a table of nulls
+        // typed as non-null.
+        if tt.init.is_none() && tt.element.is_non_null_ref() {
+            return Err(DecodeError::MalformedFlag);
+        }
+        tt.limits.shared = false;
         d.table_space.push(tt);
     }
     Ok(())

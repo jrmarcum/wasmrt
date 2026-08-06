@@ -35,6 +35,7 @@ pub mod opcode;
 pub mod features;
 pub mod validate;
 pub mod interp;
+pub mod linker;
 pub mod sexpr;
 pub mod wat;
 pub mod wast;

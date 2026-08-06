@@ -520,6 +520,17 @@ pub struct Imports {
     pub globals: Vec<Value>,
 }
 
+impl fmt::Debug for Imports {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The backings are closures with no useful representation; the counts are what a
+        // caller diagnosing a link actually wants.
+        f.debug_struct("Imports")
+            .field("funcs", &self.funcs.len())
+            .field("globals", &self.globals.len())
+            .finish()
+    }
+}
+
 /// One function import's backing.
 enum ImportedFunc {
     Host(HostFunc),
@@ -730,6 +741,34 @@ impl Store {
         })
     }
 
+    /// Read an instance's exported global, for linking another module against it.
+    ///
+    /// **A snapshot, not a live binding.** An imported global is passed to the importer
+    /// *by value* ([`Imports::with_global`]), so a later `global.set` in the exporter is not
+    /// observed by the importer. That is exact for immutable globals — which is what the
+    /// spec permits importing in the first place, absent the mutable-globals extension —
+    /// and it is why this returns `Value` rather than a handle.
+    #[must_use]
+    pub fn export_global(&self, id: InstanceId, name: &str) -> Option<Value> {
+        let data = self.code.get(id.0)?;
+        let index = data.module.exports.iter().find_map(|e| {
+            (e.name == name && e.ty.kind() == crate::types::ExternKind::Global).then_some(e.index)
+        })?;
+        self.pools.globals.get(data.maps.global(index)).copied()
+    }
+
+    /// Whether an instance exports `name` with the given kind — the link-time existence
+    /// check, without reading the value.
+    #[must_use]
+    pub fn has_export(&self, id: InstanceId, name: &str, kind: crate::types::ExternKind) -> bool {
+        self.code.get(id.0).is_some_and(|d| {
+            d.module
+                .exports
+                .iter()
+                .any(|e| e.name == name && e.ty.kind() == kind)
+        })
+    }
+
     /// Instantiate a module into this store, linking `imports` against its declared imports.
     ///
     /// # Errors
@@ -825,8 +864,15 @@ impl Store {
                 .checked_add(min)
                 .filter(|&t| t <= self.pools.limits.max_table_elems)
                 .ok_or(Trap::TableLimitExceeded)?;
+            // A table declared with an initializer expression (function-references) starts
+            // with every entry set to it, not null. Evaluated against the globals resolved
+            // so far, exactly as a global's own initializer is.
+            let fill = match &tt.init {
+                Some(expr) => eval_const_expr(expr, &globals)?,
+                None => NULL_REF,
+            };
             tables.push(Table {
-                entries: vec![NULL_REF; min],
+                entries: vec![fill; min],
                 max: tt.limits.max.and_then(|m| u32::try_from(m).ok()),
             });
         }

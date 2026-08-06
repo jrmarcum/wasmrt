@@ -27,6 +27,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::interp::{HostFunc, Imports, InstanceId, Store, Trap, Value};
+use crate::linker::Linker;
 use crate::module::Module;
 use crate::sexpr::{self, Sexpr};
 use crate::wat;
@@ -124,17 +125,6 @@ fn spectest_func(_name: &str) -> HostFunc {
     HostFunc::new(|_caller, _args, _results| Ok(()))
 }
 
-/// The `spectest` module's exported global values (§ the spec suite's `spectest` host).
-fn spectest_global(name: &str) -> Option<Value> {
-    Some(match name {
-        "global_i32" => crate::interp::i32_value(666),
-        "global_i64" => crate::interp::i64_value(666),
-        "global_f32" => crate::interp::f32_value(666.6),
-        "global_f64" => crate::interp::f64_value(666.6),
-        _ => return None,
-    })
-}
-
 /// Why an action could not run.
 enum ActionErr {
     /// The module never built, or the named target is unknown — nothing was tested.
@@ -212,47 +202,44 @@ impl Runner {
         wat::assemble_module(form)
     }
 
+    /// Build the [`Linker`] this script links against: the standard `spectest` host module
+    /// plus every module published by `(register …)`.
+    ///
+    /// Rebuilt per module rather than kept on the `Runner`, because `(register …)` can add
+    /// a namespace between two builds and the linker must see it.
+    fn linker(&self) -> Linker {
+        let mut l = Linker::new();
+        l.define_namespace("spectest", spectest_func);
+        // The suite checks these values, so they must be exact. Named explicitly rather
+        // than produced by a factory: it is a closed, known set.
+        for (name, v) in [
+            ("global_i32", crate::interp::i32_value(666)),
+            ("global_i64", crate::interp::i64_value(666)),
+            ("global_f32", crate::interp::f32_value(666.6)),
+            ("global_f64", crate::interp::f64_value(666.6)),
+        ] {
+            l.define_global("spectest", name, v);
+        }
+        for (name, id) in &self.registered {
+            l.define_instance(name, *id);
+        }
+        l
+    }
+
     /// Resolve a module's declared imports against `spectest` and the registered modules.
     ///
-    /// Walks them in **declaration order** so each backing binds to its own slot.
+    /// Delegates to [`Linker`], which walks them in **declaration order** so each backing
+    /// binds to its own slot. Sharing that walk with the C ABI and WASI is the point:
+    /// binding two same-kind imports in the wrong order links fine and misroutes every
+    /// call, so it must be written once.
     fn resolve_imports(&mut self, md: &Module) -> Result<Imports, BuildErr> {
-        let mut imports = Imports::new();
-        for imp in &md.imports {
-            let from_spectest = imp.module == "spectest";
-            let target = self
-                .registered
-                .iter()
-                .find(|(n, _)| *n == imp.module)
-                .map(|(_, id)| *id);
-            match imp.ty.kind() {
-                crate::types::ExternKind::Func => {
-                    if from_spectest {
-                        imports = imports.with_host_func(spectest_func(&imp.name));
-                    } else if let Some(id) = target {
-                        let f = self
-                            .store
-                            .export_func(id, &imp.name)
-                            .ok_or(BuildErr::Unresolved)?;
-                        imports = imports.with_instance_func(id, f);
-                    } else {
-                        return Err(BuildErr::Unresolved);
-                    }
-                }
-                crate::types::ExternKind::Global => {
-                    // A registered module's exported globals are not reachable yet; only
-                    // `spectest`'s well-known values are.
-                    let v = from_spectest
-                        .then(|| spectest_global(&imp.name))
-                        .flatten()
-                        .ok_or(BuildErr::Unresolved)?;
-                    imports = imports.with_global(v);
-                }
-                // Imported memories and tables need shared-resource linking, which the
-                // engine does not do yet — skip rather than pretend.
-                _ => return Err(BuildErr::Unresolved),
-            }
-        }
-        Ok(imports)
+        // Imported memories and tables need shared-resource linking, which the engine does
+        // not do yet, and `LinkError` does not distinguish "unresolved" finely enough for
+        // the runner's skip accounting — so both collapse to `Unresolved`, exactly as
+        // before.
+        self.linker()
+            .resolve(&self.store, md)
+            .map_err(|_| BuildErr::Unresolved)
     }
 
     fn build(&mut self, form: &[Sexpr]) -> Result<InstanceId, BuildErr> {
