@@ -23,7 +23,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::module::{Code, FuncType, Module};
+use crate::features::{
+    op_feature, simd_sub_feature, table_element_feature, val_type_feature, Feature, Features,
+};
+use crate::module::{Code, CompType, FuncType, Module};
 use crate::opcode::{self, decode_body, HeapType, Imm, Instr, Op, RefType};
 use crate::reader::Reader;
 use crate::types::{DecodeError, RefHeap, ValType};
@@ -80,6 +83,9 @@ pub enum ValidateError {
     InvalidMemArgOffset,
     /// A typing arm not yet ported (SIMD / atomics / GC objects / EH). Loud by design.
     UnsupportedValidation,
+    /// The module uses a proposal this engine was configured to reject
+    /// ([`crate::features::Features`]). Carries the proposal so an embedder can say which.
+    FeatureDisabled(Feature),
 }
 
 impl From<DecodeError> for ValidateError {
@@ -92,6 +98,9 @@ impl fmt::Display for ValidateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ValidateError::Decode(e) => write!(f, "decode error during validation: {e}"),
+            ValidateError::FeatureDisabled(x) => {
+                write!(f, "invalid module: uses the disabled proposal `{x}`")
+            }
             other => write!(f, "invalid module: {other:?}"),
         }
     }
@@ -102,11 +111,27 @@ impl core::error::Error for ValidateError {}
 /// A validation result.
 pub type ValidateResult<T> = core::result::Result<T, ValidateError>;
 
-/// Validate an entire module. Returns on the first error.
+/// Validate an entire module against **every** proposal wasmrt implements.
+///
+/// Equivalent to [`validate_with_features`] with [`Features::all`] — the pre-T8 behaviour,
+/// and what the CLI, the `.wast` runner and the assembler's tests use.
 pub fn validate(module: &Module) -> ValidateResult<()> {
+    validate_with_features(module, &Features::all())
+}
+
+/// Validate an entire module, rejecting any proposal disabled in `features`. Returns on the
+/// first error.
+///
+/// Gating happens **here**, at validation, and never at execution: a module that names a
+/// disabled proposal is simply invalid, so nothing half-checked reaches the interpreter.
+/// With [`Features::all`] every gate below is a no-op, which is why enabling this cost the
+/// spec-suite numbers nothing.
+pub fn validate_with_features(module: &Module, features: &Features) -> ValidateResult<()> {
     if module.functions.len() != module.code.len() {
         return Err(ValidateError::CountMismatch);
     }
+
+    check_module_features(module, features)?;
 
     // C.refs (§3.4.10, "undeclared function reference"): a `ref.func x` inside a function
     // body is well-typed only if `x` also occurs outside the code section. Populate from
@@ -130,7 +155,7 @@ pub fn validate(module: &Module) -> ValidateResult<()> {
     for (i, init_expr) in module.global_inits.iter().enumerate() {
         let self_index = n_imported_globals + i as u32;
         let expected = module.globals[self_index as usize].content;
-        validate_const_expr(module, init_expr, expected, self_index, Some(&mut refs))?;
+        validate_const_expr(module, init_expr, expected, self_index, Some(&mut refs), features)?;
     }
 
     let all_globals = module.globals.len() as u32;
@@ -146,7 +171,14 @@ pub fn validate(module: &Module) -> ValidateResult<()> {
             }
         }
         for ex in &elem.exprs {
-            validate_const_expr(module, ex, elem.elem_type, n_imported_globals, Some(&mut refs))?;
+            validate_const_expr(
+                module,
+                ex,
+                elem.elem_type,
+                n_imported_globals,
+                Some(&mut refs),
+                features,
+            )?;
         }
         if elem.mode == crate::module::ElementMode::Active {
             let ti = elem.table_index as usize;
@@ -158,7 +190,7 @@ pub fn validate(module: &Module) -> ValidateResult<()> {
             if elem.elem_type.nullable() != tet.nullable() {
                 return Err(ValidateError::TypeMismatch);
             }
-            validate_const_expr(module, &elem.offset_expr, V::I32, all_globals, None)?;
+            validate_const_expr(module, &elem.offset_expr, V::I32, all_globals, None, features)?;
         }
     }
 
@@ -177,7 +209,7 @@ pub fn validate(module: &Module) -> ValidateResult<()> {
         } else {
             V::I32
         };
-        validate_const_expr(module, &seg.offset_expr, off_ty, all_globals, None)?;
+        validate_const_expr(module, &seg.offset_expr, off_ty, all_globals, None, features)?;
     }
 
     // Limits (§3.2.5): min <= max, each bounded by the type ceiling; a shared memory must
@@ -240,8 +272,119 @@ pub fn validate(module: &Module) -> ValidateResult<()> {
     // Function bodies last, so `refs` is complete before any body's C.refs check.
     for (&type_index, code) in module.functions.iter().zip(&module.code) {
         let ft = module.func_sig(type_index).ok_or(ValidateError::UndefinedType)?;
-        validate_function(module, &ft, code, Some(&refs))?;
+        validate_function(module, &ft, code, Some(&refs), features)?;
     }
+    Ok(())
+}
+
+/// Reject a value type whose proposal is disabled.
+fn gate_val_type(v: V, features: &Features) -> ValidateResult<()> {
+    gate(val_type_feature(v), features)
+}
+
+/// Reject `f` if it is `Some` and disabled. The single spelling of the gate, so every call
+/// site produces the same error.
+fn gate(f: Option<Feature>, features: &Features) -> ValidateResult<()> {
+    match f {
+        Some(x) if !features.has(x) => Err(ValidateError::FeatureDisabled(x)),
+        _ => Ok(()),
+    }
+}
+
+/// Every proposal a module names through its **declarations** — types, limits, segment
+/// modes — as opposed to its instructions (gated in [`FuncValidator::step`]).
+///
+/// Declarations are checked separately from instructions on purpose: a disabled proposal
+/// must not be reachable through a *type* while all its opcodes are refused. A module
+/// could otherwise declare a `v128` global, or an `(array …)` type, with SIMD or GC off.
+fn check_module_features(module: &Module, features: &Features) -> ValidateResult<()> {
+    if *features == Features::all() {
+        return Ok(()); // the default: nothing to gate, and no walk to pay for
+    }
+
+    // --- the type index space ---
+    for (i, ct) in module.comp_types.iter().enumerate() {
+        // A declared supertype is GC's `(sub …)` form.
+        if module.supertypes.get(i).copied().flatten().is_some() {
+            gate(Some(Feature::Gc), features)?;
+        }
+        match ct {
+            CompType::Func(ft) => {
+                if ft.results.len() > 1 {
+                    gate(Some(Feature::MultiValue), features)?;
+                }
+                for &t in ft.params.iter().chain(&ft.results) {
+                    gate_val_type(t, features)?;
+                }
+            }
+            CompType::Struct(fields) => {
+                gate(Some(Feature::Gc), features)?;
+                for f in fields {
+                    gate_val_type(f.storage.unpacked(), features)?;
+                }
+            }
+            CompType::Array(f) => {
+                gate(Some(Feature::Gc), features)?;
+                gate_val_type(f.storage.unpacked(), features)?;
+            }
+        }
+    }
+
+    // --- memories: count, index width, sharing ---
+    if module.memories.len() > 1 {
+        gate(Some(Feature::MultiMemory), features)?;
+    }
+    for mt in &module.memories {
+        if mt.limits.is64 {
+            gate(Some(Feature::Memory64), features)?;
+        }
+        if mt.limits.shared {
+            gate(Some(Feature::Threads), features)?;
+        }
+    }
+
+    // --- tables: a second table, or any element type other than `funcref` ---
+    if module.tables.len() > 1 {
+        gate(Some(Feature::ReferenceTypes), features)?;
+    }
+    for tt in &module.tables {
+        gate(table_element_feature(tt.element), features)?;
+    }
+
+    // --- globals ---
+    for g in &module.globals {
+        gate_val_type(g.content, features)?;
+    }
+
+    // --- tags (EH). Imported tags are counted through `imports` below. ---
+    if !module.tags.is_empty() {
+        gate(Some(Feature::Exceptions), features)?;
+    }
+    for imp in &module.imports {
+        if matches!(imp.ty, crate::module::Extern::Tag(_)) {
+            gate(Some(Feature::Exceptions), features)?;
+        }
+    }
+
+    // --- segments: a passive or declarative segment exists only to be named by a
+    // bulk-memory instruction, so the mode itself is the proposal. ---
+    for seg in &module.data {
+        if !seg.active {
+            gate(Some(Feature::BulkMemory), features)?;
+        }
+    }
+    for elem in &module.elements {
+        if elem.mode != crate::module::ElementMode::Active {
+            gate(Some(Feature::BulkMemory), features)?;
+        }
+        // The const-expr element form (`(elem (ref func) (item …))`) is reference-types;
+        // so is any element type other than plain `funcref`.
+        if !elem.exprs.is_empty() {
+            gate(Some(Feature::ReferenceTypes), features)?;
+        }
+        gate(table_element_feature(elem.elem_type), features)?;
+    }
+
     Ok(())
 }
 
@@ -254,6 +397,7 @@ fn validate_const_expr(
     expected: V,
     self_index: u32,
     mut refs: Option<&mut Vec<bool>>,
+    features: &Features,
 ) -> ValidateResult<()> {
     let mut r = Reader::new(expr);
     let mut stack: Vec<V> = Vec::new();
@@ -296,6 +440,7 @@ fn validate_const_expr(
             }
             0xd0 => {
                 // ref.null <heaptype>
+                gate(Some(Feature::ReferenceTypes), features)?;
                 let heap =
                     opcode::read_heap_type(&mut r).map_err(|_| ValidateError::ConstantExpressionRequired)?;
                 let vt = ref_type_val_type(
@@ -305,10 +450,12 @@ fn validate_const_expr(
                         heap,
                     },
                 )?;
+                gate_val_type(vt, features)?;
                 push(&mut stack, vt)?;
             }
             0xd2 => {
                 // ref.func x
+                gate(Some(Feature::ReferenceTypes), features)?;
                 let fi = r.read_var_u32()?;
                 if module.func_type(fi).is_none() {
                     return Err(ValidateError::UndefinedFunc);
@@ -326,6 +473,7 @@ fn validate_const_expr(
             }
             0x6a..=0x6c => {
                 // i32 add/sub/mul (extended-const)
+                gate(Some(Feature::ExtendedConst), features)?;
                 let n = stack.len();
                 if n < 2 || stack[n - 1] != V::I32 || stack[n - 2] != V::I32 {
                     return Err(ValidateError::TypeMismatch);
@@ -334,6 +482,7 @@ fn validate_const_expr(
             }
             0x7c..=0x7e => {
                 // i64 add/sub/mul (extended-const)
+                gate(Some(Feature::ExtendedConst), features)?;
                 let n = stack.len();
                 if n < 2 || stack[n - 1] != V::I64 || stack[n - 2] != V::I64 {
                     return Err(ValidateError::TypeMismatch);
@@ -345,6 +494,7 @@ fn validate_const_expr(
             // module with a `v128` global validated as invalid despite running correctly.
             // Nothing but `v128.const` is constant in the 0xfd family.
             0xfd => {
+                gate(Some(Feature::Simd), features)?;
                 if r.read_var_u32()? != 0x0c {
                     return Err(ValidateError::ConstantExpressionRequired);
                 }
@@ -369,6 +519,7 @@ fn validate_function(
     ft: &FuncType,
     code: &Code,
     refs: Option<&[bool]>,
+    features: &Features,
 ) -> ValidateResult<()> {
     // locals = parameters ++ declared locals (expanded from the run-length form). Sum first
     // (checked against the cap), then expand, so a huge run can't allocate first.
@@ -382,6 +533,9 @@ fn validate_function(
     let mut locals: Vec<V> = Vec::with_capacity(ft.params.len() + declared as usize);
     locals.extend_from_slice(&ft.params);
     for l in &code.locals {
+        // A declared local is a value-type position like any other: `(local v128)` needs
+        // SIMD even if the body never touches a vector instruction.
+        gate_val_type(l.ty, features)?;
         locals.resize(locals.len() + l.count as usize, l.ty);
     }
 
@@ -398,6 +552,7 @@ fn validate_function(
 
     let mut v = FuncValidator {
         module,
+        features,
         refs,
         locals: &locals,
         results: &ft.results,
@@ -449,6 +604,9 @@ struct Frame {
 
 struct FuncValidator<'a> {
     module: &'a Module,
+    /// The proposals this engine accepts. Consulted once per instruction in
+    /// [`FuncValidator::step`] via the `op_feature` table, so no arm can forget its gate.
+    features: &'a Features,
     refs: Option<&'a [bool]>,
     locals: &'a [V],
     results: &'a [V],
@@ -673,9 +831,19 @@ impl<'a> FuncValidator<'a> {
     fn block_sig(&self, bt: opcode::BlockType) -> ValidateResult<(Vec<V>, Vec<V>)> {
         match bt {
             opcode::BlockType::Empty => Ok((Vec::new(), Vec::new())),
-            opcode::BlockType::Value(t) => Ok((Vec::new(), vec![t])),
+            opcode::BlockType::Value(t) => {
+                gate_val_type(t, self.features)?;
+                Ok((Vec::new(), vec![t]))
+            }
             opcode::BlockType::TypeIndex(i) => {
                 let ft = self.module.func_sig(i).ok_or(ValidateError::UndefinedType)?;
+                // A block signature that takes parameters, or returns more than one value,
+                // is exactly what multi-value added — the single-valtype spelling above
+                // covers everything WebAssembly 1.0 can express. (The referenced type's
+                // own value types are gated with the type section.)
+                if !ft.params.is_empty() || ft.results.len() > 1 {
+                    gate(Some(Feature::MultiValue), self.features)?;
+                }
                 Ok((ft.params, ft.results))
             }
         }
@@ -684,6 +852,24 @@ impl<'a> FuncValidator<'a> {
     fn step(&mut self, instr: &Instr) -> ValidateResult<()> {
         if self.ctrls.is_empty() {
             return Err(ValidateError::ControlUnderflow); // code after the final `end`
+        }
+        // The proposal gate, applied once for every instruction from the one `op_feature`
+        // table — so an arm below cannot be added without inheriting its gate. The `0xFD`
+        // family needs the sub-opcode to tell plain SIMD from relaxed SIMD, so it refines
+        // the family-level answer.
+        if self.features != &Features::all() {
+            gate(op_feature(instr.op), self.features)?;
+            match &instr.imm {
+                Imm::Simd(s) => gate(Some(simd_sub_feature(s.sub)), self.features)?,
+                // A typed `select` names its result type outright, so `(select (result
+                // v128) …)` must answer to SIMD as well as to reference-types.
+                Imm::SelectTypes(ts) => {
+                    for &t in ts {
+                        gate_val_type(t, self.features)?;
+                    }
+                }
+                _ => {}
+            }
         }
         match instr.op {
             Op::Unreachable => self.set_unreachable(),
@@ -1037,6 +1223,10 @@ impl<'a> FuncValidator<'a> {
                         heap: expect_ref_type(&instr.imm)?,
                     },
                 )?;
+                // `ref.null` is the one non-GC instruction that names an arbitrary heap
+                // type, so `ref.null any` must answer to GC even though the opcode itself
+                // is reference-types.
+                gate_val_type(vt, self.features)?;
                 self.push_val_t(vt);
             }
             Op::RefIsNull => {
@@ -2323,6 +2513,166 @@ mod tests {
             check(&eh_mod(&body, &[])),
             Err(ValidateError::UnsupportedValidation)
         );
+    }
+
+    // ---- Proposal gating (T8) -------------------------------------------------------
+    //
+    // One vector per gateable proposal, each a module whose ONLY post-1.0 construct is
+    // that proposal. Each is checked twice: it must validate with `Features::all()` (so
+    // the vector is genuinely a valid module and the gate is what rejected it), and it
+    // must be refused **naming that exact proposal** with only that one flag cleared.
+    //
+    // A vector that failed for some unrelated reason would pass a one-sided
+    // "assert it errors" test while proving nothing — hence the positive half.
+
+    /// `(feature, a module using exactly that feature)`.
+    const GATE_VECTORS: &[(Feature, &str)] = &[
+        (
+            Feature::SignExtension,
+            "(module (func (result i32) i32.const 1 i32.extend8_s))",
+        ),
+        (
+            Feature::SaturatingFloatToInt,
+            "(module (func (result i32) f32.const 1 i32.trunc_sat_f32_s))",
+        ),
+        (
+            Feature::MultiValue,
+            "(module (func (result i32 i32) i32.const 1 i32.const 2))",
+        ),
+        (
+            Feature::ReferenceTypes,
+            "(module (func (result externref) ref.null extern))",
+        ),
+        (
+            Feature::BulkMemory,
+            "(module (memory 1) (func i32.const 0 i32.const 0 i32.const 0 memory.fill))",
+        ),
+        (
+            Feature::ExtendedConst,
+            "(module (global i32 (i32.add (i32.const 1) (i32.const 2))))",
+        ),
+        (
+            Feature::Simd,
+            "(module (func (result v128) v128.const i32x4 0 0 0 0))",
+        ),
+        (
+            Feature::RelaxedSimd,
+            "(module (func (param v128 v128) (result v128) \
+               local.get 0 local.get 1 i8x16.relaxed_swizzle))",
+        ),
+        (
+            Feature::Threads,
+            "(module (memory 1) (func (result i32) i32.const 0 i32.atomic.load))",
+        ),
+        (Feature::MultiMemory, "(module (memory 1) (memory 1))"),
+        (Feature::Memory64, "(module (memory i64 1))"),
+        (
+            Feature::FunctionReferences,
+            "(module (func (param funcref) local.get 0 ref.as_non_null drop))",
+        ),
+        (
+            Feature::Gc,
+            "(module (func (result i32) i32.const 1 ref.i31 i31.get_s))",
+        ),
+        (Feature::Exceptions, "(module (tag $e) (func throw $e))"),
+    ];
+
+    fn decode_wat(src: &str) -> Module {
+        let bin = crate::wat::assemble(src.as_bytes())
+            .unwrap_or_else(|e| panic!("assembling {src:?} failed: {e:?}"));
+        decode(&bin).unwrap_or_else(|e| panic!("decoding {src:?} failed: {e:?}"))
+    }
+
+    #[test]
+    fn every_gate_vector_is_valid_with_all_features_on() {
+        for (f, src) in GATE_VECTORS {
+            let md = decode_wat(src);
+            assert_eq!(
+                validate_with_features(&md, &Features::all()),
+                Ok(()),
+                "the {f} vector must be a VALID module, else its rejection proves nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_one_flag_rejects_exactly_that_proposal() {
+        for (f, src) in GATE_VECTORS {
+            let md = decode_wat(src);
+            let mut fs = Features::all();
+            fs.set(*f, false);
+            assert_eq!(
+                validate_with_features(&md, &fs),
+                Err(ValidateError::FeatureDisabled(*f)),
+                "with {f} off, {src:?} must be refused naming {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrelated_flag_does_not_reject() {
+        // Turning off SIMD must not disturb the sign-extension vector, and vice versa —
+        // the gate has to be specific, not a blanket "post-1.0 rejected".
+        let md = decode_wat("(module (func (result i32) i32.const 1 i32.extend8_s))");
+        let mut fs = Features::all();
+        fs.simd = false;
+        fs.relaxed_simd = false;
+        assert_eq!(validate_with_features(&md, &fs), Ok(()));
+    }
+
+    #[test]
+    fn plain_validate_still_accepts_every_proposal() {
+        // `validate` == `validate_with_features(.., all())`, so nothing pre-T8 changed.
+        for (_, src) in GATE_VECTORS {
+            assert_eq!(validate(&decode_wat(src)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_disabled_proposal_is_caught_through_a_type_not_just_an_opcode() {
+        // The subtle half: SIMD off must also refuse a module that merely *declares* a
+        // v128 — a local, a global, or a parameter — with no vector instruction anywhere.
+        // Gating only the 0xFD opcodes would let all three through.
+        let mut fs = Features::all();
+        fs.simd = false;
+        fs.relaxed_simd = false;
+        for src in [
+            "(module (func (local v128)))",
+            "(module (global (mut v128) (v128.const i32x4 0 0 0 0)))",
+            "(module (func (param v128)))",
+            "(module (type $t (func (result v128))))",
+        ] {
+            assert_eq!(
+                validate_with_features(&decode_wat(src), &fs),
+                Err(ValidateError::FeatureDisabled(Feature::Simd)),
+                "{src:?} declares a v128 and must be refused with SIMD off"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gc_type_definition_is_refused_with_gc_off() {
+        // Same shape for GC: a struct type in the type section, never instantiated.
+        let mut fs = Features::all();
+        fs.gc = false;
+        assert_eq!(
+            validate_with_features(
+                &decode_wat("(module (type $s (struct (field i32))))"),
+                &fs
+            ),
+            Err(ValidateError::FeatureDisabled(Feature::Gc))
+        );
+    }
+
+    #[test]
+    fn mvp_accepts_a_webassembly_1_0_module_and_refuses_the_rest() {
+        // The floor is usable: a plain 1.0 module still validates with everything off.
+        let md = decode_wat(
+            "(module (memory 1) (table 1 funcref) (global (mut i32) (i32.const 0))
+               (func (param i32 i32) (result i32) local.get 0 local.get 1 i32.add)
+               (func (result i32) i32.const 0 i32.load))",
+        );
+        assert_eq!(validate_with_features(&md, &Features::mvp()), Ok(()));
     }
 
     /// Minimal unsigned-LEB128 encoder for the test byte-builders.

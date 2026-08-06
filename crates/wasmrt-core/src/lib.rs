@@ -32,6 +32,7 @@ pub mod types;
 pub mod reader;
 pub mod module;
 pub mod opcode;
+pub mod features;
 pub mod validate;
 pub mod interp;
 pub mod sexpr;

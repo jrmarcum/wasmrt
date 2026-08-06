@@ -66,8 +66,11 @@ pub fn as_f64(v: Value) -> f64 {
     f64::from_bits(v as u64)
 }
 
-/// Cap on guest call depth (a `call` recurses natively, so this bounds host stack use).
-const MAX_CALL_DEPTH: usize = 512;
+/// Default cap on guest call depth (a `call` recurses natively, so this bounds host stack
+/// use). **512 matches the frozen oracle exactly** — do not change the default to work
+/// around the debug-build stack finding in `cmem/known-issues.md`; lower it per-store
+/// through [`ResourceLimits::max_call_depth`] instead.
+const DEFAULT_MAX_CALL_DEPTH: usize = 512;
 
 /// WebAssembly linear-memory page size (64 KiB).
 pub const PAGE_SIZE: usize = 64 * 1024;
@@ -95,14 +98,64 @@ pub const NULL_REF: Value = u64::MAX as Value;
 const I31_TAG: Value = 1 << 63;
 const _: () = assert!(I31_TAG == (1u128 << 63)); // i31 tag lives in the low 64 bits
 
-/// Cap on live GC objects per instance. There is no collector (a proposal-scope decision), so
-/// this backstop keeps a guest allocation loop from exhausting host memory.
-const MAX_GC_OBJECTS: usize = 1 << 24;
+/// Default cap on live GC objects per instance. There is no collector (a proposal-scope
+/// decision), so this backstop keeps a guest allocation loop from exhausting host memory.
+const DEFAULT_MAX_GC_OBJECTS: usize = 1 << 24;
 
-/// Cap on live boxed exceptions per instance. `catch_ref`/`catch_all_ref` box an exception so
-/// it can become an `exnref` value; like the GC heap there is no collector, so this backstop
-/// keeps a guest catch loop from exhausting host memory.
-const MAX_EXN_BOXES: usize = 1 << 20;
+/// Default cap on live boxed exceptions per instance. `catch_ref`/`catch_all_ref` box an
+/// exception so it can become an `exnref` value; like the GC heap there is no collector, so
+/// this backstop keeps a guest catch loop from exhausting host memory.
+const DEFAULT_MAX_EXN_BOXES: usize = 1 << 20;
+
+/// The resource ceilings a [`Store`] enforces on the guests it runs.
+///
+/// These were compile-time constants until T8. They are per-store configuration now because
+/// a C embedder has no other way to reach them — and because two of them are load-bearing
+/// for an embedder specifically:
+///
+/// - **`max_call_depth`** — the interpreter recurses on the *host* stack, so a debug build
+///   can overflow it before the 512-frame cap fires (`cmem/known-issues.md`). An embedder
+///   linking the debug `cdylib` is exposed to that; lowering this is the fix available to
+///   them without diverging the shipped default from the oracle.
+/// - **`max_memory_bytes`** — a guest that genuinely needs more than 1 GiB could not run at
+///   all before this was reachable.
+///
+/// Every field is a **ceiling, not a reservation**: raising one costs nothing until a guest
+/// actually asks for the memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Total linear-memory bytes an instance may hold, summed across its memories.
+    pub max_memory_bytes: usize,
+    /// Total table entries an instance may hold, summed across its tables.
+    pub max_table_elems: usize,
+    /// Maximum guest call depth before [`Trap::CallStackExhausted`].
+    pub max_call_depth: usize,
+    /// Maximum live GC objects before [`Trap::GcHeapExhausted`].
+    pub max_gc_objects: usize,
+    /// Maximum live boxed exceptions before [`Trap::ExnStoreExhausted`].
+    pub max_exn_boxes: usize,
+}
+
+impl ResourceLimits {
+    /// The shipped defaults — identical to the pre-T8 compile-time constants, so a store
+    /// built without configuration behaves exactly as it always has.
+    #[must_use]
+    pub const fn defaults() -> ResourceLimits {
+        ResourceLimits {
+            max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
+            max_table_elems: DEFAULT_MAX_TABLE_ELEMS,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            max_gc_objects: DEFAULT_MAX_GC_OBJECTS,
+            max_exn_boxes: DEFAULT_MAX_EXN_BOXES,
+        }
+    }
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        ResourceLimits::defaults()
+    }
+}
 
 /// A heap-allocated GC object: its declared type index (RTT) + its struct fields / array
 /// elements. One `Value` (128-bit) per field — enough for every field type incl. `v128`.
@@ -209,6 +262,10 @@ impl IndexMaps {
 /// The resource pools shared by every instance in a linking group.
 #[derive(Default)]
 struct Pools {
+    /// The ceilings this store enforces. Lives here rather than on [`Store`] because the
+    /// runtime threads `&mut Pools` down every execution path, so every site that has to
+    /// consult a limit already holds it.
+    limits: ResourceLimits,
     globals: Vec<Value>,
     memories: Vec<Memory>,
     tables: Vec<Table>,
@@ -595,7 +652,20 @@ impl Instance {
     /// [`Trap::MissingImport`] if a count does not match what the module declares, or
     /// [`Trap::UnsupportedImportKind`] for an imported memory/table (module linking, T7b).
     pub fn new_with_imports(module: Module, imports: Imports) -> Result<Instance> {
-        let mut store = Store::default();
+        Instance::new_with(module, imports, ResourceLimits::defaults())
+    }
+
+    /// Instantiate a decoded module with `imports`, under explicit resource ceilings.
+    ///
+    /// # Errors
+    /// As [`Instance::new_with_imports`], plus [`Trap::MemoryLimitExceeded`] /
+    /// [`Trap::TableLimitExceeded`] if the module's declared minimums exceed `limits`.
+    pub fn new_with(
+        module: Module,
+        imports: Imports,
+        limits: ResourceLimits,
+    ) -> Result<Instance> {
+        let mut store = Store::with_limits(limits);
         let id = store.instantiate(module, imports)?;
         Ok(Instance { store, id })
     }
@@ -626,10 +696,24 @@ impl Instance {
 }
 
 impl Store {
-    /// A store with no instances.
+    /// A store with no instances, using the default [`ResourceLimits`].
     #[must_use]
     pub fn new() -> Store {
         Store::default()
+    }
+
+    /// A store with no instances, enforcing `limits` on every guest it runs.
+    #[must_use]
+    pub fn with_limits(limits: ResourceLimits) -> Store {
+        let mut s = Store::default();
+        s.pools.limits = limits;
+        s
+    }
+
+    /// The ceilings this store enforces.
+    #[must_use]
+    pub fn limits(&self) -> ResourceLimits {
+        self.pools.limits
     }
 
     /// The module behind an instance.
@@ -703,7 +787,7 @@ impl Store {
                 .ok_or(Trap::MemoryLimitExceeded)?;
             total_bytes = total_bytes
                 .checked_add(nbytes)
-                .filter(|&t| t <= DEFAULT_MAX_MEMORY_BYTES)
+                .filter(|&t| t <= self.pools.limits.max_memory_bytes)
                 .ok_or(Trap::MemoryLimitExceeded)?;
             memories.push(Memory {
                 bytes: vec![0u8; nbytes],
@@ -739,7 +823,7 @@ impl Store {
             let min = usize::try_from(tt.limits.min).map_err(|_| Trap::TableLimitExceeded)?;
             total_elems = total_elems
                 .checked_add(min)
-                .filter(|&t| t <= DEFAULT_MAX_TABLE_ELEMS)
+                .filter(|&t| t <= self.pools.limits.max_table_elems)
                 .ok_or(Trap::TableLimitExceeded)?;
             tables.push(Table {
                 entries: vec![NULL_REF; min],
@@ -1132,7 +1216,7 @@ impl Frame<'_> {
                     }
                     if matches!(c.kind, CatchKind::CatchRef | CatchKind::CatchAllRef) {
                         let ei = store.exn_store.len();
-                        if ei >= MAX_EXN_BOXES {
+                        if ei >= store.limits.max_exn_boxes {
                             return Err(Trap::ExnStoreExhausted);
                         }
                         store.exn_store.push(exn.clone());
@@ -1258,7 +1342,7 @@ fn call_function(
     args: &[Value],
     depth: usize,
 ) -> Result<Vec<Value>> {
-    if depth > MAX_CALL_DEPTH {
+    if depth > store.limits.max_call_depth {
         return Err(Trap::CallStackExhausted);
     }
     let data = code.get(inst).ok_or(Trap::UndefinedFunc)?;
@@ -1772,12 +1856,12 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 let ti = ctx.maps.table(table_imm(instr)?);
                 let delta = frame.pop_i32() as u32 as usize;
                 let init = frame.pop();
+                // Read the ceiling before borrowing the table: `limits` and `tables` are
+                // sibling fields, so taking `&mut` on one would block reading the other.
+                let ceiling = store.limits.max_table_elems;
                 let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
                 let old = table.entries.len();
-                let limit = table
-                    .max
-                    .map_or(DEFAULT_MAX_TABLE_ELEMS, |m| m as usize)
-                    .min(DEFAULT_MAX_TABLE_ELEMS);
+                let limit = table.max.map_or(ceiling, |m| m as usize).min(ceiling);
                 match old.checked_add(delta).filter(|&n| n <= limit) {
                     Some(new_len) => {
                         table.entries.resize(new_len, init);
@@ -2310,6 +2394,7 @@ fn memory_grow(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &I
     let mi = maps.mem(mi);
     let is64 = store.memories.get(mi).ok_or(Trap::NoMemory)?.is64;
     let delta = frame.pop_mem(is64);
+    let byte_ceiling = store.limits.max_memory_bytes; // read before the &mut borrow below
     let mem = &mut store.memories[mi];
     let old_pages = (mem.bytes.len() / PAGE_SIZE) as u64;
     let cap: u64 = if is64 { 0x1_0000_0000_0000 } else { 65536 };
@@ -2319,7 +2404,7 @@ fn memory_grow(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &I
         .filter(|&p| p <= limit)
         .and_then(|p| usize::try_from(p).ok())
         .and_then(|p| p.checked_mul(PAGE_SIZE))
-        .filter(|&n| n <= DEFAULT_MAX_MEMORY_BYTES);
+        .filter(|&n| n <= byte_ceiling);
     match target {
         Some(nbytes) => {
             mem.bytes.resize(nbytes, 0);
@@ -2461,7 +2546,7 @@ fn gc_object_index(store: &Pools, r: Value) -> Result<usize> {
 /// Allocate a GC object, returning its reference value (its heap index).
 fn alloc_object(store: &mut Pools, type_index: u32, fields: Vec<Value>) -> Result<Value> {
     let idx = store.gc_heap.len();
-    if idx >= MAX_GC_OBJECTS {
+    if idx >= store.limits.max_gc_objects {
         return Err(Trap::GcHeapExhausted);
     }
     store.gc_heap.push(HeapObject { type_index, fields });
@@ -5772,6 +5857,143 @@ mod tests {
             )
             .unwrap();
         assert_eq!(as_i32(store.invoke(a, "pong", &[]).unwrap()[0]), 1);
+    }
+
+    // ---- Configurable resource limits (T8) ------------------------------------------
+    //
+    // Each of these was a compile-time constant before T8. The tests lower a ceiling and
+    // show the *documented trap* appears — a limit that could not be observed to bite
+    // would be configuration theatre.
+
+    fn wat_module(src: &str) -> Module {
+        decode(&crate::wat::assemble(src.as_bytes()).expect("assemble")).expect("decode")
+    }
+
+    #[test]
+    fn lowering_the_call_depth_makes_recursion_trap_sooner() {
+        // Self-recursive with no base case: traps either way. What the limit changes is
+        // *when* — so the test pins that a shallow ceiling still yields the same trap
+        // rather than exhausting the host stack.
+        let md = wat_module(
+            r#"(module (func $f (export "go") (result i32) (call $f)) )"#,
+        );
+        let mut inst = Instance::new_with(
+            md,
+            Imports::new(),
+            ResourceLimits {
+                max_call_depth: 8,
+                ..ResourceLimits::defaults()
+            },
+        )
+        .unwrap();
+        assert_eq!(inst.invoke("go", &[]), Err(Trap::CallStackExhausted));
+    }
+
+    #[test]
+    fn the_default_call_depth_still_matches_the_frozen_oracle() {
+        // 512 is oracle parity and must not drift just because it became configurable.
+        assert_eq!(ResourceLimits::defaults().max_call_depth, 512);
+        assert_eq!(Store::new().limits(), ResourceLimits::defaults());
+    }
+
+    #[test]
+    fn a_lowered_memory_ceiling_refuses_instantiation() {
+        // 4 pages = 256 KiB declared, against a 128 KiB ceiling.
+        let md = wat_module("(module (memory 4))");
+        assert_eq!(
+            Instance::new_with(
+                md,
+                Imports::new(),
+                ResourceLimits {
+                    max_memory_bytes: 2 * PAGE_SIZE,
+                    ..ResourceLimits::defaults()
+                }
+            )
+            .err(),
+            Some(Trap::MemoryLimitExceeded)
+        );
+        // The same module is fine under the default ceiling.
+        assert!(Instance::new(wat_module("(module (memory 4))")).is_ok());
+    }
+
+    #[test]
+    fn a_lowered_memory_ceiling_also_refuses_growth() {
+        // The ceiling has to hold at `memory.grow` too, not just at instantiation —
+        // otherwise a guest declaring 1 page could grow straight past it.
+        let md = wat_module(
+            r#"(module (memory 1) (func (export "g") (result i32)
+                 (memory.grow (i32.const 4))))"#,
+        );
+        let mut inst = Instance::new_with(
+            md,
+            Imports::new(),
+            ResourceLimits {
+                max_memory_bytes: 2 * PAGE_SIZE,
+                ..ResourceLimits::defaults()
+            },
+        )
+        .unwrap();
+        // `memory.grow` reports refusal as -1; it does not trap.
+        assert_eq!(as_i32(inst.invoke("g", &[]).unwrap()[0]), -1);
+    }
+
+    #[test]
+    fn a_lowered_gc_object_ceiling_exhausts_the_heap() {
+        let md = wat_module(
+            r#"(module (type $s (struct (field i32)))
+                 (func (export "alloc") (param i32)
+                   (local $i i32)
+                   (loop $l
+                     (drop (struct.new $s (i32.const 1)))
+                     (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                     (br_if $l (i32.lt_s (local.get $i) (local.get 0))))))"#,
+        );
+        let mut inst = Instance::new_with(
+            md,
+            Imports::new(),
+            ResourceLimits {
+                max_gc_objects: 4,
+                ..ResourceLimits::defaults()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            inst.invoke("alloc", &[i32_value(100)]),
+            Err(Trap::GcHeapExhausted)
+        );
+    }
+
+    #[test]
+    fn a_lowered_table_ceiling_refuses_instantiation() {
+        let md = wat_module("(module (table 100 funcref))");
+        assert_eq!(
+            Instance::new_with(
+                md,
+                Imports::new(),
+                ResourceLimits {
+                    max_table_elems: 10,
+                    ..ResourceLimits::defaults()
+                }
+            )
+            .err(),
+            Some(Trap::TableLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn raising_a_ceiling_lets_a_bigger_guest_run() {
+        // The point of making these reachable: a guest that needs more than the shipped
+        // default can now be run at all, instead of being refused by a constant.
+        let md = wat_module("(module (table 100 funcref))");
+        assert!(Instance::new_with(
+            md,
+            Imports::new(),
+            ResourceLimits {
+                max_table_elems: 1000,
+                ..ResourceLimits::defaults()
+            }
+        )
+        .is_ok());
     }
 
     fn write_uleb(out: &mut Vec<u8>, mut v: u32) {
