@@ -29,7 +29,7 @@ Gating happens at **validation**, never at execution (`validate_with_features`),
 can never be half-checked. `ResourceLimits` lives on `Pools`, which the runtime already threads down
 every execution path, so every site that must consult a ceiling already holds one.
 
-**Realized so far (through T7 / v0.8.0):** the workspace + all three crates exist; `wasmrt-core`
+**Realized before T8 (through T7 / v0.8.0):** the workspace + all three crates exist; `wasmrt-core`
 has `types`, `reader`, `opcode`, `module` (decode), `validate` (core-language type-checker), and `interp`
 (switch interpreter — integer + float compute + linear memory incl. **multi-memory** and **memory64** +
 tables/`call_indirect`/reference types + **WasmGC** structs/arrays/`i31`/casts over a `Store`-owned GC heap +

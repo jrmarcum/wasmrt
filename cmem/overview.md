@@ -23,7 +23,7 @@ The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the 
 released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
 **memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
 
-**Done — T0–T8 (v0.1.0 → v0.9.0):**
+**Done — T0–T8, all PUBLISHED (v0.1.0 → v0.9.0; latest release commit `a7abd83`, tag `v0.9.0`):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
   surfaces (native CLI, staticlib, cdylib, freestanding `wasm32`).
 - **T1 (v0.2.0)** — `types` (ValType u32 newtype + RefHeap/subtyping, SectionId, DecodeError) + `reader`

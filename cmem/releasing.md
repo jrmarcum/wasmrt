@@ -116,16 +116,21 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
 
 ## Status (2026-08-06)
 
-- **🚀 v0.9.0 is PREPARED and AWAITING PUBLISH (2026-08-06).** T8 — the **`wasmrt.h` C ABI** — is done
-  with all three gates green (`abi_symbols.c` 74/74, `c_smoke.c` compiled by a C compiler against the
-  shipped header, and Miri over a randomized lifecycle fuzz). Also ships **proposal gating** +
-  **configurable resource ceilings**, a **`Linker` in core**, and two **silent-wrong-output** fixes
-  (dropped table initializers; element-segment form 4 rewriting a segment's type). Conformance
-  **61,033 / 738 / 3,075 — 98.8%**; 351 workspace tests. Version bumped, `ROADMAP.md`/`CHANGELOG.md`/
-  `README.md` and the full `cmem/` sync all committed **before** this handoff, per the 🔒 rule below.
+- **✅ v0.9.0 PUBLISHED and pushed (2026-08-06, release commit `a7abd83`, tag `v0.9.0`) — no release is
+  pending.** T8 — the **`wasmrt.h` C ABI** — shipped with all three gates green (`abi_symbols.c` 74/74,
+  `c_smoke.c` compiled by a C compiler against the shipped header, and Miri over a randomized lifecycle
+  fuzz). Also ships **proposal gating** + **configurable resource ceilings**, a **`Linker` in core**, and
+  two **silent-wrong-output** fixes (dropped table initializers; element-segment form 4 rewriting a
+  segment's type). Conformance **61,033 / 738 / 3,075 — 98.8%**; 351 workspace tests.
   **`abi_version()` is now 1** (was 0) — the C ABI is finalized, and `WASMRT_ABI_VERSION` in the header
   must stay equal to it (a test pins the pair).
-- **Next release after v0.9.0: T9 — licensing, docs, size minimization, all gates green** (0.10.0).
+- **Published through v0.9.0.** `wasmrt`, `wasmrt-core` and `wasmrt-capi` are live on crates.io through
+  v0.9.0. The tag fired `.github/workflows/release.yml` for the GitHub release, as it has since v0.6.4.
+- **The pre-publish doc-sync gate held again:** the version bump, `ROADMAP.md`/`CHANGELOG.md`/`README.md`
+  and the **full** `cmem/` sync were all in the release commit `a7abd83` itself, so the published
+  artifact carries its own docs. Nine `cmem/` files plus `tests/README.md` were touched, and the v0
+  header draft in `docs/port/` was marked HISTORICAL rather than left to mislead.
+- **Next release: T9 — licensing, docs, size minimization, all gates green** (0.10.0).
 
 ### Previous
 
@@ -134,12 +139,11 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
   filesystem** with `--dir`/`--ro-dir` — plus the **safety pass** (`#![forbid(unsafe_code)]` in core and
   the CLI) and the **literal/text edges**. Spec-suite conformance at release: **98.8%** (61,013 passing /
   751 failing / 3,094 skipped) and **all 284 files parse for the first time**. 281 workspace tests.
-- **Published through v0.8.0.** `wasmrt`, `wasmrt-core`, `wasmrt-capi` are live on
-  crates.io through v0.8.0 (T0 v0.1.0 → T3 v0.4.0 →
+- **The full release chain** (T0 v0.1.0 → T3 v0.4.0 →
   T4-core v0.5.0 → T5 integer v0.6.0 → float v0.6.1 → linear memory v0.6.2 → tables/reftypes v0.6.3 →
   WasmGC v0.6.4 → SIMD v0.6.5 → multi-memory v0.6.6 → threads/atomics v0.6.7 → memory64 v0.6.8 →
-  exception handling v0.6.9 → text toolchain + validator completion v0.7.0 → **WASI p1 + host imports +
-  module linking v0.8.0**). The owner
+  exception handling v0.6.9 → text toolchain + validator completion v0.7.0 → WASI p1 + host imports +
+  module linking v0.8.0 → **the `wasmrt.h` C ABI v0.9.0**). The owner
   runs each publish; the rhythm (implement →
   **full-doc prep** → owner publishes) holds. **v0.6.4 onward run under the pre-publish doc-sync gate, and
   each v0.6.4+ GitHub release was created automatically by the tag-triggered `.github/workflows/release.yml`**

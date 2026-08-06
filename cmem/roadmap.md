@@ -2,7 +2,8 @@
 
 ## Status (2026-08-06) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE.**
 
-**T8 (the `wasmrt.h` C ABI) landed 2026-08-06 as v0.9.0**, with all three of its gates green —
+**T8 (the `wasmrt.h` C ABI) landed 2026-08-06 as v0.9.0 — PUBLISHED** (release commit `a7abd83`, tag
+`v0.9.0`), with all three of its gates green —
 `abi_symbols.c` (74/74 symbols), `c_smoke.c` (compiled by a C compiler against the shipped header), and
 **Miri** over a randomized lifecycle fuzz. wasmrt is now embeddable from C. The release also added
 **proposal gating** and **configurable resource ceilings** (the owner chose real gating over

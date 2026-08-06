@@ -45,9 +45,43 @@ parity testing at every step.
 
 | Crate | What it is | Install |
 | --- | --- | --- |
-| `wasmrt` | the command-line runtime | `cargo install wasmrt` _(from 0.1.0)_ |
-| `wasmrt-core` | the runtime as a Rust library (`no_std`-friendly) | `wasmrt-core = "0.1"` |
-| `wasmrt-capi` | the C ABI (`wasmrt.h`) as a `cdylib` / `staticlib` | build from source |
+| `wasmrt` | the command-line runtime | `cargo install wasmrt` |
+| `wasmrt-core` | the runtime as a Rust library (`no_std`-friendly) | `wasmrt-core = "0.9"` |
+| `wasmrt-capi` | the C ABI ([`wasmrt.h`](crates/wasmrt-capi/include/wasmrt.h)) as a `cdylib` / `staticlib` | build from source |
+
+## Embedding from C
+
+`cargo build -p wasmrt-capi --release` produces a `staticlib` and a `cdylib`; the header is
+[`crates/wasmrt-capi/include/wasmrt.h`](crates/wasmrt-capi/include/wasmrt.h).
+
+```c
+wasmrt_engine_t *engine = wasmrt_engine_new();
+wasmrt_store_t  *store  = wasmrt_store_new(engine);
+wasmrt_linker_t *linker = wasmrt_linker_new(engine);
+
+wasmrt_module_t *module = NULL;
+wasmrt_error_t  *err = wasmrt_module_new(engine, bytes, len, &module);   /* NULL == success */
+
+wasmrt_instance_t inst;  wasmrt_trap_t *trap = NULL;
+wasmrt_linker_instantiate(linker, store, module, &inst, &trap);
+
+wasmrt_func_t add;
+wasmrt_instance_get_func(store, inst, "add", &add);
+wasmrt_val_t args[2] = {{WASMRT_I32, {.i32 = 40}}, {WASMRT_I32, {.i32 = 2}}};
+wasmrt_val_t result;
+wasmrt_func_call(store, add, args, 2, &result, 1, &trap);                /* result.of.i32 == 42 */
+```
+
+Three things worth knowing before you write against it:
+
+- **A trap is not an error.** A host-side error (bad handle, wrong arity) comes back as a
+  `wasmrt_error_t *`; a *guest* trap arrives through the `trap_out` parameter. A call can return `NULL`
+  and still have trapped — check both.
+- **Handles are checked, not trusted.** `wasmrt_func_t` and friends are small copyable values you never
+  free. Each knows which store issued it, so one used with the wrong store is refused rather than
+  quietly naming a different function.
+- **`wasmrt_memory_data()` is invalidated** by anything that can grow memory or re-enter the guest.
+  Re-fetch it after each call, or use the bounds-checked `wasmrt_memory_read`/`_write` instead.
 
 ## Building from source
 
@@ -55,6 +89,9 @@ parity testing at every step.
 cargo build --workspace          # native: CLI + static lib + cdylib
 cargo test  --workspace
 cargo build -p wasmrt-core --no-default-features --target wasm32-unknown-unknown  # freestanding
+
+scripts/c-gate.sh                # compile + run the C-ABI gates against the shipped header
+scripts/miri-gate.sh             # the C ABI under Miri (needs: rustup component add miri)
 ```
 
 On Windows, use the `x86_64-pc-windows-gnullvm` toolchain host (LLVM-MinGW + UCRT — libc-free, no MSVC).
