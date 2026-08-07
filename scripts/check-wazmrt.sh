@@ -74,20 +74,64 @@ echo "   feature with no wazmrt oracle is the tail-call proposal: return_call/re
 test_green=0
 if [ "$RUN_TEST" -eq 1 ]; then
   echo "=== zig build test (in $WAZ) ==="
-  if ( cd "$WAZ" && zig build test ) 2>&1 | tail -20; then
+  # NOTE (fixed 2026-08-06): this used to be
+  #     if ( cd "$WAZ" && zig build test ) 2>&1 | tail -20; then
+  # which tests the exit status of the PIPELINE — i.e. of `tail`, which always succeeds.
+  # `test_green=1` was therefore set no matter what the oracle build did, and the monitor
+  # reported "tests: GREEN" while printing `error: Unexpected` right above it. A gate that
+  # cannot fail is decoration (the standard this repo sets in tests/README.md), and this one
+  # underwrites every parity claim in the port. Capture to a file, check the REAL status,
+  # then show the tail.
+  test_log=$(mktemp)
+  if ( cd "$WAZ" && zig build test ) >"$test_log" 2>&1; then
+    tail -20 "$test_log"
     echo "tests: GREEN"; test_green=1
   else
-    echo "tests: FAILED (or build error) — gate stays closed"
+    status=$?
+    # A corrupt local `.zig-cache` throws a spurious `error: Unexpected` before anything is
+    # compiled — a known false alarm, not oracle drift. Retry ONCE against a throwaway cache
+    # to tell the two apart. The retry is reported explicitly: it must never look like a
+    # plain pass, because "it only builds with a fresh cache" is itself worth knowing.
+    if grep -q "error: Unexpected" "$test_log"; then
+      echo "  (build failed before compiling — retrying with a throwaway cache dir)"
+      fresh=$(mktemp -d)
+      if ( cd "$WAZ" && zig build test --cache-dir "$fresh" ) >"$test_log" 2>&1; then
+        tail -20 "$test_log"
+        echo "tests: GREEN (only with a fresh cache — the local $WAZ/.zig-cache is corrupt)"
+        echo "  The ORACLE is fine; clear that cache to stop this recurring."
+        test_green=1
+      else
+        status=$?
+        tail -30 "$test_log"
+        echo "tests: FAILED (exit $status, fresh cache) — a real oracle failure, not the cache"
+      fi
+      rm -rf "$fresh"
+    else
+      tail -30 "$test_log"
+      echo "tests: FAILED (exit $status) — parity claims measured against this oracle are untrustworthy"
+    fi
   fi
+  rm -f "$test_log"
 else
   echo "tests: skipped (--no-test)"
 fi
 
+# The verdict speaks in DRIFT terms, matching this script's post-freeze role. It used to
+# say "the gate may open" / "GATE STAYS CLOSED", which was the pre-2026-07-27 framing and
+# directly contradicted the header above once the gate opened and the port began.
 echo "=== verdict ==="
 if [ "$changed" -eq 0 ] && [ "$test_green" -eq 1 ]; then
-  echo "FREEZE CANDIDATE: unchanged since baseline AND tests green. Re-confirm scope, then the gate may open."
+  echo "NO DRIFT: oracle unchanged since the frozen baseline AND its tests are green."
+  echo "  The port may proceed against it as-is."
   exit 0
+elif [ "$changed" -ne 0 ]; then
+  echo "DRIFT DETECTED: the frozen oracle has MOVED since the baseline."
+  echo "  Do NOT silently chase HEAD mid-port. Review the new wazmrt commits, decide whether"
+  echo "  the port must follow, then re-baseline deliberately (--rebaseline)."
+  exit 1
 else
-  echo "GATE STAYS CLOSED: wazmrt still changing and/or tests not confirmed green."
+  echo "ORACLE TESTS NOT GREEN: unchanged since baseline, but 'zig build test' did not pass here."
+  echo "  Parity claims measured against it are untrustworthy until this is explained."
+  echo "  (Known cause: a corrupt local .zig-cache — retry with --cache-dir <fresh>.)"
   exit 1
 fi

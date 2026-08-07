@@ -9,10 +9,12 @@
 //! pre-decoded IR — Option A, not a JIT). Text toolchain (sexpr/wat/wast) + WASI p1.
 //!
 //! The module tree below mirrors `wazmrt/src/` so each unit can be oracle-diffed against
-//! its Zig counterpart. Modules are populated **bottom-up, parity-gated** per
+//! its Zig counterpart. Modules were populated **bottom-up, parity-gated** per
 //! `cmem/roadmap.md` (T1 types+reader → T2 opcode → T3 decode → T4 validate → T5 interp →
-//! T6 text → T7 wasi). This file is the T0 scaffold: the crate compiles empty on every
-//! target surface.
+//! T6 text → T7 wasi → T8 features+linker, for the C ABI).
+//!
+//! **Complete as of T8 / v0.9.0 except [`pin`]**, which is still a stub — so a wasmrt build
+//! performs no module-authenticity check (T9; see `cmem/security-model.md`).
 #![cfg_attr(not(feature = "std"), no_std)]
 // **The safety directive, made mechanical** (owner, 2026-08-05; `cmem/design-decisions.md`).
 // The oracle is Zig and leans on raw pointers, manual lifetimes and an arena; none of that

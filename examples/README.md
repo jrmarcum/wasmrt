@@ -2,11 +2,18 @@
 
 Example guests + host-FFI demos for wasmrt — the Rust ports of wazmrt's `examples/`.
 
-**Status: PREP placeholder.** No example files yet — the port gate is closed
-(see `../cmem/roadmap.md`). This README lists what to port so coverage matches
-the oracle. Most are compiled `wasm32-wasi` guests run *through* wasmrt (they are
-compiler output, so they carry over unchanged); the FFI demo is re-pointed at
-`wasmrt.h`.
+**Status (2026-08-06): still no example files — and every blocker is gone.** The
+port gate opened 2026-07-27 and T0–T8 are done: wasmrt runs WASI preview 1 with a
+sandboxed filesystem (v0.8.0) and ships a finalized C ABI (v0.9.0), so **every
+item below is now buildable**. This is a real gap, not a placeholder.
+
+Note the coverage that already exists elsewhere, so effort is not duplicated: the
+**wasmtk WASI corpus** (376 modules, run end-to-end against the oracle) and the
+**vendored spec testsuite** cover the guest side, and `../tests/c_smoke.c` already
+drives the C ABI from C. What is genuinely missing here is the **embedder-facing
+demo** — the "drop-in engine for the loaders" acceptance case.
+
+Most guests below are toolchain output, so they carry over unchanged.
 
 ## Guests to carry over (from wazmrt `examples/`)
 
@@ -29,7 +36,15 @@ by the `wasi-gate` conformance test (see `../tests/`).
 - `deno_ffi.mjs` (port of wazmrt's) — `Deno.dlopen` the wasmrt **cdylib** and
   drive **`wasmrt.h`** (engine → module → linker/instantiate → call → read
   result) on `(func (export "answer") (result i32) (i32.const 42))` → `42`. This
-  is the concrete "drop-in engine for the loaders" acceptance demo. Depends on the
-  finalized `wasmrt.h` (held for review — see `../docs/port/wasmrt.h.draft`).
+  is the concrete "drop-in engine for the loaders" acceptance demo.
+
+  **✅ UNBLOCKED — the header was finalized and shipped at T8 / v0.9.0**:
+  [`../crates/wasmrt-capi/include/wasmrt.h`](../crates/wasmrt-capi/include/wasmrt.h).
+  *(`../docs/port/wasmrt.h.draft` is marked HISTORICAL — do not write against it;
+  four things in it never matched the shipped surface.)* Two contract points a
+  `dlopen`-style consumer must respect: check `wasmrt_abi_version()` against the
+  header's `WASMRT_ABI_VERSION` at load time, and treat a **guest trap** (the
+  `trap_out` parameter) as distinct from a **host-side error** (the returned
+  `wasmrt_error_t *`) — a call can return NULL and still have trapped.
 
 Reference originals: `../../wazmrt/examples/`.

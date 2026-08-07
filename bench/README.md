@@ -2,9 +2,16 @@
 
 Interpreter microbenchmark for wasmrt — the Rust port of wazmrt's `bench/bench.zig`.
 
-**Status: PREP placeholder.** No `bench.rs` yet — the port gate is closed
-(see `../cmem/roadmap.md`). This README fixes the intended shape so the bench is
-built to the same methodology when the runtime lands.
+**Status (2026-08-06): still no `bench.rs` — and the runtime has been ready for one
+since v0.6.x.** The port gate opened 2026-07-27 and T0–T8 are done, so this is now
+a real gap rather than a placeholder: **the "fast" axis is one of wasmrt's three
+stated success criteria (`../cmem/vision.md`) and it has never been measured.**
+
+Writing it is **T9c** (`../cmem/roadmap.md`). Until then:
+
+> ⚠️ **Do not quote wazmrt's numbers as wasmrt's.** The figures below are the
+> *oracle's*, kept here as the methodology and the target to beat. Inheriting the
+> interpreter's shape does not inherit its measurements.
 
 ## What it measures (from wazmrt `cmem/vision.md` + `docs/port/06`)
 
@@ -25,7 +32,9 @@ Two regimes, reported separately — never conflated:
   throughput across days (run-to-run spread ~8%).
 - The cross-process cold-start-vs-Deno numbers are recorded in `cmem/testing.md`.
 - Canonical workload: `sum(n)` over a tight `loop`/`br_if` (see wazmrt bench).
-- Later: also measure SHA-256 (pin verify) and per-artifact **binary size**
-  (criterion (c) — smaller than wasm3/WAMR).
+- Later: also measure SHA-256 (pin verify — `pin` is still a stub, T9e) and
+  per-artifact **binary size** (criterion (c) — smaller than wasm3/WAMR). Size is
+  **T9b** and is likewise unmeasured; both feed **T11**, the optimization review,
+  which cannot start without these baselines.
 
 Reference original: `../../wazmrt/bench/bench.zig`.

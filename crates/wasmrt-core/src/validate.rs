@@ -14,8 +14,12 @@
 //! routing is unimplementable against the interpreter — see the arm) and any atomic
 //! sub-opcode outside the defined set. Both reject loudly
 //! ([`ValidateError::UnsupportedValidation`]) — never silent-accept — so "the validator
-//! accepted it" stays a trustworthy promise. Full conformance (`assert_invalid` /
-//! `assert_malformed` across the spec suite) is the T6 gate.
+//! accepted it" stays a trustworthy promise.
+//!
+//! **Proposal gating (T8):** [`validate_with_features`] additionally refuses any construct
+//! whose proposal the engine was configured to reject ([`crate::features::Features`]).
+//! Gating happens *here*, at validation, never at execution, so nothing part-way checked
+//! reaches the interpreter. Plain [`validate`] enables everything and is unaffected.
 //!
 //! `validate` does not mutate the module; it decodes each body to IR and type-checks it.
 
@@ -81,7 +85,17 @@ pub enum ValidateError {
     InvalidAlignment,
     MissingMemory,
     InvalidMemArgOffset,
-    /// A typing arm not yet ported (SIMD / atomics / GC objects / EH). Loud by design.
+    /// A construct the validator refuses to type-check. Loud by design — never a silent
+    /// accept, so "the validator accepted it" stays a trustworthy promise.
+    ///
+    /// It no longer means "not yet ported": the SIMD / atomics / GC / EH arms it originally
+    /// covered all landed in v0.7.0. Today it has exactly two uses:
+    ///
+    /// 1. **A deliberate refusal** — `delegate`, whose label routing the interpreter cannot
+    ///    execute correctly and which the frozen oracle also rejects.
+    /// 2. **An immediate-shape guard** — the decoder produced an immediate this opcode can
+    ///    never carry (`let Imm::BrTable(..) = … else`). Unreachable through
+    ///    [`decode_body`], and refused rather than assumed away.
     UnsupportedValidation,
     /// The module uses a proposal this engine was configured to reject
     /// ([`crate::features::Features`]). Carries the proposal so an embedder can say which.

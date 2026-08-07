@@ -6,6 +6,37 @@ wazmrt oracle, the **port notes /
 intentional divergences**, and the **four deferred decisions (all now RESOLVED)**. Log real wasmrt bugs here
 (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
+## ✅ Fixed 2026-08-06 — the oracle monitor's test check could not fail
+
+Found by a consistency sweep, not by a test. `scripts/check-wazmrt.sh` ran:
+
+```bash
+if ( cd "$WAZ" && zig build test ) 2>&1 | tail -20; then
+    echo "tests: GREEN"; test_green=1
+```
+
+`if` tests the exit status of the **pipeline**, which in bash is the status of the **last**
+command — `tail`, which always succeeds. (`set -u` is on; `pipefail` is not.) So `test_green=1`
+was set **regardless of what the oracle build did**, and the script printed `error: Unexpected`
+immediately above `tests: GREEN` without contradiction.
+
+**Why this one matters more than its size.** The monitor underwrites *every* parity claim in the
+port — "parity-gated at each step" means gated by this. **A gate that cannot fail is decoration**
+(the standard `tests/README.md` sets), and this one had been decoration for as long as the pipe
+had been there.
+
+**The oracle itself is fine.** Once the check was honest it reported FAILED, and a run with a
+throwaway cache dir passed cleanly (exit 0) — so the failure was purely the known corrupt local
+`.zig-cache`, which throws `error: Unexpected` *before compiling anything*. The script now
+captures output to a file and tests the **real** status, and on that specific signature retries
+once against a fresh cache, reporting the retry explicitly rather than as a plain pass:
+"it only builds with a fresh cache" is itself worth knowing.
+
+The verdict text was stale in the same pass — it still said *"FREEZE CANDIDATE … the gate may
+open"* / *"GATE STAYS CLOSED"*, the pre-freeze framing, contradicting the script's own header,
+which has said since 2026-07-27 that its role **inverted** to drift detection. It now speaks in
+drift terms and distinguishes *drift* from *oracle tests not green*.
+
 ## 🔴 OPEN — found by the T9 scoping audit (2026-08-06). Two new defects.
 
 Both were found while *measuring* the residual for the T9 punch list rather than by any test, which is

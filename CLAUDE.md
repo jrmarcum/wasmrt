@@ -16,6 +16,16 @@ green under Debug AND ReleaseSafe). The oracle is **frozen** at `wazmrt@dadc727`
 the frozen oracle has **drifted** under the in-flight port. A "CHANGED since baseline" result means:
 review the new wazmrt commits, decide whether the port must follow, then re-baseline deliberately.
 
+## Where the port actually is (keep this line current)
+
+**T0–T8 DONE; published through v0.9.0** (2026-08-06). wasmrt assembles, decodes, validates, runs,
+does WASI preview 1 with a sandboxed filesystem, and is **embeddable from C** via `wasmrt.h`. Spec
+suite **98.8%** (61,033 / 738 / 3,075), 351 workspace tests. **Next: T9** (correctness punch-list,
+tail calls, licensing/docs, size + perf measurement, `pin`), then **T10** bug hunt, **T11**
+optimization review, **T12** security review — the order **measure → find → optimize → attack** is
+deliberate. Detail and the per-item costs are in [`cmem/roadmap.md`](cmem/roadmap.md);
+[`cmem/INDEX.md`](cmem/INDEX.md) carries the fuller status.
+
 ## Project memory lives in `cmem/` — read it first
 
 Portable project memory (committed, travels with the repo) is in **[`cmem/`](cmem/)**, one topic file
@@ -26,9 +36,11 @@ per domain — same convention as wazmrt. **Start with [`cmem/INDEX.md`](cmem/IN
 - [`cmem/loaders.md`](cmem/loaders.md) — the `universalWasmLoader-*` consumers + the `wasmrt.h` surface
 - [`cmem/testing.md`](cmem/testing.md) · [`cmem/security-model.md`](cmem/security-model.md) · [`cmem/licensing.md`](cmem/licensing.md)
 - [`cmem/roadmap.md`](cmem/roadmap.md) · [`cmem/known-issues.md`](cmem/known-issues.md) · [`cmem/reference-projects.md`](cmem/reference-projects.md)
+- [`cmem/releasing.md`](cmem/releasing.md) — versioning ladder + the binding per-release checklist
 
-Detailed engineering reference (the wazmrt deep-read maps + `wasmrt.h` draft) is in
-[`docs/port/`](docs/port/).
+Detailed engineering reference (the wazmrt deep-read maps) is in [`docs/port/`](docs/port/).
+⚠️ **`docs/port/wasmrt.h.draft` is HISTORICAL** — four of its shapes never matched the code. The
+finalized C ABI is [`crates/wasmrt-capi/include/wasmrt.h`](crates/wasmrt-capi/include/wasmrt.h).
 
 ## "Update the project memory" = update `cmem/`
 
