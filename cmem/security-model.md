@@ -127,7 +127,9 @@ it survives a change of mechanism. Verified by mutation: deleting the `..` guard
 
 ## Authenticity — pin verification (reproduce; signatures still design-only)
 
-> **⚠️ NOT YET BUILT IN wasmrt (status 2026-08-06, v0.9.0).** `crates/wasmrt-core/src/pin.rs` is a
+> **⚠️ STILL NOT BUILT — re-verified 2026-08-07 after the T9 first pass.** T9's first pass covered
+> T9a's top defects plus T9b/T9c/T9d (size, performance, licensing); **`pin` (T9e) was not part of it
+> and remains untouched.** `crates/wasmrt-core/src/pin.rs` is a
 > **doc-comment stub** — no `decide()`, no DB parsing, no hashing. Everything below describes the
 > **oracle's** implementation and the mechanism decisions to reproduce, not current wasmrt behaviour.
 > **A wasmrt build today performs no authenticity check of any kind**, and the CLI exposes none.

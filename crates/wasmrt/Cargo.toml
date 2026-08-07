@@ -9,6 +9,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "wasmrt — a fast, small WebAssembly runtime CLI (run/assemble/validate/pin)."
+readme = "README.md"
+keywords = ["webassembly", "wasm", "runtime", "wasi", "cli"]
+categories = ["wasm", "command-line-utilities", "development-tools"]
 
 # package name is already `wasmrt`, so the default bin target is `wasmrt` (src/main.rs).
 

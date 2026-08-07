@@ -15,7 +15,7 @@ parity testing at every step.
 > `wasmrt <file.wasm>` gives a real verdict on any module wasmrt can run.
 >
 > It reads and writes the **text format** and runs the **official spec testsuite**: `wasmrt wast <dir>`
-> scores **98.8% (61,033 assertions passing)**, with every one of the 284 files parsing.
+> scores **98.9% (61,247 assertions passing)**, with every one of the 284 files parsing.
 >
 > It is **embeddable from C** via [`wasmrt.h`](crates/wasmrt-capi/include/wasmrt.h) — compile,
 > link host functions, instantiate, call exports, and read or write guest memory. You can restrict
@@ -36,10 +36,22 @@ parity testing at every step.
 ## Goals
 
 - **Canonical** — run the same WebAssembly `wasmtime` can (full browser-standard feature set + memory64;
-  WASI preview 1).
+  WASI preview 1). **Tail calls are the one scope item not yet implemented.**
 - **Fast** — win cold-start and native-FFI workloads (an interpreter over a pre-decoded IR, not a JIT).
 - **Small** — minimize every artifact; the runtime even compiles to `wasm32` to embed inside another
   wasm host.
+
+**Measured, not claimed** (`cargo run --release -p wasmrt-core --example bench`; x86_64, release):
+
+| | |
+| --- | --- |
+| Cold start (decode + validate + instantiate + call, 48 KB module) | **4.5 ms** |
+| Steady-state dispatch (tight `loop`/`br_if`) | **~237 Mops/s** |
+| CLI binary · C-ABI `cdylib` | **621 KiB** · **494 KiB** |
+| Runtime compiled to `wasm32`, engine only | **158 KiB** (**138 KiB** after `wasm-opt -Oz`) |
+
+Sustained hot loops go to a JIT — that trade is deliberate. A comparison against other small runtimes
+(wasm3, WAMR) has **not** been run yet, so no claim is made about it.
 
 ## Crates
 
@@ -103,4 +115,9 @@ means full parity** with the frozen wazmrt oracle. The number reflects what genu
 
 ## License
 
+`SPDX-License-Identifier: MIT OR Apache-2.0`
+
 Dual-licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+wasmrt has **no third-party dependencies** and incorporates no third-party code — see
+[`NOTICE`](NOTICE) and [`third_party/LICENSES.md`](third_party/LICENSES.md), whose Component Ledger is
+empty.

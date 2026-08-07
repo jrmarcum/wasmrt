@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "wasmrt C ABI — the wasmrt.h surface (cdylib + staticlib) over wasmrt-core."
+readme = "README.md"
+keywords = ["webassembly", "wasm", "runtime", "ffi", "c-api"]
+categories = ["wasm", "external-ffi-bindings", "development-tools"]
 
 [lib]
 # staticlib/cdylib = the shipped C-ABI artifacts; rlib so the surface is unit-testable.

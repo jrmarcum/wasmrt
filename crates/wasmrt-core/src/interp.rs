@@ -1412,7 +1412,8 @@ impl Frame<'_> {
 fn block_arity(ctx: &Ctx, bt: BlockType, want_params: bool) -> u32 {
     match bt {
         BlockType::Empty => 0,
-        BlockType::Value(_) => u32::from(!want_params),
+        // Both spell a single result and no parameters.
+        BlockType::Value(_) | BlockType::ConcreteRef { .. } => u32::from(!want_params),
         BlockType::TypeIndex(i) => ctx.module.func_sig(i).map_or(0, |ft| {
             (if want_params {
                 ft.params.len()
@@ -2371,7 +2372,10 @@ fn exec_memory(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &I
             let Imm::MemIndex(mi) = instr.imm else {
                 return Err(Trap::UnsupportedInstruction);
             };
-            let mem = store.memories.get(mi as usize).ok_or(Trap::NoMemory)?;
+            // Route the module-local immediate through `maps` — a raw index into the
+            // shared pool reads whichever instance happens to sit there (the shared-store
+            // defect class; invisible with one instance per store, where they are equal).
+            let mem = store.memories.get(maps.mem(mi)).ok_or(Trap::NoMemory)?;
             let pages = (mem.bytes.len() / PAGE_SIZE) as u64;
             if mem.is64 {
                 frame.push_i64(pages as i64);
@@ -5954,6 +5958,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(as_i32(store.invoke(a, "pong", &[]).unwrap()[0]), 1);
+    }
+
+    #[test]
+    fn memory_size_reads_its_own_instance_not_the_pool_slot() {
+        // The shared-store defect class, fourth instance (T9a#2): `Op::MemorySize` indexed
+        // `store.memories` with the raw module-local immediate. Under ONE instance per
+        // store the two indices are equal and the bug is invisible — so, per the standing
+        // rule, this test instantiates a SECOND module. Instance `a` has 5 pages and takes
+        // pool slot 0; `b` has 1 page and takes slot 1, but its `memory.size` immediate is
+        // still 0. Unmapped, `b` answers 5.
+        let a_src = crate::wat::assemble(br#"(module (memory 5))"#).unwrap();
+        let b_src =
+            crate::wat::assemble(br#"(module (memory 1) (func (export "sz") (result i32) memory.size))"#)
+                .unwrap();
+        let mut store = Store::new();
+        let _a = store
+            .instantiate(decode(&a_src).unwrap(), Imports::new())
+            .unwrap();
+        let b = store
+            .instantiate(decode(&b_src).unwrap(), Imports::new())
+            .unwrap();
+        assert_eq!(as_i32(store.invoke(b, "sz", &[]).unwrap()[0]), 1);
     }
 
     // ---- Configurable resource limits (T8) ------------------------------------------

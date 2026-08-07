@@ -18,13 +18,19 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE; published through v0.9.0** (2026-08-06). wasmrt assembles, decodes, validates, runs,
-does WASI preview 1 with a sandboxed filesystem, and is **embeddable from C** via `wasmrt.h`. Spec
-suite **98.8%** (61,033 / 738 / 3,075), 351 workspace tests. **Next: T9** (correctness punch-list,
-tail calls, licensing/docs, size + perf measurement, `pin`), then **T10** bug hunt, **T11**
-optimization review, **T12** security review — the order **measure → find → optimize → attack** is
-deliberate. Detail and the per-item costs are in [`cmem/roadmap.md`](cmem/roadmap.md);
-[`cmem/INDEX.md`](cmem/INDEX.md) carries the fuller status.
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — first pass landed 2026-08-07, unreleased.**
+wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
+**embeddable from C** via `wasmrt.h`. Spec suite **98.9%** (61,247 / 655 / 2,932), **363 workspace
+tests**, no file regressed. **T9b/T9c/T9d are done, so all three success axes now carry a real
+measurement for the first time** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI
+**621 KiB** / cdylib **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with
+`wasm-opt -Oz`). **Still open in T9:** T9a #4 (now a **decision-gate** — a `funcref` carries no instance
+identity, so an imported *table* would dispatch to the wrong function), #5–#9, #11, #12, `pin`, and
+**tail calls**. Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines
+now exist**), **T12** security review — the order **measure → find → optimize → attack** is deliberate.
+⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`
+fix was real but did not move `br_table.wast`, which needed three further unlisted fixes. Detail is in
+[`cmem/roadmap.md`](cmem/roadmap.md); [`cmem/INDEX.md`](cmem/INDEX.md) carries the fuller status.
 
 ## Project memory lives in `cmem/` — read it first
 

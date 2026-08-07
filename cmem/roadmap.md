@@ -1,6 +1,15 @@
 # Roadmap
 
-## Status (2026-08-06) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE.**
+## Status (2026-08-07) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
+
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,247 / 655 / 2,932 — 98.9%**,
+**363 workspace tests**. T9's first pass landed T9a #1/#2/#3 plus three unlisted defects, and all of
+**T9b (size)**, **T9c (performance)** and **T9d (licensing/docs)** — so **every one of the three success
+axes now carries a real measurement**, which is what T11 was blocked on. Open: T9a #4 (🚦 decision-gate
+— a `funcref` carries no instance identity), #5–#9, #11, #12, **T9e `pin`**, **T9f tail calls**.
+The T8 block below is kept as the v0.9.0 release record.
+
+### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
 **T8 (the `wasmrt.h` C ABI) landed 2026-08-06 as v0.9.0 — PUBLISHED** (release commit `a7abd83`, tag
 `v0.9.0`), with all three of its gates green —
@@ -471,13 +480,46 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     `elem.wast` 17 → 13, `linking.wast` +4 passes. The one file that got worse is `i31.wast`
     (+1 visible failure, −1 skip): a module that now builds and meets the already-logged GC-const-expr
     gap. 351 workspace tests, clippy clean, all four surfaces.
-- **T9 — Correctness punch-list, licensing, docs, size, all gates green.** `[ ]`
+- **T9 — Correctness punch-list, licensing, docs, size, all gates green.** `[◐]`
 
   **Scoped 2026-08-06 from a measured audit**, not from old notes: every item below was re-verified
   against the current build, and each carries what it actually costs. Two were **found during that
   audit and are new**. Ordered by measured value — do them top-down.
 
-  ### T9a — Correctness defects (real bugs) `[ ]`
+  ### ◐ Progress 2026-08-07 — first pass done. Suite **98.8% → 98.9%**, 61,247 / 655 / 2,932.
+
+  **Landed:** T9a #1, #2, #3 · **three defects the list did not have** (see below) · all of **T9b** ·
+  all of **T9d** · all of **T9c**. 337 core tests (was 325). Clippy clean; all four build surfaces, the
+  C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) green. **No file in the suite regressed.**
+
+  **Two things worth carrying forward more than the numbers:**
+
+  1. **#1's stated cause was wrong.** `ref.null $t` was a real defect and is fixed, but it moved
+     `ref_null`/`ref_test`/`ref_is_null` — **not `br_table.wast`**, whose module was failing three fixes
+     earlier at `BadModuleField`. Reaching its 161 assertions took **four** independent fixes, three of
+     which were not on any list: an inline table-elem shorthand that could not express a non-`funcref`
+     element type; a **block type of concrete reference type being undecodable** (`0x63 <typeidx>` reads
+     as s33 `-29`, an arm `read_block_type` lacked, so the type index was then read as an *opcode*); and
+     **`br_table` label typing wrong in two directions** (§3.3.5.8 wants one operand sequence satisfying
+     every target — the validator compared targets *to each other* and pushed the target's types back
+     instead of the operands it popped). `br_table.wast`: 24/1/161 → **185/0/0**.
+     ⚠️ **Every remaining cost figure in the table below was assigned the same way** — by reading a file
+     for the first construct that looked unsupported. Treat them as hypotheses; re-measure after each fix.
+  2. **#4 is not plumbing — it is a decision-gate.** See `known-issues.md`: a `funcref` is a bare
+     function index with **no instance identity**, and `call_indirect` resolves it against the *calling*
+     instance, so a shared table dispatches to the wrong function. Imported **memories** are genuinely
+     just plumbing; imported **tables** need the funcref encoding decided first, and that touches a
+     recorded invariant. **Do not implement imported tables without it.**
+
+  **Still open in T9:** T9a #4 (gated as above), #5, #6, #7, #8, #9, #11, #12 · **T9e `pin`** ·
+  **T9f tail calls**. #10 stays a non-issue by design.
+
+  ### T9a — Correctness defects (real bugs) `[◐]`
+
+  **Status 2026-08-07:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
+  #4 🚦 decision-gate · #5–#9, #11, #12 open · #10 not a defect.
+  Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
+  `store1` 4 → 0 · `ref_is_null` 1 → 0 · `i31` 31 → 6 · `load1` 15 → 5 · `type-subtyping` 20 skips → 8.
 
   | # | Defect | Where | Measured cost |
   | --- | --- | --- | --- |
@@ -494,23 +536,57 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 11 | **Malformed modules rejected at the wrong STAGE** — caught during *validation* when the decoder should have refused them. The runner distinguishes the two on purpose. | `module.rs` | `binary-leb128.wast` **15**. |
   | 12 | **Needs triage** — mixed symptoms, not yet root-caused: `binary.wast` **44** (core copy), `func.wast` **19** (a wrong result `0x2a` where `0` expected, *plus* over-accepted malformed modules), `load1.wast` **15** (may be entirely explained by #3 — recheck after fixing it). | — | ~78 combined. **Re-measure after #1–#3; some will evaporate.** |
 
-  ### T9b — Size (the "small" axis — currently UNPROVEN) `[ ]`
-  - **Unconditional `data_count` section** — 3 wasted bytes on every module with data segments; the spec
-    requires it only when `memory.init`/`data.drop` appear (`helloworld.wat`: 135 bytes vs wat2wasm's 132).
-  - `wasm-opt -Oz`; verify the size-first release profile end-to-end; **measure all four artifacts** and
-    compare against wasm3 / WAMR. No wasmrt size number has ever been recorded.
+  ### T9b — Size (the "small" axis) ✅ MEASURED 2026-08-07 `[x]`
+  - **Unconditional `data_count` section — FIXED.** Emitted only when `memory.init`/`data.drop` actually
+    appear, tracked at the emission site. Zero conformance drift across all 284 files.
+  - **The first size numbers wasmrt has ever recorded** (release profile: `opt-level="z"` + LTO +
+    `codegen-units=1` + strip + `panic="abort"`; host `x86_64-pc-windows-gnullvm`):
 
-  ### T9c — Performance (the "fast" axis — currently UNPROVEN) `[ ]`
-  - Cold-vs-steady bench. **Do not quote wazmrt's numbers as wasmrt's** — inheriting the interpreter
-    shape does not inherit its measurements (`vision.md`).
+    | Artifact | Size | + `wasm-opt -Oz` |
+    | --- | ---: | ---: |
+    | CLI `wasmrt.exe` | **621.0 KiB** (635,904 B) | — |
+    | `wasmrt_capi.dll` (cdylib) | **493.5 KiB** (505,344 B) | — |
+    | freestanding `wasm32`, **engine only** (decode+validate+run) | **158.1 KiB** (161,896 B) | **137.5 KiB** (−13.1%) |
+    | freestanding `wasm32`, engine + text toolchain | **260.9 KiB** (267,116 B) | **228.6 KiB** (−12.4%) |
 
-  ### T9d — Licensing + docs `[ ]`
+    Method: the `.a`/`.rlib` are archives carrying metadata, so they are **not** shipped size and are
+    deliberately not quoted. The freestanding figures come from a minimal `cdylib` embedder (bump
+    allocator + panic handler) that calls decode→validate→instantiate→invoke, so the linker retains the
+    whole engine — the honest "wasmrt compiled to wasm" number.
+  - **Still to do:** the wasm3 / WAMR comparison (neither is present on this machine — it needs their
+    binaries, not an estimate). `wasm-opt -Oz` is worth ~13% and is **not** in any build script yet.
+
+  ### T9c — Performance (the "fast" axis) ✅ MEASURED 2026-08-07 `[x]`
+  - **`crates/wasmrt-core/examples/bench.rs`** — `cargo run --release -p wasmrt-core --example bench`.
+    Placed as an example rather than at `bench/bench.rs` because a target path outside the package
+    directory breaks `cargo package`. `bench/README.md` keeps the methodology and now points at it.
+  - **The first wasmrt performance numbers ever recorded** (same host, release):
+
+    | Regime | Measurement |
+    | --- | --- |
+    | cold — toy module (70 B) | **3.5 µs** |
+    | cold — real module (48,067 B) | **4.48 ms** ← the figure to quote |
+    | steady — `sum(n)` tight `loop`/`br_if` | **~237 Mops/s** (232–240 across 1M/10M/50M iterations) |
+
+  - The workload asserts its own result (`sum(0..n) = n(n-1)/2`) before timing — a benchmark that
+    computes the wrong thing measures nothing — and a warm-up run sits outside the timer.
+  - **Against the oracle, for context only** (`bench/README.md` records wazmrt at ~4.4 ms cold for a
+    46 KB guest and ~264 Mops/s steady): wasmrt is at **cold parity** and **~90% of steady throughput**.
+    The cold module here is deliberately sized to ~46 KB so the two are comparable — a cold-start number
+    without its module size beside it is meaningless. **These remain the oracle's numbers, measured on a
+    different machine, so this is a sanity check, not a benchmark result.**
+  - Run-to-run spread is several percent: compare only **same-session A/B/A**, never across days.
+
+  ### T9d — Licensing + docs ✅ DONE 2026-08-07 `[x]`
   - **Already done, verified 2026-08-06:** `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE` and
     `third_party/LICENSES.md` have existed since the **T0 scaffold**; the Component Ledger is **empty**
     and there are **zero third-party dependencies**.
-  - **Remaining:** the **missing SPDX tag in `README.md`** — the one gap in the convention
-    `licensing.md` states — and the per-crate crates.io **listing metadata** (`keywords`, `categories`,
-    a per-crate `readme`; cargo rejects a `../../README.md` path), per `releasing.md`.
+  - **SPDX tag added to `README.md`** — the one gap `licensing.md` recorded is closed, together with a
+    pointer to the empty Component Ledger.
+  - **Per-crate crates.io listing metadata added** to all three crates: `keywords`, `categories`, and a
+    per-crate `readme`. Each crate got its **own short README**, because cargo packages the readme and
+    rejects a `../../README.md` path — the trap `releasing.md` warned about. Verified with
+    `cargo package --no-verify` on all three: clean.
 
   ### T9e — `pin` (module authenticity) `[ ]`
   - `crates/wasmrt-core/src/pin.rs` is a **doc-comment stub**, so **a wasmrt build performs no

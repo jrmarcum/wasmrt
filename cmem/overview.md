@@ -79,9 +79,27 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-**Next: T9 — the correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin`.** Then **T10** (bug hunt + code hygiene), **T11** (optimization review) and **T12** (security review — an adversarial look at the penetration surfaces), added by the owner 2026-08-06 — the ordering **measure → find → optimize → attack** is deliberate.
-See the task list in [roadmap.md](roadmap.md). **351 workspace tests** green; clippy clean; native +
-`wasm32` no_std all build.
+- **T9 (0.10.0, IN PROGRESS)** — first pass landed **2026-08-07**, unreleased. Six correctness defects
+  fixed (**three of which no list had**, all found by asking why `br_table.wast` was still 161 skips
+  after the fix that was supposed to clear it), and **the size and performance axes measured for the
+  first time in the project's life**. Suite **61,247 / 655 / 2,932 — 98.9%**, no file regressed.
+  Cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady; CLI **621 KiB**, cdylib **493.5 KiB**,
+  freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** with `wasm-opt -Oz`).
+  Still open: T9a #4 (a **decision-gate** — see below), #5–#9, #11, #12, `pin`, and **tail calls**.
+
+**Next: finish T9** — the remaining punch-list, `pin`, and tail calls (1.0 cannot be claimed without
+them). Then **T10** (bug hunt + code hygiene), **T11** (optimization review — **no longer blocked, since
+T9 produced its baselines**) and **T12** (security review), added by the owner 2026-08-06; the ordering
+**measure → find → optimize → attack** is deliberate.
+
+⚠️ **One decision is waiting on the owner:** T9a#4 (imported memories/tables) reads as plumbing but is
+not. A `funcref` is a bare function index with **no instance identity**, and `call_indirect` resolves it
+against the *calling* instance — so a shared table would dispatch to the wrong function. Imported
+*memories* are safe to build now; imported *tables* need the funcref encoding decided first, which
+touches a recorded invariant. Options in [known-issues.md](known-issues.md).
+
+See the task list in [roadmap.md](roadmap.md). **363 workspace tests** green; clippy clean; native +
+`wasm32` no_std all build; C-ABI and Miri gates green.
 
 ## Planned repo / crate layout
 

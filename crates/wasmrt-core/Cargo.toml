@@ -7,6 +7,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "wasmrt runtime core (no_std-friendly): decode, validate, and interpret WebAssembly."
+# crates.io listing metadata. `readme` must be a path INSIDE the package — cargo packages the
+# file, so `../../README.md` is rejected; each crate carries its own short one.
+readme = "README.md"
+keywords = ["webassembly", "wasm", "runtime", "interpreter", "no-std"]
+categories = ["wasm", "no-std", "development-tools"]
 
 [features]
 # `std` on by default for native builds. Turn it OFF for the freestanding wasm32

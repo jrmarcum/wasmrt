@@ -958,6 +958,14 @@ struct ModuleBuild {
     exports: Vec<ExportDef>,
     import_order: Vec<ImportKind>,
     start: Option<Sexpr>,
+
+    /// Set while encoding a body that emits `memory.init` or `data.drop`.
+    ///
+    /// §5.5.13 requires the data-count section **only** when one of those two can appear —
+    /// it exists so a decoder knows the segment count before reading the code section.
+    /// Emitting it unconditionally cost 3 bytes on every module with data segments, which
+    /// is 3 bytes against the "small" axis on modules that never bulk-copy.
+    needs_data_count: bool,
 }
 
 // --- Entry points -------------------------------------------------------------
@@ -1644,7 +1652,11 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             elem_type,
             items: entries,
             declarative: false,
-            use_exprs: false,
+            // The entries above are already const-expr forms; this flag only picks the
+            // ENCODING. The funcidx shorthand (forms 0–3) denotes `funcref` and nothing
+            // else, so a table of `(ref null $t)` — or of any non-`funcref` element type —
+            // must use the expression family or `emit_elem_segment` refuses it outright.
+            use_exprs: elem_type != V::FUNCREF,
         });
         b.elem_names.push(None);
         return Ok(());
@@ -2152,8 +2164,10 @@ fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, e: &Encoded) -> Result<()> {
         push_section(out, 9, &c);
     }
 
-    // 12 — data count (required whenever `memory.init`/`data.drop` can appear).
-    if !e.datas.is_empty() {
+    // 12 — data count. §5.5.13 requires it ONLY when `memory.init`/`data.drop` appear: it
+    // exists so a decoder knows the segment count before the code section. Emitting it for
+    // every module with data segments spent 3 bytes to say nothing.
+    if !e.datas.is_empty() && b.needs_data_count {
         let mut c = Vec::new();
         uleb(&mut c, e.datas.len() as u64);
         push_section(out, 12, &c);
@@ -2223,6 +2237,10 @@ struct Ctx<'a> {
     local_names: &'a [Option<String>],
     /// Control-label stack, innermost last, for resolving `br $name` to a relative depth.
     labels: Vec<Option<String>>,
+    /// Written through to [`ModuleBuild::needs_data_count`] when this body emits
+    /// `memory.init`/`data.drop`. A `&mut` to one field, borrowed disjointly from the name
+    /// tables — the same trick that lets a body intern a block signature.
+    needs_data_count: &'a mut bool,
 }
 
 impl Ctx<'_> {
@@ -2264,6 +2282,7 @@ macro_rules! ctx_for {
             tag_names: &$b.tag_names,
             local_names: $locals,
             labels: Vec::new(),
+            needs_data_count: &mut $b.needs_data_count,
         }
     };
 }
@@ -2958,6 +2977,7 @@ fn emit_op_with_immediates(
             );
         }
         O::DataDrop => {
+            *ctx.needs_data_count = true;
             uleb(
                 &mut ctx.out,
                 u64::from(resolve_by_name(ctx.data_names, imm(0)?)?),
@@ -2987,6 +3007,7 @@ fn emit_op_with_immediates(
             uleb(&mut ctx.out, u64::from(s));
         }
         O::MemoryInit => {
+            *ctx.needs_data_count = true;
             let d = resolve_by_name(ctx.data_names, imm(0)?)?;
             uleb(&mut ctx.out, u64::from(d));
             let m = match items.get(start + 1) {
@@ -3057,18 +3078,15 @@ fn emit_op_with_immediates(
             sleb(&mut ctx.out, c2);
         }
         O::RefNull => {
-            let ht = want_atom(imm(0)?)?;
-            let code: i64 = match ht {
-                "func" | "nofunc" => -0x10,
-                "extern" | "noextern" => -0x11,
-                "any" => -0x12,
-                "eq" => -0x13,
-                "i31" => -0x14,
-                "struct" => -0x15,
-                "array" => -0x16,
-                "exn" | "noexn" => -0x17,
-                "none" => -0x0f,
-                _ => return Err(Error::BadImmediate),
+            // A heap type: an abstract head, or a **concrete** `$t`/index — legal, and
+            // encoded as the same positive s33 type index `(ref $t)` already uses, so an
+            // unknown head falls through to type-name resolution rather than being
+            // rejected. Abstract codes come from the one `abstract_heap_code` table, so
+            // `nofunc`/`noexn` cannot drift into their family heads.
+            let s = imm(0)?;
+            let code = match abstract_heap_code(want_atom(s)?) {
+                Some(c) => c,
+                None => i64::from(resolve_by_name(ctx.type_names, s)?),
             };
             sleb(&mut ctx.out, code);
         }
@@ -3923,6 +3941,106 @@ mod tests {
         asm(r#"(module (table 3 funcref) (func (result i32)
                  i32.const 0 i32.const 1 i32.const 1 table.copy i32.const 7))"#)
         .unwrap();
+    }
+
+    /// The four T9a findings that `br_table.wast` turned out to need — each one alone still
+    /// left the file unbuildable, so each is pinned separately. Every case round-trips
+    /// through decode+validate: "assemble returned Ok" is not evidence, as the missing
+    /// label vector above showed.
+    /// T9b. §5.5.13 requires the data-count section only when `memory.init`/`data.drop`
+    /// appear. Emitting it always cost 3 bytes per module with data segments — and the
+    /// section must still be there when it IS required, or the module stops decoding.
+    #[test]
+    fn the_data_count_section_is_emitted_only_when_required() {
+        let plain = asm(r#"(module (memory 1) (data (i32.const 0) "hi"))"#).unwrap();
+        let bulk = asm(
+            r#"(module (memory 1) (data $d "hi")
+                 (func (memory.init $d (i32.const 0) (i32.const 0) (i32.const 2))))"#,
+        )
+        .unwrap();
+        // Walk the section list rather than scanning for the byte `0x0c`, which occurs all
+        // over a module's payload and would make this pass by accident.
+        fn section_ids(m: &[u8]) -> Vec<u8> {
+            let mut r = crate::reader::Reader::new(&m[8..]); // past the magic + version
+            let mut ids = Vec::new();
+            while let Ok(id) = r.read_byte() {
+                let len = r.read_var_u32().expect("section length");
+                ids.push(id);
+                r.read_bytes(len as usize).expect("section payload");
+            }
+            ids
+        }
+        assert!(
+            !section_ids(&plain).contains(&12),
+            "no bulk op: no data-count section"
+        );
+        assert!(
+            section_ids(&bulk).contains(&12),
+            "memory.init: the section is required"
+        );
+        // Both must still decode — the section is what tells the decoder the segment count
+        // before it reads the code, so dropping it when it IS needed breaks the module.
+        crate::module::decode(&plain).expect("decode plain");
+        let md = crate::module::decode(&bulk).expect("decode bulk");
+        crate::validate::validate(&md).expect("validate bulk");
+    }
+
+    #[test]
+    fn assembles_a_concrete_ref_null() {
+        // `ref.null $t` — a concrete heap type is legal and encodes as a positive s33.
+        let bytes = asm(
+            r#"(module (type $t (func))
+                 (func (result (ref null $t)) (ref.null $t)))"#,
+        )
+        .unwrap();
+        let md = crate::module::decode(&bytes).expect("decode");
+        crate::validate::validate(&md).expect("validate");
+    }
+
+    #[test]
+    fn ref_null_nofunc_is_not_ref_null_func() {
+        // The old hand-rolled table mapped `nofunc`→`func` and `noexn`→`exn`, which is a
+        // wrong VALUE, not a rejection: `(ref null func)` is not a subtype of
+        // `(ref null nofunc)`, so a valid module became invalid and an invalid one could
+        // pass. The two must not assemble to the same bytes.
+        let nofunc = asm(r#"(module (func (result nullfuncref) (ref.null nofunc)))"#).unwrap();
+        let func = asm(r#"(module (func (result funcref) (ref.null func)))"#).unwrap();
+        assert_ne!(nofunc, func);
+        crate::validate::validate(&crate::module::decode(&nofunc).expect("decode"))
+            .expect("validate");
+    }
+
+    #[test]
+    fn a_table_of_concrete_ref_type_takes_an_inline_elem() {
+        // `(table $x (ref null $t) (elem $f))`. The funcidx shorthand (elem forms 0–3)
+        // denotes `funcref` and nothing else, so a non-`funcref` element type must use the
+        // expression family — emitting the shorthand anyway was refused outright.
+        let bytes = asm(
+            r#"(module (type $t (func)) (func $f)
+                 (table $x (ref null $t) (elem $f)))"#,
+        )
+        .unwrap();
+        let md = crate::module::decode(&bytes).expect("decode");
+        crate::validate::validate(&md).expect("validate");
+        // The plain `funcref` spelling keeps the compact encoding it always had.
+        let plain = asm(r#"(module (func $f) (table $x funcref (elem $f)))"#).unwrap();
+        crate::validate::validate(&crate::module::decode(&plain).expect("decode"))
+            .expect("validate");
+    }
+
+    #[test]
+    fn a_block_result_of_concrete_ref_type_round_trips() {
+        // The block type is spelled `0x63 <typeidx>`, which `read_block_type` could not
+        // read — it consumed the `0x63` as an s33 and then read the type index as an
+        // OPCODE, rejecting a valid module as an unsupported instruction.
+        let bytes = asm(
+            r#"(module (type $t (func))
+                 (func (result (ref null $t))
+                   (block (result (ref null $t)) (ref.null $t))))"#,
+        )
+        .unwrap();
+        let md = crate::module::decode(&bytes).expect("decode");
+        crate::validate::validate(&md).expect("validate");
     }
 
     /// A folded `br_table` used to emit its opcode with **no label vector**: the flat and

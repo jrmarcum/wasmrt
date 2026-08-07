@@ -37,13 +37,79 @@ open"* / *"GATE STAYS CLOSED"*, the pre-freeze framing, contradicting the script
 which has said since 2026-07-27 that its role **inverted** to drift detection. It now speaks in
 drift terms and distinguishes *drift* from *oracle tests not green*.
 
-## 🔴 OPEN — found by the T9 scoping audit (2026-08-06). Two new defects.
+## ✅ Fixed 2026-08-07 — the T9a top of the punch list, and what chasing it actually found
 
-Both were found while *measuring* the residual for the T9 punch list rather than by any test, which is
-itself the lesson: the suite reported them as ordinary "result mismatch" failures in files nobody had
-triaged, and the real causes were nowhere near where the symptom pointed.
+**Suite: 61,033 / 738 / 3,075 (98.8%) → 61,247 / 655 / 2,932 (98.9%).** 337 core tests (was 325);
+clippy clean; all four build surfaces, the C-ABI gate and Miri green; the per-file diff moves in the
+right direction on **every** line — no file regressed.
 
-### A. `Op::MemorySize` reads another instance's memory — SILENT WRONG OUTPUT
+Six defects, of which **three were not on the list**. The three logged ones (A, B below, and
+`ref.null $t`) are fixed as written. The other three came out of a single question — *why is
+`br_table.wast` still 161 skips after the `ref.null` fix?* — and are the more interesting half.
+
+### The roadmap's #1 was **misdiagnosed**, and the measurement is what caught it
+
+T9a#1 predicted that `ref.null $ConcreteType` was worth "161 skipped assertions in `br_table.wast`
+alone". It was fixed, it was necessary, and it moved **`ref_null.wast`, `ref_test.wast` and
+`ref_is_null.wast`** — but `br_table.wast` did not move by a single assertion. Its module was failing
+at `BadModuleField`, nowhere near `ref.null`. Getting the file to build took **four** independent
+fixes, each of which alone left it still failing:
+
+1. **`ref.null $t` rejected by the assembler** (the logged one). `O::RefNull` matched only abstract
+   heads. Now falls through to type-name resolution, exactly as `(ref $t)` already did.
+   **It also carried a silent-wrong-value bug**: the hand-rolled table mapped `nofunc → -0x10` (that is
+   `func`) and `noexn → -0x17` (`exn`). `ref.null nofunc` therefore assembled to a **`funcref` null**.
+   Since `(ref null func)` is not a subtype of `(ref null nofunc)`, that turns valid modules invalid and
+   could let invalid ones pass. The arm now reads the one `abstract_heap_code` table, so the codes
+   cannot drift again. `wat.rs` ~3059.
+2. 🆕 **`(table $x (ref null $t) (elem $f))` was refused outright.** The inline table-elem shorthand
+   built its segment with `use_exprs: false`, and the funcidx shorthand (elem forms 0–3) denotes
+   `funcref` and nothing else — so `emit_elem_segment` correctly refused it. The entries were *already*
+   const-expr forms; only the encoding flag was wrong. Now `use_exprs = elem_type != FUNCREF`, so
+   `funcref` keeps its compact form-0 encoding and everything else uses the expression family.
+   `wat.rs` ~1647.
+3. 🆕 **A block type of concrete reference type was UNDECODABLE.** `(block (result (ref null $t)))`
+   encodes as `0x63 <typeidx>` — which as an s33 reads as **-29**, an arm `read_block_type` did not
+   have. It consumed the `0x63`, then read the type index as an **opcode**, and rejected a valid module
+   as `UnsupportedOpcode`. The fix needed a new `BlockType::ConcreteRef { nullable, type_index }`
+   variant, because a concrete `ValType` carries its family head (func/struct/array) and only the
+   module's type section knows which one `$t` is — `decode_body` has no module context by design, so the
+   index travels unresolved and the **validator** maps it. `opcode.rs` ~254/~632, `validate.rs`
+   `block_sig`, `interp.rs` `block_arity`.
+4. 🆕 **`br_table` label typing was wrong in two directions.** §3.3.5.8 asks for **one operand sequence
+   that satisfies every target**; the validator instead compared the targets **to each other**, and
+   after checking a target pushed *the target's* types back onto the stack instead of the operands it
+   had popped. So:
+   - a later target **narrower** than an earlier one saw a widened stack and was refused
+     (`meet-funcref`), and
+   - two targets that are unrelated **to each other** were refused even when the operands are bottom —
+     `(unreachable) (br_table 0 1 …)` between an `f32` block and an `f64` one is **valid**, because
+     bottom is a subtype of both (`meet-bottom`).
+
+   The pairwise check is now gone entirely: in reachable code it is redundant (each target is checked
+   against the real operands), and in unreachable code it was simply wrong. The **arity** check stays —
+   that part of the rule is real. `validate.rs` `Op::BrTable`.
+
+   ⚠️ This is the one change here that *relaxes* the validator. Verified it did not over-accept: the
+   full suite's failures went **down** on every file and up on none, and a test pins that a target the
+   real operands do not fit is still refused.
+
+**Result: `br_table.wast` 24 passed / 1 failed / 161 skipped → 185 / 0 / 0.**
+
+**The lesson worth keeping:** a cost written next to a defect is a *hypothesis about the cause*, not a
+measurement of it. #1's cost was attributed by reading the file for the first construct that looked
+unsupported. The fix was right and the file was right; the causal link between them was invented. Any
+punch-list item whose cost was assigned that way should be re-measured after its fix, not assumed
+banked.
+
+### A. `Op::MemorySize` reads another instance's memory — SILENT WRONG OUTPUT ✅ FIXED 2026-08-07
+
+Fixed by routing through `ctx.maps.mem(mi)`. The regression test keeps a **second** instance alive per
+the standing two-instance rule, and is **mutation-verified**: reverting the one expression makes it
+report `5` — module one's page count — instead of `1`. `memory_size.wast` **16 failures → 0**
+(`memory_grow.wast` 2 → 0 and `store1.wast` 4 → 0 came with it).
+
+Original write-up:
 
 `interp.rs:2374` indexes the shared pool with the **raw module-local immediate**:
 
@@ -69,7 +135,18 @@ class before — *cannot* fire here, because `exec_memory` does use `maps`, in t
 one's* size. A core MVP instruction returning another module's answer.
 **Fix:** route through `ctx.maps.mem(mi)` + a regression test that keeps a **second** instance alive.
 
-### B. The `.wast` runner redirects a failed module's assertions to an unrelated module
+### B. The `.wast` runner redirects a failed module's assertions to an unrelated module ✅ FIXED 2026-08-07
+
+Fixed with a `last_build_failed` flag distinct from `current == None`, so the fall-back still serves the
+case it was written for (a file that names every module must still run bare actions — pinned by its own
+test) but never after a failed build. Both halves are tested.
+
+**It behaved exactly as predicted: failures fell, skips rose.** `i31.wast` 31 failed → 6 (+25 skips),
+`load1.wast` 15 → 5 (+10 skips), `exact-func-import.wast` 15 → 6, `custom-page-sizes.wast` 21 → 12. Those
+were never real mismatches; they were assertions run against the wrong instance. The headline number was
+understated, as recorded.
+
+Original write-up:
 
 `wast.rs:290`:
 
@@ -135,6 +212,47 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   six memory-safety invariants by hand; `wasmrt.h` uses value handles that carry the identity of the
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
+
+## 🚦 DECISION-GATE — T9a#4 (imported memories/tables) has an unlisted prerequisite (found 2026-08-07)
+
+T9a#4 reads as plumbing: instances already share memories and tables through the store, so "there is
+just no way to *name* one as a linker definition". The `IndexMaps` design anticipates it — `instantiate`
+already comments that the maps are what "let an imported one point at another instance's existing slot".
+Two thirds of it genuinely is plumbing (`Imports` grows memory/table slot vectors; `instantiate` builds
+the maps from imports-then-defined; active data/elem segments apply through the maps).
+
+**But a shared TABLE cannot be made correct without deciding how a `funcref` is represented.**
+
+A `funcref` value is currently a **bare function index with no instance identity**
+(`interp.rs`: *"funcref = function index; NULL_REF = null"*), and `Op::CallIndirect` resolves the entry
+it reads against `ctx.inst` — the *calling* instance. So the moment two instances share a table:
+
+- instance A stores `ref.func $a` (say index 3) into the shared table;
+- instance B does `call_indirect` on that slot and calls **B's** function 3.
+
+That is a **silent wrong call**, the same class as every serious defect this port has found, and it is
+the shared-store index-conflation class again — one level deeper, in the *value* encoding rather than in
+a pool index.
+
+**Fixing it means putting the owning instance into the funcref value.** There is room: the value slot is
+`u128` and a funcref uses the low 32 bits. But the slot encoding is a **recorded invariant**
+(`design-decisions.md`: `NULL_REF` checked before `I31_TAG`, one slot per value), and it is read by the
+interpreter's hottest path, the GC heap, the C ABI's value marshalling and the `.wast` runner's result
+comparison. That is an owner decision, not an improvisation — the same shape as the shared-store choice
+of 2026-08-05.
+
+**Options, for that decision:**
+1. **Pack the instance id into the funcref slot** (e.g. instance in bits 32–63, index in 0–31, keeping
+   `NULL_REF = u64::MAX` distinct). Correct and complete; touches the invariant and every site that
+   reads a funcref.
+2. **Ship imported *memories* only** and keep tables refused. Memories carry raw bytes with no identity
+   problem, so this is genuinely just plumbing — and it unblocks the `load1.wast`/`memory`-import family
+   without touching the value model.
+3. **Leave both refused** and take the skips.
+
+⚠️ Whatever is chosen, **do not implement imported tables without option 1** — a table that links
+successfully and dispatches to the wrong function is worse than one that refuses to link. The current
+`LinkError::UnsupportedImportKind` is a correct, loud refusal.
 
 ## 🔧 Open — noted at T8 (2026-08-06)
 
@@ -223,6 +341,13 @@ br_table.wast: 24 passed, 1 failed, 161 skipped
 Ranked first in T9a for that reason. **General lesson: a defect's logged blast radius was measured on
 the corpus that happened to surface it — re-measure before believing it is small.**
 
+> **✅ FIXED 2026-08-07 — and the causal claim above was WRONG.** The one match arm was necessary and is
+> done, but it did not move `br_table.wast` at all: that file was failing at `BadModuleField` on
+> `(table $t (ref null $t) (elem $tf))`, three fixes earlier in the pipeline. Getting the 161 took four
+> independent fixes — see the T9a entry at the top of this file. The lesson stated just above turned out
+> to apply to *this very item*, in the other direction: the blast radius was right by accident and the
+> **cause was invented**. `br_table.wast` is now **185 / 0 / 0**.
+
 ### 2. `reference-types.wat` — `UndefinedType`, oracle says valid
 
 Assembles, then fails **validation** with `UndefinedType`. Oracle: `valid wasm v1, 6 sections`. Not yet
@@ -257,12 +382,19 @@ reports 0 frames**, deliberately: an approximate frame is worse than none, and c
 now means real backtraces land at **T9 without a breaking ABI change**. `wasmrt_trap_message` carries the
 reason meanwhile. So the remaining work is the byte offsets themselves, not the surface.
 
-### 5. An unconditional `data_count` section wastes 3 bytes — against the "small" axis
+### 5. An unconditional `data_count` section wastes 3 bytes — against the "small" axis ✅ FIXED 2026-08-07
 
-Assembling the book's `helloworld.wat` gives **135 bytes vs wat2wasm's 132**, and the whole difference is
-a `data_count` section we always emit. The spec requires it **only** when `memory.init`/`data.drop`
-appear; otherwise it is optional. Legal, but it is dead weight on every module with data segments, and
-**smallest-binary is one of the three stated axes** (`vision.md`). Fix at T9 with the other size levers.
+Assembling the book's `helloworld.wat` gave **135 bytes vs wat2wasm's 132**, and the whole difference was
+a `data_count` section we always emitted. The spec requires it **only** when `memory.init`/`data.drop`
+appear; otherwise it is optional. Legal, but dead weight on every module with data segments, and
+**smallest-binary is one of the three stated axes** (`vision.md`).
+
+**Fixed (T9b):** `ModuleBuild.needs_data_count` is set while encoding a body that emits `memory.init` or
+`data.drop`, and the section is emitted only then. Tracked at the *emission site* rather than by scanning
+the finished bytes for `0xFC 0x08`/`0x09`, which would also match those bytes inside an immediate.
+The regression test walks the **section list** rather than searching for the byte `0x0c`, which occurs
+all over a module's payload and would have let the test pass by accident. **Zero conformance drift** —
+the per-file diff across all 284 files is byte-identical before and after.
 
 ### Not a defect — recorded so it is not chased twice
 

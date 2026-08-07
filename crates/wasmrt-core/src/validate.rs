@@ -873,6 +873,22 @@ impl<'a> FuncValidator<'a> {
                 }
                 Ok((ft.params, ft.results))
             }
+            // `(ref null? $t)` as a block result — the decoder leaves the index unresolved
+            // because only the module's type section says which family `$t` belongs to.
+            opcode::BlockType::ConcreteRef {
+                nullable,
+                type_index,
+            } => {
+                let t = ref_type_val_type(
+                    self.module,
+                    RefType {
+                        nullable,
+                        heap: HeapType::Concrete(type_index),
+                    },
+                )?;
+                gate_val_type(t, self.features)?;
+                Ok((Vec::new(), vec![t]))
+            }
         }
     }
 
@@ -1038,18 +1054,29 @@ impl<'a> FuncValidator<'a> {
                 let default_lt = self.label_types_at(bt.default)?;
                 for &l in &bt.labels {
                     let lt = self.label_types_at(l)?;
+                    // Arity must agree across every target — §3.3.5.8 asks for ONE operand
+                    // sequence that satisfies them all. Their element types need NOT be
+                    // related to each other: `(unreachable) (br_table 0 1 …)` between an
+                    // `f32` block and an `f64` one is valid, because the operands are then
+                    // bottom, which is a subtype of both. Comparing labels pairwise instead
+                    // of against the operands rejected exactly that (`meet-bottom`).
                     if lt.len() != default_lt.len() {
                         return Err(ValidateError::TypeMismatch);
                     }
-                    // Every target must be type-compatible with the default (both ways —
-                    // rejects only genuinely incompatible pairs, safe in polymorphic code).
-                    for (a, b) in lt.iter().zip(&default_lt) {
-                        if !subtype_of(self.module, *a, *b) && !subtype_of(self.module, *b, *a) {
-                            return Err(ValidateError::TypeMismatch);
-                        }
+                    // Check the operands against this label, then put back EXACTLY what was
+                    // popped. Pushing the label's own types instead widened the stack, so a
+                    // later target that is *narrower* than an earlier one saw the widened
+                    // type and failed — §3.3.5.8 asks each label type to be a supertype of
+                    // the OPERANDS, not of the other labels.
+                    let mut actual = Vec::with_capacity(lt.len());
+                    let mut i = lt.len();
+                    while i > 0 {
+                        i -= 1;
+                        actual.push(self.pop_expect(lt[i])?);
                     }
-                    self.pop_vals(&lt)?;
-                    self.push_vals(&lt);
+                    for st in actual.into_iter().rev() {
+                        self.push_val(st);
+                    }
                 }
                 self.pop_vals(&default_lt)?;
                 self.set_unreachable();
@@ -2608,6 +2635,68 @@ mod tests {
         let bin = crate::wat::assemble(src.as_bytes())
             .unwrap_or_else(|e| panic!("assembling {src:?} failed: {e:?}"));
         decode(&bin).unwrap_or_else(|e| panic!("decoding {src:?} failed: {e:?}"))
+    }
+
+    // ---- `br_table` label typing (T9a, from `br_table.wast`) -------------------------
+    //
+    // §3.3.5.8 asks for ONE operand sequence that satisfies every target. Two things fall
+    // out of that, and the validator had both backwards.
+
+    #[test]
+    fn br_table_targets_need_not_be_related_to_each_other() {
+        // `meet-bottom`. After `unreachable` the operands are bottom, a subtype of every
+        // type, so an `f32` target and an `f64` one are both satisfiable at once. Comparing
+        // the targets pairwise instead of against the operands rejected this valid module.
+        let md = decode_wat(
+            r#"(module (func
+                 (block (result f64)
+                   (block (result f32) (unreachable) (br_table 0 1 1 (i32.const 1)))
+                   (drop) (f64.const 0))
+                 (drop)))"#,
+        );
+        assert_eq!(validate(&md), Ok(()));
+    }
+
+    #[test]
+    fn br_table_keeps_the_operand_type_across_targets() {
+        // `meet-funcref`. Checking a target used to push the TARGET's types back onto the
+        // stack instead of the operands that were popped, widening it — so a later target
+        // narrower than an earlier one saw `(ref null func)` where `(ref null $t)` was
+        // required and the module was refused.
+        let md = decode_wat(
+            r#"(module (type $t (func))
+                 (func (param i32) (result (ref null func))
+                   (block $l1 (result (ref null func))
+                     (block $l2 (result (ref null $t))
+                       (br_table $l1 $l1 $l2 (ref.null $t) (local.get 0))))))"#,
+        );
+        assert_eq!(validate(&md), Ok(()));
+    }
+
+    #[test]
+    fn br_table_still_rejects_a_target_the_operands_do_not_fit() {
+        // The other side of dropping the pairwise check: with real (non-bottom) operands,
+        // each target is still checked against them, so a genuinely wrong one is refused.
+        let md = decode_wat(
+            r#"(module (func
+                 (block (result f64)
+                   (block (result f32) (f32.const 1) (br_table 0 1 (i32.const 1)))
+                   (drop) (f64.const 0))
+                 (drop)))"#,
+        );
+        assert_eq!(validate(&md), Err(ValidateError::TypeMismatch));
+    }
+
+    #[test]
+    fn br_table_targets_must_agree_on_arity() {
+        let md = decode_wat(
+            r#"(module (func
+                 (block (result f32)
+                   (block (i32.const 1) (br_table 0 1 (i32.const 0)))
+                   (f32.const 0))
+                 (drop)))"#,
+        );
+        assert_eq!(validate(&md), Err(ValidateError::TypeMismatch));
     }
 
     #[test]

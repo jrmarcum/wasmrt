@@ -151,11 +151,13 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
   **full-doc prep** → owner publishes) holds. **v0.6.4 onward run under the pre-publish doc-sync gate, and
   each v0.6.4+ GitHub release was created automatically by the tag-triggered `.github/workflows/release.yml`**
   (push the `v*` tag → the release + notes publish themselves).
-- **Still worth doing (nice-to-have, not blocking):** per-crate crates.io **listing metadata** —
-  `keywords` (webassembly/wasm/runtime/interpreter/wasi), `categories` (`wasm`, `development-tools`,
-  `no-std`), and a per-crate `readme` (cargo packages the readme, so a `../../README.md` path is
-  rejected — give each crate its own short README or set `readme = false`). Verify whether these are on
-  the published crates and add them on a future release if not.
+- **✅ DONE 2026-08-07 (T9d) — per-crate crates.io listing metadata.** All three crates now carry
+  `keywords`, `categories` and `readme`, and each has **its own short README** (the `../../README.md`
+  path is indeed rejected — cargo packages the readme, so it must live inside the package). Categories
+  used: core `wasm`/`no-std`/`development-tools`, capi `wasm`/`external-ffi-bindings`/`development-tools`,
+  CLI `wasm`/`command-line-utilities`/`development-tools`. Verified with `cargo package --no-verify` on
+  each: clean. **These ship with the next publish (0.10.0)** — the already-published 0.9.0 crates do not
+  have them.
 - **Next release after v0.7.0: T7 — host imports + WASI preview 1** (0.8.0). Per-release checklist above
   — full doc sync before the publish handoff.
 - **PowerShell note (owner's shell):** Windows PowerShell 5.1 has no `&&`. Chain the publishes with

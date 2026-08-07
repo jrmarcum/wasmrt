@@ -256,6 +256,14 @@ pub enum BlockType {
     Empty,
     Value(ValType),
     TypeIndex(u32),
+    /// A single result of **concrete** reference type — `(ref null? $t)`, spelled long-form
+    /// as `0x63`/`0x64` followed by a heap type.
+    ///
+    /// It cannot collapse into [`BlockType::Value`] here: a concrete `ValType` carries its
+    /// family head (func/struct/array), and only the module's type section says which one
+    /// `$t` is. `decode_body` has no module context by design, so the index travels
+    /// unresolved and the validator — which does hold the module — maps it.
+    ConcreteRef { nullable: bool, type_index: u32 },
 }
 
 /// A load/store memory-immediate. `memory` is the target memory index (multi-memory):
@@ -630,8 +638,44 @@ fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
         -39 => BlockType::Value(ValType::ARRAYREF_NN),
         -40 => BlockType::Value(ValType::NULLREF_NN),
         -41 => BlockType::Value(ValType::EXNREF_NN),
+        // The long forms `0x63 ht` / `0x64 ht` — as s33, `0x63` reads as -29 and `0x64` as
+        // -28. A block result of concrete reference type has no other encoding, so without
+        // these two arms the heap-type byte was re-read as an opcode and a perfectly valid
+        // module was rejected as an unsupported instruction.
+        -29 | -28 => {
+            let nullable = v == -29;
+            match read_heap_type(r)? {
+                HeapType::Concrete(type_index) => BlockType::ConcreteRef {
+                    nullable,
+                    type_index,
+                },
+                ht => BlockType::Value(abstract_heap_val_type(ht, nullable)),
+            }
+        }
         _ => return Err(DecodeError::UnsupportedOpcode),
     })
+}
+
+/// The value type of an abstract heap type at a given nullability — the long-form
+/// `0x63`/`0x64` spelling of what the one-byte shorthands already encode.
+fn abstract_heap_val_type(ht: HeapType, nullable: bool) -> ValType {
+    let (n, nn) = match ht {
+        // `nofunc`/`noextern`/`none` are bottoms of their families; the port models each
+        // as its family head, exactly as `module::read_heap_type_ref` does.
+        HeapType::Func | HeapType::NoFunc => (ValType::FUNCREF, ValType::FUNCREF_NN),
+        HeapType::Extern | HeapType::NoExtern => (ValType::EXTERNREF, ValType::EXTERNREF_NN),
+        HeapType::Any => (ValType::ANYREF, ValType::ANYREF_NN),
+        HeapType::Eq => (ValType::EQREF, ValType::EQREF_NN),
+        HeapType::I31 => (ValType::I31REF, ValType::I31REF_NN),
+        HeapType::Struct => (ValType::STRUCTREF, ValType::STRUCTREF_NN),
+        HeapType::Array => (ValType::ARRAYREF, ValType::ARRAYREF_NN),
+        HeapType::Exn => (ValType::EXNREF, ValType::EXNREF_NN),
+        HeapType::None => (ValType::NULLREF, ValType::NULLREF_NN),
+        // Unreachable: `read_heap_type` returns `Concrete` only for a non-negative s33,
+        // which the caller has already split off.
+        HeapType::Concrete(_) => (ValType::ANYREF, ValType::ANYREF_NN),
+    };
+    if nullable { n } else { nn }
 }
 
 /// Read a heap type (§ GC binary format): a non-negative `s33` is a concrete type index;

@@ -109,6 +109,13 @@ struct Runner {
     store: Store,
     /// The most recently built module, which un-named actions target.
     current: Option<InstanceId>,
+    /// Whether the most recent `(module …)` **failed to build**.
+    ///
+    /// Distinct from `current == None`, which also means "the last module was named".
+    /// Without the distinction, the fall-back in [`Runner::target`] sends a failed
+    /// module's assertions to an unrelated earlier instance, which then reports them as
+    /// value mismatches — a bug hunt aimed at a defect that does not exist.
+    last_build_failed: bool,
     /// Modules by their textual `$name`, for `(invoke $M …)`.
     named: Vec<(String, InstanceId)>,
     /// Modules published by `(register "name")`, which later modules may import from.
@@ -253,6 +260,7 @@ impl Runner {
     }
 
     fn define_module(&mut self, list: &[Sexpr]) {
+        self.last_build_failed = false;
         match self.build(list) {
             Ok(inst) => {
                 // Track by textual `$name` for later `$M` references.
@@ -277,6 +285,7 @@ impl Runner {
                     self.fail(format!("module failed to build: {e}"));
                 }
                 self.current = None;
+                self.last_build_failed = true;
             }
         }
     }
@@ -286,7 +295,11 @@ impl Runner {
         match name {
             Some(n) => self.named.iter().find(|(k, _)| k == n).map(|(_, i)| *i),
             // With no un-named current module, fall back to the most recent named one — a
-            // `.wast` file that names every module still runs its bare actions.
+            // `.wast` file that names every module still runs its bare actions. But NOT
+            // after a failed build: those assertions belong to the module that failed, and
+            // running them against a different instance reports a wrong value instead of
+            // "nothing was tested".
+            None if self.last_build_failed => None,
             None => self.current.or_else(|| self.named.last().map(|(_, i)| *i)),
         }
     }
@@ -774,6 +787,32 @@ mod tests {
                    (memory.init $d (i32.const 0) (i32.const 0) (i32.const 4))
                    (i32.load (i32.const 0))))
                (assert_return (invoke "f") (i32.const 0x04030201))"#,
+        );
+        assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
+    }
+
+    #[test]
+    fn a_failed_builds_assertions_do_not_run_against_an_earlier_module() {
+        // T9a#3. The first module builds and is named, so it lives in `named`. The second
+        // fails to build — one failure. Its assertion must be SKIPPED ("nothing was
+        // tested"), not redirected to `$m`, which would answer 1 and report a value
+        // mismatch: a phantom defect pointing at code that is correct.
+        let s = run(
+            r#"(module $m (func (export "f") (result i32) (i32.const 1)))
+               (module (func (export "f") (result i32) (i64.const 2)))
+               (assert_return (invoke "f") (i32.const 2))"#,
+        );
+        assert_eq!((s.passed, s.failed, s.skipped), (0, 1, 1), "{:?}", s.failures);
+        assert!(s.failures[0].contains("failed to build"), "{:?}", s.failures);
+    }
+
+    #[test]
+    fn a_named_module_still_takes_bare_actions_when_nothing_failed() {
+        // The other half of the same fix: the fall-back itself is wanted. A file that names
+        // every module must still run its un-named actions.
+        let s = run(
+            r#"(module $m (func (export "f") (result i32) (i32.const 7)))
+               (assert_return (invoke "f") (i32.const 7))"#,
         );
         assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
     }

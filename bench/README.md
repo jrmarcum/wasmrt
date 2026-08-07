@@ -2,16 +2,33 @@
 
 Interpreter microbenchmark for wasmrt — the Rust port of wazmrt's `bench/bench.zig`.
 
-**Status (2026-08-06): still no `bench.rs` — and the runtime has been ready for one
-since v0.6.x.** The port gate opened 2026-07-27 and T0–T8 are done, so this is now
-a real gap rather than a placeholder: **the "fast" axis is one of wasmrt's three
-stated success criteria (`../cmem/vision.md`) and it has never been measured.**
+## ✅ It exists — but it lives at `crates/wasmrt-core/examples/bench.rs`
 
-Writing it is **T9c** (`../cmem/roadmap.md`). Until then:
+```sh
+cargo run --release -p wasmrt-core --example bench
+```
 
-> ⚠️ **Do not quote wazmrt's numbers as wasmrt's.** The figures below are the
-> *oracle's*, kept here as the methodology and the target to beat. Inheriting the
-> interpreter's shape does not inherit its measurements.
+**Why not `bench/bench.rs`:** a cargo target whose `path` points outside its package
+directory breaks `cargo package`, and all three crates are published. This directory
+keeps the **methodology and the oracle's reference figures**; the code lives in the
+package it measures.
+
+### wasmrt's own numbers — first measured 2026-08-07 (T9c)
+
+| Regime | Measurement |
+| --- | --- |
+| cold — toy module (70 B) | **3.5 µs** |
+| cold — real module (48,067 B) | **4.48 ms** ← quote this one |
+| steady — `sum(n)` tight `loop`/`br_if` | **~237 Mops/s** (232–240 over 1M/10M/50M) |
+
+Host: `x86_64-pc-windows-gnullvm`, release profile. Against the oracle's figures below
+that is **cold parity and ~90% of steady throughput** — measured on a different machine,
+so treat it as a sanity check, not a head-to-head.
+
+> ⚠️ **Do not quote wazmrt's numbers as wasmrt's.** The figures in the next section are
+> the *oracle's*, kept here as the methodology and the target to beat. Inheriting the
+> interpreter's shape does not inherit its measurements. Where the two are named
+> together above, both are labelled.
 
 ## What it measures (from wazmrt `cmem/vision.md` + `docs/port/06`)
 
@@ -32,9 +49,11 @@ Two regimes, reported separately — never conflated:
   throughput across days (run-to-run spread ~8%).
 - The cross-process cold-start-vs-Deno numbers are recorded in `cmem/testing.md`.
 - Canonical workload: `sum(n)` over a tight `loop`/`br_if` (see wazmrt bench).
-- Later: also measure SHA-256 (pin verify — `pin` is still a stub, T9e) and
-  per-artifact **binary size** (criterion (c) — smaller than wasm3/WAMR). Size is
-  **T9b** and is likewise unmeasured; both feed **T11**, the optimization review,
-  which cannot start without these baselines.
+- Later: also measure SHA-256 (pin verify — `pin` is still a stub, T9e).
+- **Per-artifact binary size is measured** (T9b, 2026-08-07) — the numbers are in
+  `../cmem/roadmap.md` (T9b) and `../cmem/vision.md`. The wasm3/WAMR comparison is
+  still outstanding: it needs those binaries present, not an estimate.
+- **T11 (the optimization review) is no longer blocked** — both baselines it required
+  now exist, so every proposal there can be stated as a delta.
 
 Reference original: `../../wazmrt/bench/bench.zig`.

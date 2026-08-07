@@ -18,16 +18,32 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-06, post-T8)
+## Spec-suite conformance — current (2026-08-07, T9 first pass)
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | **T8 (08-06)** |
-| --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | **61,033** |
-| failed | 871 | 1,521 | 751 | **738** |
-| skipped | 9,608 | 6,821 | 3,094 | **3,075** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | **98.8%** of 61,771 adjudicated |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | **T9a/b (08-07)** |
+| --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | **61,247** |
+| failed | 871 | 1,521 | 751 | 738 | **655** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | **2,932** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | **98.9%** of 61,902 adjudicated |
+
+**The 08-07 column is the cleanest movement in the table: failures down, skips down, passes up, and
+not one of the 284 files regressed.** Two distinct effects, both worth telling apart:
+
+- **Real capability** — `br_table.wast` went **24/1/161 → 185/0/0**, `memory_size.wast` 16 failures → 0
+  (a `memory.size` that read another instance's memory), `memory_grow` 2 → 0, `store1` 4 → 0.
+- **Honest re-accounting** — fixing the runner's failed-build redirect turned phantom "value mismatch"
+  failures back into skips, which is what they always were: `i31.wast` 31 → 6, `load1.wast` 15 → 5,
+  `exact-func-import.wast` 15 → 6, `custom-page-sizes.wast` 21 → 12. **Those files did not improve; the
+  measurement did.** The 08-06 note that "98.8% is if anything understated" was correct, and this is the
+  correction landing.
+
+⚠️ **Methodological finding.** The `br_table` win was logged against `ref.null $t` — one match arm.
+That fix was real and necessary but moved **other** files; `br_table.wast` needed four independent fixes
+(see `known-issues.md`). **A cost written beside a defect is a hypothesis about the cause unless someone
+measured the fix.** Re-measure after each punch-list item rather than banking its predicted value.
 
 The dip at 08-04 was capability, not regression: wiring `register` + `spectest` moved 2,784 assertions
 out of *skipped*, and ~649 of them were already-broken code that had been hidden behind a skip. The
@@ -92,9 +108,29 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-06, post-T8)
+## Current test state (2026-08-07, T9 first pass)
 
-**351 workspace tests, all green** (325 core + 26 capi), clippy clean on all four build surfaces.
+**363 workspace tests, all green** (337 core + 26 capi), clippy clean on all four build surfaces; the
+C-ABI gate (74/74 symbols + `c_smoke` compiled by clang) and Miri (26/26 incl. the lifecycle fuzz) both
+pass. T9 added 12: the four `br_table.wast` blockers (each pinned separately, because each one alone
+still left the file failing — a single "the file builds now" test would not say which fix mattered), the
+two `.wast`-runner cases (a failed build's assertions are skipped **and** the wanted fall-back still
+works), the four `br_table` typing rules, `memory.size` under two instances, and the data-count section.
+
+Two of them earn their keep beyond coverage:
+
+- **`memory_size_reads_its_own_instance_not_the_pool_slot` is mutation-verified** — reverting the single
+  expression makes it report `5` (module one's page count) instead of `1`, which is exactly the defect.
+- **`the_data_count_section_is_emitted_only_when_required` walks the section list** rather than
+  searching the module for the byte `0x0c`. The byte occurs all over a payload, so the scanning version
+  would have passed by accident — the same failure mode as a gate that cannot fail.
+
+### Benchmark (T9c, added 2026-08-07)
+
+`cargo run --release -p wasmrt-core --example bench` — cold (decode+validate+instantiate+call) and
+steady (`sum(n)` dispatch throughput), reported separately and never conflated. It **asserts the
+workload's own result before timing**, so it cannot measure a computation that is wrong, and it warms up
+outside the timer. Numbers live in `vision.md` and `roadmap.md` T9c. Compare **same-session A/B/A only**.
 T8 added 70 over v0.8.0's 281: the proposal-gate vectors (14 modules, each checked **both** ways —
 valid with all features on, and refused *naming that exact proposal* with one flag cleared, because a
 one-sided "assert it errors" test proves nothing about *why*), the resource-ceiling tests, 14 linker

@@ -19,18 +19,24 @@ wasmtime.** "Canonically similar to what wasmtime can run, without being wasmtim
    than the next-smallest runtime (wasm3 / WAMR), benchmarked later. See [design-decisions.md](design-decisions.md)
    for the size levers.
 
-## Where the three axes actually stand (2026-08-06, v0.9.0)
+## Where the three axes actually stand (2026-08-07, post-T9 first pass)
 
 Recorded because the axes above are the *destination* and are easy to read as a status claim.
+**All three now carry a measurement** — that changed at T9; before it, two were assertions.
 
 | Axis | Standing | Gap |
 | --- | --- | --- |
-| **Canonical** | **98.8%** of the official spec testsuite (61,033 / 738 / 3,075 over 284 files); every proposal in the scope list runs **except tail calls** | **Tail calls are the one unimplemented scope item** — `return_call`/`return_call_indirect` are not in the opcode table (`return_call_ref` is, via function-references). Consequently the C ABI has **no tail-call feature flag**: a toggle that gates nothing is worse than none. |
-| **Fast** | **Not yet measured.** wazmrt's cold-start win is inherited by design (same Option-A interpreter shape), but no wasmrt benchmark has been run. | The cold-vs-steady bench is a **T9** deliverable. Do not quote wazmrt's numbers as wasmrt's. |
-| **Small** | **Not yet minimized or measured.** The size-first release profile is in place from T0 (`opt-level="z"` + LTO + `codegen-units=1` + strip + `panic="abort"`), and there are still **zero third-party dependencies**. | `wasm-opt -Oz`, artifact measurement, and the wasm3/WAMR comparison are **T9**. One known waste already logged: an unconditional `data_count` section, 3 bytes per module with data segments. |
+| **Canonical** | **98.9%** of the official spec testsuite (61,247 / 655 / 2,932 over 284 files); every proposal in the scope list runs **except tail calls** | **Tail calls are the one unimplemented scope item** — `return_call`/`return_call_indirect` are not in the opcode table (`return_call_ref` is, via function-references). Consequently the C ABI has **no tail-call feature flag**: a toggle that gates nothing is worse than none. **1.0 = parity cannot be claimed without them.** |
+| **Fast** | ✅ **MEASURED 2026-08-07.** Cold start **4.48 ms** for a 48 KB module (3.5 µs for a toy); steady state **~237 Mops/s** on a tight `loop`/`br_if`. Bench: `cargo run --release -p wasmrt-core --example bench`. | Against the oracle's recorded figures (~4.4 ms at 46 KB, ~264 Mops/s) that is **cold parity, ~90% steady** — but those were measured on a different machine, so it is a sanity check, not a result. The Deno/V8 comparison is **not** re-run for wasmrt; that claim is still inherited. |
+| **Small** | ✅ **MEASURED 2026-08-07.** CLI **621 KiB**, cdylib **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** after `wasm-opt -Oz`), engine + text toolchain **260.9 KiB**. Still **zero third-party dependencies**. | The **wasm3 / WAMR comparison is not done** — it needs their binaries, not an estimate. `wasm-opt -Oz` is worth ~13% and is **not wired into any build script**. |
 
-**Honest summary:** of the three axes, only *canonical* has been driven hard and measured. *Fast* and
-*small* are architecturally set up but unproven — T9 is where they get numbers.
+**Honest summary:** *canonical* remains the axis driven hardest. *Fast* and *small* now have real
+baselines rather than inherited claims — which is what **T11 (the optimization review) was blocked on**;
+every proposal there can now be stated as a delta. What is still missing on both is the **comparison to
+another runtime**, which needs those runtimes present.
+
+⚠️ **The rule that motivated all of this stands: never quote wazmrt's numbers as wasmrt's.** The table
+above cites the oracle only alongside wasmrt's own measurement, and says so.
 
 ## Why replace wasmtime under the loaders
 
