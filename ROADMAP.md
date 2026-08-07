@@ -36,7 +36,9 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | **0.7.0** | Text toolchain + Validate (complete) | `.wat` assembler + `.wast` runner, bringing the official spec testsuite online; plus the SIMD / atomics / GC / EH typing arms, so the type-checker covers everything the interpreter runs | ✅ |
 | **0.8.0** | WASI + CLI | host imports + module linking on a shared store + WASI preview 1 **including the sandboxed filesystem** (`--dir` / `--ro-dir` preopens); plus `#![forbid(unsafe_code)]` in the engine | ✅ |
 | **0.9.0** | C ABI | the `wasmrt.h` embedding surface — checked handles, caller-based host callbacks, configurable proposals + resource ceilings; gated by c-smoke, link-completeness and Miri | ✅ |
-| 0.10.0 | Hardening | licensing, size minimization, all gates green | ⬜ |
+| 0.10.0 | Hardening | the correctness punch-list, licensing, docs, size minimization, all gates green | ⬜ |
+| 0.11.0 | Bug hunt + code hygiene | a comprehensive audit across tested **and** untested paths — bugs, fall-throughs, stale workarounds, dead code, missing documentation | ⬜ |
+| 0.12.0 | Optimization review | measured options for making the shipped artifacts faster and smaller — judged at the binary and C-ABI boundary, not by micro-benchmarks | ⬜ |
 | **1.0.0** | **Parity** | **full parity with the wazmrt oracle** | ⬜ |
 
 ## What you can do with wasmrt (use-case matrix)
@@ -82,7 +84,7 @@ Checked off as each capability lands and passes its gate.
 | Use case | Status | Lands in |
 | --- | --- | --- |
 | Native shared library via the C ABI (`wasmrt.h`) | ✅ | 0.9 |
-| Embed wasmrt itself inside another `wasm32` host | ⬜ | 0.10 |
+| Embed wasmrt itself inside another `wasm32` host | ⬜ | loader Phase 4 |
 | Rust embedding via the `wasmrt-core` crate | ✅ | 0.9 |
 
 ## Follow along

@@ -9,7 +9,7 @@
 **proposal gating** and **configurable resource ceilings** (the owner chose real gating over
 limits-only), a **`Linker` in core** shared by the C ABI / native crate / WASI / `.wast` runner, and
 fixed **two silent-wrong-output defects** that work surfaced. Suite **61,033 / 738 / 3,075 — 98.8%**.
-**Next: T9 — licensing, docs, size, and all gates green.** Detail in the T8 entry below.
+**Next: T9 (0.10.0)** — the correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin`. **Then T10 — bug hunt + code hygiene (0.11.0), and T11 — optimization review (0.12.0)**, both added by the owner 2026-08-06. **measure → find → optimize**, in that order and for a reason (see the Definition of done).
 
 ## Superseded status block (opened 2026-07-27, last amended 2026-08-05) — kept for the freeze record
 
@@ -519,11 +519,20 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     root-owned, `off|warn|enforce`, a pure `decide()` matrix, hash the **in-memory bytes about to run**,
     and the opt-out may only *raise* strictness.
 
-  ### T9f — Scope confirmations (NOT bugs — record, do not "fix") `[ ]`
-  - **Tail calls** (`return_call`/`return_call_indirect`) are the one **in-scope** proposal still
-    unimplemented, and the one oracle-split residual → conform against **wasmtime + the spec suite**.
-    Until they exist there is deliberately **no C-ABI tail-call flag** (a toggle that gates nothing is
-    worse than none).
+  ### T9f — Tail calls: the last unimplemented IN-SCOPE proposal `[ ]`
+  - `return_call` / `return_call_indirect` (`0x12`/`0x13`) are **not in the opcode table at all**;
+    `return_call_ref` (`0x15`) exists via function-references. They are **in scope** per `vision.md`
+    (full browser-standard parity), so **1.0 = parity cannot be claimed without them** — which is why
+    this is a build item and not a "leave it" note.
+  - **The one oracle-split residual:** the frozen wazmrt oracle does not implement them either, so
+    conform against **wasmtime + the official spec testsuite** rather than the oracle.
+  - Touches decode (`opcode.rs`), validation, and the interpreter's call path. **A real tail call must
+    replace the current frame, not grow the stack** — the point of the proposal is unbounded mutual
+    recursion, so a naive "call then return" implementation passes the tests and misses the feature.
+  - **Only once they exist may a C-ABI `tail_call` feature flag be added** — and then `abi_version()`
+    stays 1 (adding an enum value is additive), but `features.rs` and the header must move together.
+
+  ### T9g — Scope confirmations (NOT bugs — record, do not "fix") `[ ]`
   - **Out of scope by recorded invariant — leave these failing:** 64-bit **tables**
     (`table_copy64` 22, `table_init64` 93 skips, `table_fill64` 70 skips, `float_memory64` 84 skips),
     and the untargeted proposals `annotations` **51**, `custom-descriptors`
@@ -539,13 +548,81 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   some of those will be failures at first (the same accounting as the `register` work on 08-04 and the
   linker work on 08-06).
 
+- **T10 — Bug hunt + code hygiene.** *(Owner, 2026-08-06.)* `[ ]`
+
+  **This is the `INDEX.md` "look for code issues" trigger run as a scheduled task**, not a new process —
+  read that trigger first; it is binding and already specifies the method (fan out parallel read-only
+  investigators per category, consolidate, report `file:line` + one-line + severity, fix the safe ones,
+  and **keep the suite green by diffing the OUTPUT counts, not exit codes**). The owner's five
+  categories:
+
+  1. **Bugs.** Inverted logic, LEB off-by-ones, wrong-tagged enum access, stack-order, missing bounds
+     checks. **Hunt the silent-wrong-output class hardest** — every serious defect this port has found
+     was one (dropped table initializers, element-segment form 4 rewriting a type, `br_table`'s missing
+     label vector, `(data "a""b")` concatenating, `Op::MemorySize` reading another instance's memory).
+     A module that is *rejected* announces itself; one that runs and answers wrongly does not.
+  2. **Fall-throughs (worst).** Unhandled input that emits a stub or placeholder instead of erroring.
+     Prefer a hard `Err(Unsupported*)` over silent-wrong — the standing rule since T4.
+  3. **Stale workarounds** — `TODO`, "for now", anything written around a limitation that has since
+     been lifted. Several deferrals were resolved by later tasks; the guards may still be in place.
+  4. **Dead code.** ⚠️ **The C ABI changed this check.** `cargo`/clippy judge reachability in *Rust*
+     terms, and ~74 symbols are now reached **only from C** — they will look unused and are not.
+     **`tests/abi_symbols.c` is the authority on what must exist**; grep-verify against it (and against
+     re-exports) before deleting anything.
+  5. **Missing function documentation.** Consider making it mechanical rather than aspirational —
+     `#![warn(missing_docs)]` on the public surface, the same move that turned the safety directive from
+     a convention into a compile error at v0.8.0. A rule nobody has watched fail is not enforcement.
+
+  **Gate:** zero regressions across all four surfaces + the C and Miri gates; suite counts diffed
+  against the pre-hunt baseline; every finding either fixed or logged in `known-issues.md` with its
+  `file:line` and why it was left.
+
+- **T11 — Optimization review (a DISCUSSION, not a blind pass).** *(Owner, 2026-08-06.)* `[ ]`
+
+  **The deliverable is options presented to the owner with measurements and trade-offs — then a
+  decision — not unilateral optimization.** Scope: making the code more efficient, faster and smaller,
+  **judged from the standpoint of the final binary and the C ABI** rather than of micro-benchmarks.
+
+  - **Depends on T9's baselines.** T9b and T9c are where size and speed are measured for the first time
+    (both axes are currently **unproven** — `vision.md`). **An optimization review without a baseline is
+    guesswork**; do not start T11 until those numbers exist, and record them so every proposal can be
+    stated as a delta.
+  - **Judge at the artifact boundary.** The four shipped surfaces are the CLI binary, the `staticlib`,
+    the `cdylib`, and the freestanding `wasm32` core — plus the C ABI's own call overhead. A change that
+    wins in a micro-benchmark and does not move any of those has not earned its complexity.
+  - **Invariants that constrain what may be proposed** (breaking one is a decision-gate, not an
+    optimization): the **`u128` value slot** (a `v128` is one slot — reverting to 2×`u64` reintroduces
+    the stack-desync hazard class wazmrt carries), **`#![forbid(unsafe_code)]`** in core and the CLI,
+    **zero third-party dependencies**, **oracle parity** on observable behaviour, and the **frozen C ABI
+    at `abi_version() == 1`** — a change that alters the boundary must bump it deliberately, and the
+    header/library pair is pinned by a test.
+  - Candidate areas to *evaluate* (not a commitment): dispatch shape in `interp.rs` (the switch loop),
+    per-instruction decode cost vs. a denser IR, allocation churn in hot paths, monomorphisation and
+    generic bloat against binary size, `opt-level` / LTO / `panic` strategy per artifact, `wasm-opt`
+    passes for the freestanding target, and whether the C ABI's marshalling copies more than it must.
+  - **Gate:** for each accepted change, a measured before/after on the artifact(s) it targets, zero
+    behavioural drift against the oracle, and the full suite + C + Miri gates green. **Reject anything
+    that trades a recorded invariant for a number** unless the owner takes that decision explicitly.
+
 **Extended proposal — the one oracle-split residual:** **tail calls** (`return_call`/`return_call_indirect`)
 have no wazmrt oracle → conform against **wasmtime + the official spec testsuite**. Slot this into T5/T6
 alongside the rest; everything else parity-tests directly against the frozen wazmrt.
 
-**Definition of done** — full Rust↔oracle parity on **both** targets (native + `wasm32`), all gates green
-(spec testsuite, wasi-gate, c-smoke, Miri fuzz), size minimized, and the drift monitor clean (or the
-oracle re-baselined deliberately).
+**Definition of done (1.0)** — full Rust↔oracle parity on **both** targets (native + `wasm32`), all gates
+green (spec testsuite, wasi-gate, c-smoke, abi-symbols, Miri fuzz), size minimized, and the drift monitor
+clean (or the oracle re-baselined deliberately).
+
+**Three tasks stand between v0.9.0 and that** (T10/T11 added by the owner 2026-08-06):
+
+| Task | Version | What it is | Why it is separate |
+| --- | --- | --- | --- |
+| **T9** | 0.10.0 | Correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin` | Closes the *known* gaps — everything already written down |
+| **T10** | 0.11.0 | Bug hunt + code hygiene | Finds the *unknown* ones, across tested **and untested** paths. Distinct from T9 on purpose: T9 works a list, T10 goes looking. |
+| **T11** | 0.12.0 | Optimization review | A **discussion with measurements**, not a pass. **Cannot start before T9's baselines exist** — optimizing without a baseline is guesswork. |
+
+Ordering is deliberate and should not be shuffled: **measure (T9) → find (T10) → optimize (T11)**.
+Optimizing before the bug hunt risks micro-tuning code that is about to change or be deleted, and
+reviewing performance before any baseline exists produces opinions rather than deltas.
 
 ## Loader integration phases (parallel track — see `loaders.md`)
 

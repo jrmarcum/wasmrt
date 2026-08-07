@@ -25,7 +25,10 @@ line fills up, the remaining stage→version map shifts down by one rather than 
 one from 0.8 onward when the 0.6 line filled up; T6 and the T4 completion then shipped together in 0.7.0*:
 0.1 T0 scaffold · 0.2 T1 types+reader · 0.3 T2 opcode · 0.4 T3 decode · 0.5 T4 validate (core) ·
 0.6.x T5 interp (patch per feature slice, 0.6.0–0.6.9) · **0.7 T6 text toolchain + T4 completion (the deferred SIMD/atomics/GC/EH typing arms)** ·
-0.8 T7 wasi+cli · 0.9 T8 C-ABI · 0.10 T9 hardening · **1.0 = parity**.
+0.8 T7 wasi+cli · 0.9 T8 C-ABI · 0.10 T9 hardening · **0.11 T10 bug hunt + code hygiene** · **0.12 T11 optimization review** · **1.0 = parity**.
+
+*(T10 and T11 added by the owner 2026-08-06. The single-digit-patch rule constrains the PATCH component
+only, so a two-digit MINOR — 0.10, 0.11, 0.12 — is correct and not a violation.)*
 
 ## Crates & names (owner decision: CLI takes the bare `wasmrt` name)
 
@@ -130,7 +133,7 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
   and the **full** `cmem/` sync were all in the release commit `a7abd83` itself, so the published
   artifact carries its own docs. Nine `cmem/` files plus `tests/README.md` were touched, and the v0
   header draft in `docs/port/` was marked HISTORICAL rather than left to mislead.
-- **Next release: T9 — licensing, docs, size minimization, all gates green** (0.10.0).
+- **Next release: T9 — the correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin`** (0.10.0). **Then T10 — bug hunt + code hygiene (0.11.0) and T11 — optimization review (0.12.0)**, added by the owner 2026-08-06.
 
 ### Previous
 

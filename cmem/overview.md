@@ -79,7 +79,7 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-**Next: T9 — licensing, docs, size minimization, and all gates green.**
+**Next: T9 — the correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin`.** Then **T10** (bug hunt + code hygiene) and **T11** (optimization review), added by the owner 2026-08-06 — the ordering **measure → find → optimize** is deliberate.
 See the task list in [roadmap.md](roadmap.md). **351 workspace tests** green; clippy clean; native +
 `wasm32` no_std all build.
 
