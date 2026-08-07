@@ -39,6 +39,7 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | 0.10.0 | Hardening | the correctness punch-list, licensing, docs, size minimization, all gates green | ⬜ |
 | 0.11.0 | Bug hunt + code hygiene | a comprehensive audit across tested **and** untested paths — bugs, fall-throughs, stale workarounds, dead code, missing documentation | ⬜ |
 | 0.12.0 | Optimization review | measured options for making the shipped artifacts faster and smaller — judged at the binary and C-ABI boundary, not by micro-benchmarks | ⬜ |
+| 0.13.0 | Security review | an adversarial review of the penetration surfaces — hostile guests, malformed input, and C-ABI misuse — with recommended mitigations | ⬜ |
 | **1.0.0** | **Parity** | **full parity with the wazmrt oracle** | ⬜ |
 
 ## What you can do with wasmrt (use-case matrix)

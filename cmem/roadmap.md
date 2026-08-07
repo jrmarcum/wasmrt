@@ -604,6 +604,81 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     behavioural drift against the oracle, and the full suite + C + Miri gates green. **Reject anything
     that trades a recorded invariant for a number** unless the owner takes that decision explicitly.
 
+- **T12 — Security review: find the penetration surfaces, recommend the plugs.** *(Owner, 2026-08-06.)* `[ ]`
+
+  **A review-and-recommend phase, like T11** — the deliverable is *findings + recommended mitigations
+  with their costs*, presented for a decision. Do not unilaterally harden: several plausible mitigations
+  trade against recorded invariants (zero dependencies, `forbid(unsafe_code)`, smallest-binary, oracle
+  parity), and those trades are the owner's to make.
+
+  **Frame it around the actual threat model, which has three distinct adversaries** — conflating them is
+  how a review misses things:
+
+  1. **A hostile GUEST module** (the main one — wasmrt's entire job is running untrusted code).
+  2. **A hostile INPUT to the tooling** — a malformed `.wasm`/`.wat`/`.wast` fed to the decoder,
+     validator or text parser, possibly never executed.
+  3. **A careless or hostile EMBEDDER** misusing the C ABI. (Distinct from a hostile guest, and the only
+     adversary that meets `unsafe` code.)
+
+  ### T12a — Reachable panics are a DoS surface, and the release profile makes them fatal `[ ]`
+  **`[profile.release]` sets `panic = "abort"`.** For a library whose purpose is to contain untrusted
+  code, **any panic reachable from hostile input kills the embedder's process outright** — no unwind, no
+  error, no recovery. The suite already caught one (`v128.const i64x2` hit an `unreachable!()` and
+  aborted the conformance run); the standing rule from that fix is *a library must reject a module,
+  never abort the embedder*. **Audit for reachable panics on hostile input:** `unwrap`/`expect`,
+  `unreachable!`/`panic!`/`todo!`, slice indexing and slicing, division, and `as`-cast assumptions —
+  across decode, validate, interp, the text toolchain, WASI, and the C ABI. Recommend, per site, either
+  a real error path or a proof it is unreachable.
+
+  ### T12b — Arithmetic behaves differently in release than in debug `[ ]`
+  There are **no `overflow-checks` in the release profile**, so integer arithmetic **wraps silently in
+  release and panics in debug**. Both are bad on hostile input, in opposite ways: debug turns an
+  overflow into T12a's process abort, release turns it into a *wrong value* that may then be used as an
+  index, length or offset. The engine already computes effective addresses overflow-safe on purpose
+  (`mem_range`, `checked_add`/`checked_mul` in the limits paths) — **this task is to establish whether
+  that discipline is complete**, and to recommend whether `overflow-checks = true` should be on in
+  release despite the size and speed cost.
+
+  ### T12c — Resource exhaustion `[ ]`
+  Enumerate every unbounded-by-input quantity and confirm each has a ceiling an embedder can reach.
+  Known caps: `ResourceLimits` (memory bytes, table elems, call depth, GC objects, exn boxes — all
+  configurable from C as of T8), `MAX_CTRL_DEPTH`, `MAX_LOCALS`, the text parser's paren-depth cap, and
+  `FuncValidator.body_len` bounding `array.new_fixed`'s unvalidated `n`. **Look for the ones nobody has
+  listed** — allocation driven by a decoded count before that count is validated is the classic shape,
+  and *quadratic* behaviour on adversarial input is as effective as an unbounded allocation.
+
+  ### T12d — The sandbox, re-examined as an attacker would `[ ]`
+  Re-derive the escape properties rather than re-reading them: `..` cannot rise above a preopen,
+  absolute targets re-base to the preopen root, symlink targets go through the same loop, `SYMLINK_MAX`
+  bounds cycles, rights only ever narrow. **The accepted TOCTOU residual is in scope to re-examine, not
+  to re-litigate** — the decision (accept + document, 2026-08-05) stands unless T12 produces *new*
+  evidence that the deployment assumption is weaker than believed. Confirm the canary test still fails
+  when the guard is removed (mutation), and check Windows/UNC/device-name handling specifically.
+
+  ### T12e — The C ABI as an attack surface `[ ]`
+  It is the only place `unsafe` exists. Miri covers the lifecycle under *well-formed* use; T12 asks what
+  a **misusing** embedder can provoke — null and dangling pointers, wrong-store handles, lying lengths,
+  re-entrancy from inside a host callback, a callback that traps or unwinds, `env_finalizer` interaction
+  with teardown order, and the documented invalidation rule for `wasmrt_memory_data()`. Recommend where
+  a check is worth its cost and where the contract should simply be stated more sharply.
+
+  ### T12f — Method + the one dependency question it will raise `[ ]`
+  - **Fuzzing is the right tool for adversaries 1 and 2** (decoder, validator, text parser, and a
+    differential fuzz against the frozen oracle). It needs `cargo-fuzz`/AFL or similar.
+    **Decision to put to the owner:** these are **dev-dependencies, not runtime dependencies** — they do
+    not ship in any artifact and so do not breach the zero-dependency posture, which is about what the
+    binary contains. Worth stating explicitly, because "zero dependencies" has been applied strictly and
+    someone will otherwise refuse the tool that finds the bugs.
+  - Differential-test malformed input against the oracle: *both* must reject, and neither may crash.
+  - **Authenticity is T9's `pin`, not T12's** — but T12 should review the pin design once implemented,
+    and the still-design-only signature path (`security-model.md`).
+  - **Record findings even when the recommendation is "accept"**, with the deployment assumption that
+    makes it acceptable — the pattern already set by the resolver residual.
+
+  **Gate:** a written review covering all three adversaries, every finding logged in `known-issues.md`
+  with a severity and a recommendation, and the owner's decision recorded for each. Any mitigation that
+  lands must keep every gate green and not silently trade an invariant.
+
 **Extended proposal — the one oracle-split residual:** **tail calls** (`return_call`/`return_call_indirect`)
 have no wazmrt oracle → conform against **wasmtime + the official spec testsuite**. Slot this into T5/T6
 alongside the rest; everything else parity-tests directly against the frozen wazmrt.
@@ -612,17 +687,23 @@ alongside the rest; everything else parity-tests directly against the frozen waz
 green (spec testsuite, wasi-gate, c-smoke, abi-symbols, Miri fuzz), size minimized, and the drift monitor
 clean (or the oracle re-baselined deliberately).
 
-**Three tasks stand between v0.9.0 and that** (T10/T11 added by the owner 2026-08-06):
+**Four tasks stand between v0.9.0 and that** (T10–T12 added by the owner 2026-08-06):
 
 | Task | Version | What it is | Why it is separate |
 | --- | --- | --- | --- |
 | **T9** | 0.10.0 | Correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin` | Closes the *known* gaps — everything already written down |
 | **T10** | 0.11.0 | Bug hunt + code hygiene | Finds the *unknown* ones, across tested **and untested** paths. Distinct from T9 on purpose: T9 works a list, T10 goes looking. |
 | **T11** | 0.12.0 | Optimization review | A **discussion with measurements**, not a pass. **Cannot start before T9's baselines exist** — optimizing without a baseline is guesswork. |
+| **T12** | 0.13.0 | Security review — find penetration surfaces, recommend plugs | Also **review-and-recommend**, and deliberately **last**: it must audit the code that ships, so it has to follow the bug hunt *and* the optimization pass. An optimization can introduce a surface (`overflow-checks`, a fast path that skips a bounds check), so reviewing before T11 would audit code that is about to change. |
 
-Ordering is deliberate and should not be shuffled: **measure (T9) → find (T10) → optimize (T11)**.
-Optimizing before the bug hunt risks micro-tuning code that is about to change or be deleted, and
-reviewing performance before any baseline exists produces opinions rather than deltas.
+Ordering is deliberate and should not be shuffled: **measure (T9) → find (T10) → optimize (T11) →
+attack (T12)**. Optimizing before the bug hunt risks micro-tuning code that is about to change or be
+deleted; reviewing performance before any baseline exists produces opinions rather than deltas; and a
+security review is only worth the paper it is written on if it examines the *final* code.
+
+**T11 and T12 both end in a decision, not a diff.** Each produces findings and recommended changes with
+their costs — several of which trade against recorded invariants (zero dependencies,
+`forbid(unsafe_code)`, smallest-binary, oracle parity) — and those trades belong to the owner.
 
 ## Loader integration phases (parallel track — see `loaders.md`)
 

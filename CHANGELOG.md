@@ -12,8 +12,7 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 ## [Unreleased]
 
 _Next: **0.10.0 (T9)** — the correctness punch-list, tail calls, licensing and docs, size + performance
-measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt and code-hygiene pass, and
-**0.12.0 (T11)** — an optimization review of the shipped binaries and the C ABI._
+measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt and code-hygiene pass; **0.12.0 (T11)** — an optimization review of the shipped binaries and the C ABI; and **0.13.0 (T12)** — a security review of the penetration surfaces, with recommended mitigations._
 
 ## [0.9.0] — the `wasmrt.h` C ABI (stage T8)
 

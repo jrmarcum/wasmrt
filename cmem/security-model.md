@@ -6,6 +6,27 @@ wasmrt carries over wazmrt's security design **to replicate**, not to reinvent. 
 running guest may touch — BUILT in wazmrt) and **Authenticity** (is this the code I approved — pin BUILT,
 signatures design-only).
 
+## 🔎 A dedicated adversarial review is scheduled: **T12 (0.13.0)** — owner, 2026-08-06
+
+This file records the security **design** — what the model is and why. **T12 is where it gets attacked
+on purpose**: a review-and-recommend phase over the *final* code (hence after the bug hunt and the
+optimization pass), framed around three distinct adversaries — a hostile **guest**, a malformed
+**input** to the tooling that may never execute, and a careless or hostile **embedder** misusing the C
+ABI. Full scope in [roadmap.md](roadmap.md) (T12a–f).
+
+**Two findings are already on its list, both from the release profile rather than from any code:**
+
+- **`panic = "abort"` makes every reachable panic a host-process kill.** For a library whose purpose is
+  to contain untrusted code, a panic reachable from hostile input is a denial of service against the
+  embedder — no unwind, no error, no recovery. The spec suite already caught one (`v128.const i64x2`
+  hit an `unreachable!()` and aborted the run); the rule from that fix stands: **a library must reject
+  a module, never abort the embedder.**
+- **No `overflow-checks` in release** — arithmetic **wraps in release and panics in debug**. Both are
+  bad on hostile input, in opposite directions: debug gives the abort above, release gives a *wrong
+  value* that may then be used as an index, length or offset.
+
+Neither is a vulnerability on its own; both are surfaces, and T12 decides what to do about them.
+
 ## Two new authority controls at T8 / v0.9.0 (2026-08-06) — reachable from C
 
 Both are **new capability wazmrt does not have**, and both are enforced where they cannot be bypassed:
