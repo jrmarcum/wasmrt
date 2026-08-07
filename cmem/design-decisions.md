@@ -154,11 +154,13 @@ Choices made while porting; consistent with "boundary-faithful behavior, idiomat
   stack. Float rounding is bit-manipulation (no_std); **`sqrt` is `std`-gated** (the one no_std float gap).
 - **Versioning = port-progress ladder**, per-task release to crates.io (see [releasing.md](releasing.md)).
 
-## Open decisions — now carried as task-list GATES (owner, 2026-07-27: defer, don't resolve up front)
+## ✅ The four deferred decisions — ALL RESOLVED as of 2026-08-06 (kept for the *why*)
 
 These four were "raise before/at scaffolding." At the freeze the owner chose to **defer them as explicit
 decision-gates at the relevant task-list step** (see [roadmap.md](roadmap.md)) rather than resolve them
-all now — each is decided when the port reaches the task that needs it.
+all now — each decided when the port reached the task that needed it. **That queue is now empty**: the
+crate split went at T0, `random_get` and the sandbox resolver at T7, and the `wasmrt.h` shape at T8.
+Each entry below records the answer and the reasoning, so none of them gets re-derived.
 
 - ~~`random_get`: non-crypto PRNG vs. an OS CSPRNG?~~ **✅ RESOLVED (owner, 2026-08-04): a ChaCha20
   CSPRNG seeded once from the OS**, matching the oracle (wazmrt moved to ChaCha on 2026-07-20, so parity
@@ -190,4 +192,9 @@ all now — each is decided when the port reaches the task that needs it.
      and reporting nothing is better than reporting a plausible-looking wrong frame.
 
   Delivered 2026-08-06 as v0.9.0 (T8); the resulting invariants are in [architecture.md](architecture.md).
-- core+capi crate split (recommended) vs. a single multi-target crate. → **gate at the scaffold task.**
+- ~~core+capi crate split vs. a single multi-target crate.~~ **✅ RESOLVED (owner, 2026-07-27, at the T0
+  scaffold): a workspace of THREE** — `wasmrt-core` (`no_std`-friendly, `default=["std"]`),
+  `wasmrt-capi` (`staticlib`+`cdylib`+`rlib`, ships `include/wasmrt.h`) and `wasmrt` (the CLI bin). It
+  earned its keep at T8: because capi is a separate crate, `wasmrt-core` can stay
+  `#![forbid(unsafe_code)]` while the C boundary — which cannot be — is `deny` in a crate of its own.
+  A single multi-target crate would have forced one lint posture on both.

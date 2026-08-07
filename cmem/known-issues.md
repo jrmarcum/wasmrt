@@ -1,8 +1,9 @@
 # Known Issues
 
-Issue tracker. Gate open (2026-07-27); **assemble → decode → validate → run all working** (T0–T6 done,
-v0.1.0–v0.7.0). This records the **inherited concerns** from the frozen wazmrt oracle, the **port notes /
-intentional divergences**, and the **open decisions** (now task-list gates). Log real wasmrt bugs here
+Issue tracker. Gate open (2026-07-27); **assemble → decode → validate → run → WASI → embed-from-C all
+working** (T0–T8 done, published through v0.9.0). This records the **inherited concerns** from the frozen
+wazmrt oracle, the **port notes /
+intentional divergences**, and the **four deferred decisions (all now RESOLVED)**. Log real wasmrt bugs here
 (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
 ## ✅ Fixed at T8 (2026-08-06) — two SILENT-WRONG-OUTPUT defects
@@ -94,7 +95,7 @@ preopen while a guest runs) is written up in `security-model.md`. Do not re-liti
 | 3 | ~~**Literal/text edges**~~ **DONE 2026-08-05** (owner chose to grind these before T8) — see below. | — | ✅ |
 | 4 | **64-bit table index type** (`(table $t i64 …)`) — `table_copy64` 22, `table_init64` 3. | Out of scope by a recorded invariant ("tables stay 32-bit", matching the oracle). | Leave unless a loader needs it — it is a **scope change**, not a bug. |
 | 5 | **Proposals not targeted** — `custom-page-sizes` 21+18, `exact` 18, `memory64-imports` 20. | Not in the feature set. | Leave; revisit only if the spec promotes them. |
-| 6 | **Debug-build stack depth** — deep recursion can overflow the native stack before the 512-frame cap fires (release is correct). | Debug only. Deliberately not "fixed" by lowering the cap (oracle parity). | Revisit at T8 alongside the C ABI's own re-entrancy limits. |
+| 6 | **Debug-build stack depth** — deep recursion can overflow the native stack before the 512-frame cap fires (release is correct). | Debug only. Deliberately not "fixed" by lowering the cap (oracle parity). | **✅ ADDRESSED at T8 (2026-08-06)** — `max_call_depth` is per-store config (`ResourceLimits`, `wasmrt_config_set_max_call_depth`), so an embedder linking the debug `cdylib` can lower it. **The default stays 512** for oracle parity. |
 
 **Not an issue, recorded so it is not re-litigated:** `delegate` is rejected by assembler, validator and
 interpreter alike — deliberate, oracle-faithful. `legacy/try_delegate.wast` failing is the *correct*
@@ -144,10 +145,15 @@ wazmrt  stdout: trap: UncaughtException
 ```
 
 The missing piece is the **`decode_body_tracked` byte-offset work deferred at T2** — without per-instruction
-offsets there is no frame to report. **A C-ABI embedder needs this more than the CLI does**: at T8 a trap
-crossing the boundary is otherwise completely opaque. *(Keep writing diagnostics to **stderr** — that is a
+offsets there is no frame to report. *(Keep writing diagnostics to **stderr** — that is a
 deliberate divergence, not a bug: `wasmrt wasi prog.wasm > out.txt` then captures only guest output,
 whereas the oracle would mix its trap report into that file.)*
+
+**Status after T8 (2026-08-06): still open, but the ABI cost is now bounded.** The C ABI ships the frame
+API in its **final shape** — `wasmrt_trap_frame_count` / `wasmrt_trap_frame` — and that shape **always
+reports 0 frames**, deliberately: an approximate frame is worse than none, and committing the signature
+now means real backtraces land at **T9 without a breaking ABI change**. `wasmrt_trap_message` carries the
+reason meanwhile. So the remaining work is the byte offsets themselves, not the surface.
 
 ### 5. An unconditional `data_count` section wastes 3 bytes — against the "small" axis
 
@@ -335,9 +341,11 @@ all three of assembler/validator/interpreter reject on purpose.
   that 512 of them can exhaust a default 8 MB thread stack first, aborting the process.
   **Deliberately NOT "fixed" by lowering the cap** — that would diverge from the oracle on legal
   deeply-recursive programs, and the release profile (what ships) behaves correctly. The runner's own
-  test spawns a 32 MB-stack thread. **Revisit at T8**: an embedder linking the debug cdylib is exposed,
-  so the real fix is either a configurable depth limit on the C ABI or shrinking the per-frame footprint.
-  Worth re-measuring once the spec suite runs, since it has deeper recursion cases than the hand vectors.
+  test spawns a 32 MB-stack thread. **✅ ADDRESSED at T8 (2026-08-06) — the first of the two options:**
+  the depth limit is now per-store configuration (`ResourceLimits::max_call_depth`, exposed as
+  `wasmrt_config_set_max_call_depth`), so an embedder linking the debug `cdylib` can lower it without the
+  shipped default drifting from the oracle. **The default remains 512.** Shrinking the per-frame
+  footprint stays available if it ever becomes the better answer.
 - **`delegate` is rejected, inherited from the oracle** (`interp.rs throw_exception`, v0.6.9). `delegate l`
   re-raises an exception "at label `l`", routing that can SKIP handlers an ordinary outward unwind would
   run. wazmrt does not implement that label arithmetic (no reference impl remained to verify it against)
@@ -433,16 +441,21 @@ all three of assembler/validator/interpreter reject on purpose.
   landed in wazmrt before the freeze — they moved from the wasmtime side of the oracle split to the
   wazmrt side. memory64 is **in scope** (owner, 2026-07-27). Re-check only if the frozen oracle drifts.
 
-## Open decisions (owner — from `design-decisions.md`) — deferred as task-list GATES (2026-07-27)
+## ✅ The four deferred decisions — ALL RESOLVED (queue empty as of 2026-08-06)
 
-The owner chose (2026-07-27) to **defer these as decision-gates at the relevant conversion step** rather
-than resolve them up front. Decide each when the port reaches its task (see `roadmap.md`):
+The owner chose (2026-07-27) to defer these as decision-gates at the relevant conversion step rather
+than resolve them up front. **Every one has now been decided.** Full reasoning in
+`design-decisions.md`; summarized here so nothing gets re-opened by accident:
 
-- `random_get`: parity PRNG vs OS CSPRNG → **WASI task** (wazmrt now uses a ChaCha CSPRNG, so parity ≈ CSPRNG).
-- Zero-dep vs. `cap-std`/`openat2` to close #17 TOCTOU → **WASI-sandbox task**.
-- `wasmrt.h` review — the "held until wazmrt finalizes" block is now **lifted** (oracle frozen) →
-  **C-ABI task** (finalize with the owner before writing `wasmrt-capi`).
-- core+capi crate split vs. single multi-target crate → **scaffold task**.
+| Decision | Resolved | Answer |
+| --- | --- | --- |
+| core+capi crate split vs. one multi-target crate | **T0**, 2026-07-27 | **Workspace of three.** It earned its keep at T8: core stays `#![forbid(unsafe_code)]` while the C boundary — which cannot be — is `deny` in a crate of its own. |
+| `random_get`: parity PRNG vs OS CSPRNG | **T7**, 2026-08-04 | **ChaCha20 CSPRNG** seeded from the OS (= oracle parity). Zero-dep. **Fail loudly if entropy is unavailable** — never emit predictable bytes. |
+| Zero-dep vs. `cap-std`/`openat2` for the resolver | **T7**, 2026-08-05 | **Zero-dep; accept + document the TOCTOU residual.** Both alternatives rejected (first runtime dependency / would breach the new `forbid`). |
+| `wasmrt.h` shape | **T8**, 2026-08-06 | Four answers — real proposal gating, linker in **core**, raw memory pointer + checked copies, trap-frame shape now. |
+
+**No decision-gates remain.** If a new one arises, add it to `design-decisions.md` and give it a
+task-list step in `roadmap.md` — do not resurrect this list.
 
 ## Triggers (from `INDEX.md`)
 

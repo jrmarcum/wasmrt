@@ -106,6 +106,13 @@ it survives a change of mechanism. Verified by mutation: deleting the `..` guard
 
 ## Authenticity — pin verification (reproduce; signatures still design-only)
 
+> **⚠️ NOT YET BUILT IN wasmrt (status 2026-08-06, v0.9.0).** `crates/wasmrt-core/src/pin.rs` is a
+> **doc-comment stub** — no `decide()`, no DB parsing, no hashing. Everything below describes the
+> **oracle's** implementation and the mechanism decisions to reproduce, not current wasmrt behaviour.
+> **A wasmrt build today performs no authenticity check of any kind**, and the CLI exposes none.
+> Ported at **T9** (it was previously slated for T7, then T8, and slipped both times). The *authority*
+> half of the model — the WASI sandbox — **is** fully built; do not confuse the two.
+
 - **Pin verify is BUILT in wazmrt (Phase 5):** SHA-256, plaintext **content-addressed** DB,
   `# mode: off|warn|enforce`, and a pure `decide(policy, pinned, opt_out, tty)` matrix.
 - **Decided mechanism (do NOT re-derive):** the pin DB is **root-owned, read-only to the user,

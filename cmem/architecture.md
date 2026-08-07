@@ -42,7 +42,9 @@ proposal coverage is complete — plus the **text toolchain**: `sexpr` (the shar
 not a fn-pointer + `void*` ctx — that shape cannot be expressed without `unsafe`), **module linking on a
 shared store**, and **`wasi`** — complete for preview 1, split into `wasi/mod.rs` (the process surface:
 stdio, `args_*`, `environ_*`, clocks, `random_get`, `proc_exit`) and `wasi/fs.rs` (the fd table, the
-rights lattice, the sandbox resolver, and ~20 `fd_*`/`path_*` calls). `pin` remains a stub (T8).
+rights lattice, the sandbox resolver, and ~20 `fd_*`/`path_*` calls). **`pin` remains a doc-comment stub
+— now T9** (it was slated for T7, then T8, and slipped both times; `security-model.md` carries the
+warning that wasmrt therefore performs no authenticity check today).
 
 **The shared store is the load-bearing T7 shape.** `Store` holds `code: Vec<InstanceData>` and
 `pools: Pools` as **separate fields**, so a cross-instance call borrows two disjoint pieces — no `Rc`, no

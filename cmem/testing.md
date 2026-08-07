@@ -220,13 +220,16 @@ divergence rather than chasing it.
   At the freeze wazmrt prints **489/493 pass (4 skip)** — ~216 distinct tests, roughly doubled because
   the `cabi` target re-runs the core tests (see wazmrt `testing.md` "Reading the test count"). Start with
   the LEB accept/reject vectors and the ValType-packing bit ops (pure, high-value).
-- **C-ABI behavior** — `tests/c_smoke.c` equivalent: compile → instantiate (with a host import) → call
-  → read memory → global → trap. Plus `tests/abi_symbols.c`, a **link-time completeness gate** for every
-  `wasmrt.h` symbol.
-- **C-ABI memory safety** — run the C entry points under **Miri**/ASAN + a randomized **lifecycle fuzz**
-  (wazmrt #22). A normal allocator can't catch a double-free/UAF; the detecting allocator is the oracle.
-  Less risk than wazmrt here because wasmrt's capi uses lightweight `{id}` handles, not a refcount object
-  model — but the fuzz still guards instance/memory lifetimes.
+- **C-ABI behavior — ✅ BUILT at T8 (2026-08-06).** `tests/c_smoke.c`: compile → instantiate (with a host
+  import) → call → read/write memory → global → trap → teardown, plus a foreign-handle rejection. Run
+  via `scripts/c-gate.sh`.
+- **C-ABI link completeness — ✅ BUILT at T8. `tests/abi_symbols.c`, 74/74 symbols.** Same runner.
+- **C-ABI memory safety — ✅ BUILT at T8.** `scripts/miri-gate.sh` runs the whole capi surface under
+  **Miri**, including the randomized `lifecycle_fuzz` (wazmrt #22). A normal allocator can't catch a
+  double-free/UAF; the detecting allocator is the oracle. Less risk than wazmrt here because wasmrt's
+  capi uses **checked value handles**, not a refcount object model — the fuzz still guards
+  instance/memory lifetimes, and additionally proves a handle outliving its store is *refused*.
+  (ASAN was not needed once Miri was clean; revisit only if a platform Miri cannot model matters.)
 - **Conformance gates:**
   - **spec testsuite** — `wasmrt <file.wast>` runs the official corpus (positive + `assert_invalid`/
     `assert_malformed`/`assert_trap`/`assert_unlinkable`). The corpus lives outside the repo (wazmrt keeps

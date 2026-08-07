@@ -11,7 +11,10 @@ limits-only), a **`Linker` in core** shared by the C ABI / native crate / WASI /
 fixed **two silent-wrong-output defects** that work surfaced. Suite **61,033 / 738 / 3,075 — 98.8%**.
 **Next: T9 — licensing, docs, size, and all gates green.** Detail in the T8 entry below.
 
-## Status (2026-07-27) — PORT phase; gate OPEN, oracle FROZEN
+## Superseded status block (opened 2026-07-27, last amended 2026-08-05) — kept for the freeze record
+
+*(Mixed dates by accretion: it starts at the freeze and was amended through T7. The **current** status is
+the block above; read this one only for the gate/freeze conditions and the T5–T7 narrative.)*
 
 The conversion has **begun**. The `wazmrt` oracle reached full parity and is **frozen** at
 `wazmrt@dadc727`; `zig build test` passes (489/493, 4 skip; Debug + ReleaseSafe green) — gate verified
@@ -387,9 +390,12 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
       are lexical: `..` cannot pop below the bottom, absolute targets re-base to the preopen root,
       symlink targets go through the same loop, `SYMLINK_MAX` bounds cycles); **only inode pinning is
       lost**, which needs a second process writing inside the sandbox to exploit. `verify_beneath`
-      re-checks the canonical result against the canonical root as a compensating control. **Open
-      decision for the owner at T8/T9:** spend `cap-std` or a narrow audited `unsafe` shim, or accept
-      and document. Full argument in `cmem/security-model.md`.
+      re-checks the canonical result against the canonical root as a compensating control. **✅ DECIDED
+      by the owner 2026-08-05: accept + document.** `cap-std` was rejected (it would be wasmrt's first
+      runtime dependency, against the smallest-binary axis) and an `unsafe` shim was rejected (it would
+      breach the `#![forbid(unsafe_code)]` the same release introduced). Zero-dep and zero-`unsafe` both
+      hold; the deployment assumption — no untrusted second process writing inside a preopen while a
+      guest runs — is written up in `cmem/security-model.md`. **Do not re-litigate.**
     - **The mandated canary test is real and bites:** it asserts *no walk can produce a path that reads
       the canary* — the outcome, not an errno — over absolute, relative, chained, and symlinked-directory
       escapes. Mutation-checked: deleting the `..` guard fails it. End-to-end through the CLI, a guest
@@ -465,9 +471,21 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     `elem.wast` 17 → 13, `linking.wast` +4 passes. The one file that got worse is `i31.wast`
     (+1 visible failure, −1 skip): a module that now builds and meets the already-logged GC-const-expr
     gap. 351 workspace tests, clippy clean, all four surfaces.
-- **T9 — Licensing, docs, size, and all gates green.** Add `LICENSE-MIT`/`LICENSE-APACHE`/`NOTICE`/
-  `third_party/LICENSES.md` (name wazmrt→wasmrt, "Jon Marcum" 2026); minimize every artifact (`opt-level=z`
-  + LTO + `codegen-units=1` + strip + `wasm-opt -Oz`); cold-vs-steady bench. Gate: DoD below. `[ ]`
+- **T9 — Licensing, docs, size, and all gates green.** `[ ]`
+  - **Licensing is mostly already done** — `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE` and
+    `third_party/LICENSES.md` have existed since the **T0 scaffold** (verified 2026-08-06), with the
+    Component Ledger empty and **zero third-party dependencies**. What actually remains: the **missing
+    SPDX tag in `README.md`** (the only gap in the convention `licensing.md` states) and the per-crate
+    crates.io **listing metadata** (`keywords`, `categories`, a per-crate `readme` — cargo rejects a
+    `../../README.md` path) noted in `releasing.md`.
+  - **Size:** minimize every artifact (`opt-level=z` + LTO + `codegen-units=1` + strip + `wasm-opt -Oz`);
+    cold-vs-steady bench. Includes the **unconditional `data_count` section** (3 wasted bytes on every
+    module with data segments — `known-issues.md`).
+  - **Correctness carried into T9 from earlier tasks:** **trap backtraces** (the `decode_body_tracked`
+    byte offsets deferred at T2 — the C ABI has already committed the frame API's *shape*, which reports
+    0 frames until this lands), **GC constant expressions**, **`ref.null $ConcreteType`** in the
+    assembler, and **`pin`** (still a stub — `crates/wasmrt-core/src/pin.rs` is a doc comment only).
+  - Gate: DoD below.
 
 **Extended proposal — the one oracle-split residual:** **tail calls** (`return_call`/`return_call_indirect`)
 have no wazmrt oracle → conform against **wasmtime + the official spec testsuite**. Slot this into T5/T6
