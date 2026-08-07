@@ -6,6 +6,63 @@ wazmrt oracle, the **port notes /
 intentional divergences**, and the **four deferred decisions (all now RESOLVED)**. Log real wasmrt bugs here
 (file:line + surfacing condition) as they appear, mirroring wazmrt's ledger.
 
+## 🔴 OPEN — found by the T9 scoping audit (2026-08-06). Two new defects.
+
+Both were found while *measuring* the residual for the T9 punch list rather than by any test, which is
+itself the lesson: the suite reported them as ordinary "result mismatch" failures in files nobody had
+triaged, and the real causes were nowhere near where the symptom pointed.
+
+### A. `Op::MemorySize` reads another instance's memory — SILENT WRONG OUTPUT
+
+`interp.rs:2374` indexes the shared pool with the **raw module-local immediate**:
+
+```rust
+Op::MemorySize => {
+    let Imm::MemIndex(mi) = instr.imm else { … };
+    let mem = store.memories.get(mi as usize).ok_or(Trap::NoMemory)?;   // ← never maps
+```
+
+`Op::MemoryGrow`, on the very next line of the same `match`, correctly calls
+`memory_grow(frame, store, maps, instr)`, which does `maps.mem(mi)`.
+
+**This is the FOURTH instance of the shared-store defect class** documented below (after
+`Op::CallIndirect`, `exec_memory_init`, and the assembler's `table.copy`/`table.init` shorthands), and —
+verified by auditing every `store.{memories,tables,globals,elem_values,data_dropped,elem_dropped}.get*`
+site in `interp.rs` — **the only unmapped access left**.
+
+**Why nothing caught it.** It is invisible with one instance per store, where the two indices are equal
+(the standing **two-instance rule**). Clippy's `unused variable: maps` — which caught siblings of this
+class before — *cannot* fire here, because `exec_memory` does use `maps`, in the `MemoryGrow` arm.
+
+**Cost:** `memory_size.wast` 16 failures. All four of its modules report `5` pages, which is *module
+one's* size. A core MVP instruction returning another module's answer.
+**Fix:** route through `ctx.maps.mem(mi)` + a regression test that keeps a **second** instance alive.
+
+### B. The `.wast` runner redirects a failed module's assertions to an unrelated module
+
+`wast.rs:290`:
+
+```rust
+None => self.current.or_else(|| self.named.last().map(|(_, i)| *i)),
+```
+
+`define_module` correctly sets `current = None` when a build fails — but `target(None)` then **falls
+back to the most recently *named* module**, so every assertion belonging to the module that failed runs
+against a different instance and is reported as a **value mismatch**.
+
+`load1.wast` is the clean example: `(module $M …)` builds and registers; the next module imports `M`'s
+memory, which the linker cannot yet satisfy, so it is skipped; its assertions then silently execute
+against `$M` and report *"got 0x0, expected 1"*. **That diagnostic sends you hunting a load bug that
+does not exist** — it did exactly that during this audit.
+
+The fallback itself is wanted (a `.wast` naming every module must still run bare actions). It must
+simply not apply after a **failed** build. **Fix:** track "the last build failed" as distinct from
+"there is no unnamed current module".
+
+**This inflates FAILURES, never passes** — so the headline 98.8% is, if anything, understated. It is
+still a correctness bug in the harness, and the harness's whole design premise is that its numbers mean
+what they say.
+
 ## ✅ Fixed at T8 (2026-08-06) — two SILENT-WRONG-OUTPUT defects
 
 Both are the worst category by this project's own standard (`INDEX.md`: *"prefer a hard
@@ -118,8 +175,22 @@ erroring.
 (module (type $A (array (mut i32))) (global $h (ref null $A) (ref.null $A)))   ;; BadImmediate
 ```
 
-The oracle assembles and validates it. Hits `gc-collect-demo.wat` and `gc-linked-list.wat` — **the only
-2 of 534 `.wat` files wasmrt cannot assemble.**
+The oracle assembles and validates it. Hits `gc-collect-demo.wat` and `gc-linked-list.wat` — the only
+2 of 534 `.wat` files wasmrt cannot assemble.
+
+**⚠️ SEVERITY RAISED 2026-08-06 — this is the single largest conformance win available, not a
+cosmetic 2-file gap.** The T9 scoping audit found `br_table.wast:1052` uses
+`(br_table $l1 $l2 $l1 (ref.null $t) (local.get 0))` — a concrete heap type. That one rejection makes
+the file's **single module** fail to assemble, so **all 161 of its `assert_return`s are skipped**:
+
+```
+br_table.wast: 24 passed, 1 failed, 161 skipped
+    module failed to build: assemble: wat error: BadImmediate
+```
+
+161 assertions is the biggest concentrated block in the whole suite, and the fix is **one match arm**.
+Ranked first in T9a for that reason. **General lesson: a defect's logged blast radius was measured on
+the corpus that happened to surface it — re-measure before believing it is small.**
 
 ### 2. `reference-types.wat` — `UndefinedType`, oracle says valid
 

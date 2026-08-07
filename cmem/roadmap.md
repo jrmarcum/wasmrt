@@ -471,21 +471,73 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     `elem.wast` 17 → 13, `linking.wast` +4 passes. The one file that got worse is `i31.wast`
     (+1 visible failure, −1 skip): a module that now builds and meets the already-logged GC-const-expr
     gap. 351 workspace tests, clippy clean, all four surfaces.
-- **T9 — Licensing, docs, size, and all gates green.** `[ ]`
-  - **Licensing is mostly already done** — `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE` and
-    `third_party/LICENSES.md` have existed since the **T0 scaffold** (verified 2026-08-06), with the
-    Component Ledger empty and **zero third-party dependencies**. What actually remains: the **missing
-    SPDX tag in `README.md`** (the only gap in the convention `licensing.md` states) and the per-crate
-    crates.io **listing metadata** (`keywords`, `categories`, a per-crate `readme` — cargo rejects a
-    `../../README.md` path) noted in `releasing.md`.
-  - **Size:** minimize every artifact (`opt-level=z` + LTO + `codegen-units=1` + strip + `wasm-opt -Oz`);
-    cold-vs-steady bench. Includes the **unconditional `data_count` section** (3 wasted bytes on every
-    module with data segments — `known-issues.md`).
-  - **Correctness carried into T9 from earlier tasks:** **trap backtraces** (the `decode_body_tracked`
-    byte offsets deferred at T2 — the C ABI has already committed the frame API's *shape*, which reports
-    0 frames until this lands), **GC constant expressions**, **`ref.null $ConcreteType`** in the
-    assembler, and **`pin`** (still a stub — `crates/wasmrt-core/src/pin.rs` is a doc comment only).
-  - Gate: DoD below.
+- **T9 — Correctness punch-list, licensing, docs, size, all gates green.** `[ ]`
+
+  **Scoped 2026-08-06 from a measured audit**, not from old notes: every item below was re-verified
+  against the current build, and each carries what it actually costs. Two were **found during that
+  audit and are new**. Ordered by measured value — do them top-down.
+
+  ### T9a — Correctness defects (real bugs) `[ ]`
+
+  | # | Defect | Where | Measured cost |
+  | --- | --- | --- | --- |
+  | 1 | **`ref.null $ConcreteType` rejected by the assembler.** The `O::RefNull` arm matches only the *abstract* heap types and its `_ =>` returns `BadImmediate`. A concrete heap type is legal and encodes as a **positive s33 type index** — the same encoding `(ref $t)` already uses — so the fix is to fall through to type-name resolution. | `wat.rs` ~3059 | **161 skipped assertions in `br_table.wast` alone** (line 1052 is `(br_table … (ref.null $t) …)`, so the file's single module fails to build and *every* `assert_return` in it is skipped) + the only 2 of 534 wasmtk `.wat` files we cannot assemble. **The largest concentrated win available**, and it was previously logged as a cosmetic 2-file gap. |
+  | 2 | 🆕 **`Op::MemorySize` reads ANOTHER instance's memory — SILENT WRONG OUTPUT.** It indexes `store.memories` with the **raw module-local immediate**, never routing through `ctx.maps.mem()`. `Op::MemoryGrow`, one line below, does it correctly. **The fourth instance of the shared-store defect class** (after `CallIndirect`, `exec_memory_init`, and the assembler shorthands) and the *only* remaining unmapped pool access — verified by auditing every `store.{memories,tables,globals,elem_values,data_dropped,elem_dropped}.get*` site. Clippy's `unused variable: maps` could not fire, because the same function's `MemoryGrow` arm does use `maps`. | `interp.rs` 2374 | `memory_size.wast` 16 failures — all four of its modules report `5`, which is *module 1's* page count. A core MVP instruction returning another module's answer. **Fix + a two-instance regression test.** |
+  | 3 | 🆕 **The `.wast` runner redirects a failed module's assertions to an unrelated earlier module.** When a build fails, `current = None` — and `target(None)` then falls back to `self.named.last()`. So assertions belonging to the module that failed silently run against a *different* instance and are reported as **value mismatches**. The fallback itself is wanted (a file naming every module must still run bare actions); it must simply not apply after a *failed* build. | `wast.rs` ~290 | Inflates **failures**, never passes — so 98.8% is if anything understated. The real damage is diagnostic: `load1.wast` reports "got 0x0, expected 1", which sends you hunting a load bug that does not exist. Fix by tracking "the last build failed" distinctly from "there is no unnamed current module". |
+  | 4 | **Imported memories and tables cannot be named as linker definitions** (`LinkError::UnsupportedImportKind`). Instances *can* share them through the store; there is just no way to publish one under a name. Refused loudly, never half-linked. | `linker.rs` | `imports.wast` **108 skips**, `linking.wast` **80 skips + 16 failures**. The largest remaining *skip* block that is in scope. |
+  | 5 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. Consistent, so no disagreement — an honest missing feature. | `validate.rs`, `interp.rs` | `i31.wast` **31 failures** + part of `type-subtyping`. |
+  | 6 | **GC subtyping depth not modelled** by the validator. | `validate.rs` | `type-subtyping.wast` **36 failures**. |
+  | 7 | **No trap backtrace** — the `decode_body_tracked` byte offsets deferred at **T2**. The C ABI already ships the frame API in its **final shape**, reporting 0 frames deliberately, so this lands **without a breaking ABI change**. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only, but an embedder feels it most. |
+  | 8 | **`reference-types.wat` → `UndefinedType`**, oracle says valid. Undiagnosed. | ? | 1 wasmtk file. Re-verified still failing 2026-08-06. |
+  | 9 | **`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`**, oracle assembles **and runs** them — so this is our type-checker being wrong, not the input. | `validate.rs` | 2 wasmtk files. Re-verified still failing 2026-08-06. |
+  | 10 | **`wasmrt_caller_get_memory` always returns `false`.** A durable handle must be tagged against a live store, and during a callback the store is mid-borrow. Callbacks use `wasmrt_caller_read`/`_write` instead — the shape the loaders actually need. | `capi/src/lib.rs` | None today. Revisit only if a loader needs the handle form. |
+  | 11 | **Malformed modules rejected at the wrong STAGE** — caught during *validation* when the decoder should have refused them. The runner distinguishes the two on purpose. | `module.rs` | `binary-leb128.wast` **15**. |
+  | 12 | **Needs triage** — mixed symptoms, not yet root-caused: `binary.wast` **44** (core copy), `func.wast` **19** (a wrong result `0x2a` where `0` expected, *plus* over-accepted malformed modules), `load1.wast` **15** (may be entirely explained by #3 — recheck after fixing it). | — | ~78 combined. **Re-measure after #1–#3; some will evaporate.** |
+
+  ### T9b — Size (the "small" axis — currently UNPROVEN) `[ ]`
+  - **Unconditional `data_count` section** — 3 wasted bytes on every module with data segments; the spec
+    requires it only when `memory.init`/`data.drop` appear (`helloworld.wat`: 135 bytes vs wat2wasm's 132).
+  - `wasm-opt -Oz`; verify the size-first release profile end-to-end; **measure all four artifacts** and
+    compare against wasm3 / WAMR. No wasmrt size number has ever been recorded.
+
+  ### T9c — Performance (the "fast" axis — currently UNPROVEN) `[ ]`
+  - Cold-vs-steady bench. **Do not quote wazmrt's numbers as wasmrt's** — inheriting the interpreter
+    shape does not inherit its measurements (`vision.md`).
+
+  ### T9d — Licensing + docs `[ ]`
+  - **Already done, verified 2026-08-06:** `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE` and
+    `third_party/LICENSES.md` have existed since the **T0 scaffold**; the Component Ledger is **empty**
+    and there are **zero third-party dependencies**.
+  - **Remaining:** the **missing SPDX tag in `README.md`** — the one gap in the convention
+    `licensing.md` states — and the per-crate crates.io **listing metadata** (`keywords`, `categories`,
+    a per-crate `readme`; cargo rejects a `../../README.md` path), per `releasing.md`.
+
+  ### T9e — `pin` (module authenticity) `[ ]`
+  - `crates/wasmrt-core/src/pin.rs` is a **doc-comment stub**, so **a wasmrt build performs no
+    authenticity check of any kind**. Slated for T7, then T8, slipped both. The mechanism is fully
+    decided — do **not** re-derive it — in `security-model.md`: SHA-256 content-addressed plaintext DB,
+    root-owned, `off|warn|enforce`, a pure `decide()` matrix, hash the **in-memory bytes about to run**,
+    and the opt-out may only *raise* strictness.
+
+  ### T9f — Scope confirmations (NOT bugs — record, do not "fix") `[ ]`
+  - **Tail calls** (`return_call`/`return_call_indirect`) are the one **in-scope** proposal still
+    unimplemented, and the one oracle-split residual → conform against **wasmtime + the spec suite**.
+    Until they exist there is deliberately **no C-ABI tail-call flag** (a toggle that gates nothing is
+    worse than none).
+  - **Out of scope by recorded invariant — leave these failing:** 64-bit **tables**
+    (`table_copy64` 22, `table_init64` 93 skips, `table_fill64` 70 skips, `float_memory64` 84 skips),
+    and the untargeted proposals `annotations` **51**, `custom-descriptors`
+    (`br_on_cast_desc_eq`/`_fail` 98 each, `ref_cast_desc_eq` 94, its own `binary.wast` 44),
+    `exact`/`exact-casts` (18 + 108), `custom-page-sizes` (21 + 18), `memory64-imports` 20,
+    `wide-arithmetic` 108. **Together these are the bulk of the residual** — the in-scope remainder is
+    much smaller than the raw 738/3,075 suggests.
+  - **`sqrt` is `std`-gated** — the single no_std float gap (platform libm). Revisit with a software
+    sqrt only if the freestanding target needs it.
+
+  **Gate:** the DoD below, plus a re-measured suite. **Expect the conformance number to move for
+  honest reasons in both directions** — #1 and #4 convert large skip blocks into visible results, and
+  some of those will be failures at first (the same accounting as the `register` work on 08-04 and the
+  linker work on 08-06).
 
 **Extended proposal — the one oracle-split residual:** **tail calls** (`return_call`/`return_call_indirect`)
 have no wazmrt oracle → conform against **wasmtime + the official spec testsuite**. Slot this into T5/T6
