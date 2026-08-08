@@ -56,9 +56,18 @@ every subtype question in the engine funnels through it, one line carried the fi
 "assembler emits a different module than the text describes" defect in two passes, so the emitter deserves a
 dedicated look at T10. Canonicalisation also let the previous pass's `decl_subtype_of` approximation be
 **deleted**, with byte-identical suite results.
-**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), **cross-module type identity (~11 — needs an
-engine-level type registry on `Store`, which is a design decision)**, #5, #7, #8, #9, #12's **text-parser**
-remainder (`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
+**Two items were added to the task list 2026-08-08.** **T9h — cross-module type identity via an
+engine-level type registry on `Store`**, approach **APPROVED by the owner**: wasmtime's *shape*, our code
+(~11 assertions). That is the **third** application of the 🔒 *"wasmtime's SHAPE, our code"* rule in
+`design-decisions.md`, not a new policy — the **Component Ledger stays empty**, since the "evaluate a
+reference project" trigger requires an entry for *copying* code and reading an architecture is free.
+**T10a — the EMITTER audit**: three "the assembler emits a different module than the text describes"
+defects in two passes, **all three found by accident** by some other check reading a field the emitter had
+dropped. T10a names the mechanism (the emitter reconstructs a form from a *subset* of the parser's facts)
+and specifies a **round-trip property test** + a **`ModuleBuild` field-coverage sweep** instead of a
+read-through — every existing test asserts the module *runs*, and all three defects produced modules that ran.
+**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), **T9h**, #5, #7, #8, #9, #12's
+**text-parser** remainder (`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`

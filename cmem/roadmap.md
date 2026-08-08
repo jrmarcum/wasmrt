@@ -772,6 +772,47 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   - **Only once they exist may a C-ABI `tail_call` feature flag be added** — and then `abi_version()`
     stays 1 (adding an enum value is additive), but `features.rs` and the header must move together.
 
+  ### T9h — Cross-module type identity: a type registry on the `Store` `[ ]` *(approach APPROVED by the owner 2026-08-08)*
+
+  **The residual of the canonicalisation pass, and the last known in-scope correctness cluster of any
+  size: ~11 assertions** — 7 `Unlinkable: module linked` + 4 `an import does not match` across
+  `type-subtyping` / `type-rec` / `type-equivalence`.
+
+  **Why module-local canonicalisation cannot finish the job.** `Module.type_canon` gives each type the
+  lowest *index in that module* structurally equal to it. Two modules number their types independently,
+  so those ids say nothing across a boundary — and the structural **key** cannot be compared either,
+  because it embeds those ids by reference. Making keys self-contained (inlining each referenced group)
+  is correct but risks exponential blowup on chained groups, which is a denial-of-service surface on
+  exactly the untrusted path.
+
+  **The approach (owner-approved 2026-08-08): an engine-level type registry, wasmtime's SHAPE, our
+  code.** Rec groups are interned into a registry as each module joins the store; interning returns an
+  id that is meaningful store-wide; cross-module import matching then compares ids, not structures. That
+  is architecturally what wasmtime does and it is the right answer for the same reason the shared store
+  was at T7b: the alternative is re-deriving structural equality at every boundary crossing.
+
+  ⚠️ **Shape only — no code, no symbols, no data structures transcribed.** This is the **third**
+  application of a rule already recorded in `reference-projects.md` and `design-decisions.md` (after the
+  `wasmrt.h` shape at T8 and the shared store at T7b), not a new policy, and the **Component Ledger
+  stays empty**: `INDEX.md`'s "evaluate a reference project" trigger requires a ledger entry for
+  *copying or porting code*, and reading an architecture is explicitly free. wasmrt remains 100%
+  original Rust.
+
+  **What it touches, and why it is a decision rather than a patch:** a new structure on `Store` (which
+  every instance shares), interning at `instantiate`, and the import-matching path in `Store` and
+  `Linker`. It also lets two approximations be deleted — the structural-equality fallback in the
+  function-import check, and the note in `known-issues.md` about host imports being uncheckable stays,
+  but the *wasm→wasm* half becomes exact.
+
+  **Constraints it must respect:** zero third-party dependencies, `#![forbid(unsafe_code)]` in core, no
+  `Rc`/`RefCell` on the interpreter's hot path (the registry is consulted at **link** time, never per
+  call), and the freestanding `wasm32` no_std build. Interning must be **O(n log n)**, not a scan, for
+  the same reason `canonicalize` uses a `BTreeMap`: group counts are attacker-controlled.
+
+  **Gate:** the 11 assertions convert to passes; the whole suite diffed **with `-v` on both sides** (see
+  `testing.md` — a file reaching zero failures vanishes from a non-verbose run); no file loses a pass;
+  cold start measured A/B/A, since this adds work at instantiation.
+
   ### T9g — Scope confirmations (NOT bugs — record, do not "fix") `[ ]`
   - **Out of scope by recorded invariant — leave these failing:** 64-bit **tables**
     (`table_copy64` 22, `table_init64` 93 skips, `table_fill64` 70 skips, `float_memory64` 84 skips),
@@ -816,6 +857,53 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   **Gate:** zero regressions across all four surfaces + the C and Miri gates; suite counts diffed
   against the pre-hunt baseline; every finding either fixed or logged in `known-issues.md` with its
   `file:line` and why it was left.
+
+  ### T10a — The EMITTER audit: forms reconstructed from partial facts *(added 2026-08-08)* `[ ]`
+
+  **A named sub-task because the same defect has now occurred three times in two passes, and each was
+  found by accident** — by some *other* check happening to start reading a field the emitter had
+  dropped. This is not a category from the five above; it is a specific mechanism with a specific audit.
+
+  **The mechanism.** `wat.rs`'s parser records a set of facts about a form; the emitter then
+  reconstructs the binary form from **a subset** of them, and the dropped fact turns out to be
+  *semantic*. The output is a valid module — just **not the module the text described**. Nothing
+  rejects it, so it is the silent-wrong-output class arriving through the toolchain rather than the
+  engine.
+
+  The three instances, all fixed, listed because the pattern is the point:
+
+  | # | The dropped fact | What the emitter produced instead | Found by |
+  | --- | --- | --- | --- |
+  | 1 | Element-segment **reftype** (form 4 has no reftype field) | `funcref` hardcoded, so `(elem (ref func) …)` had its type rewritten | T8's `export_global` making `table.wast` buildable |
+  | 2 | **Finality** — the parser saw `sub` vs `sub final` vs bare | keyed the wrapper on *the supertype's presence alone*, so `(sub (struct …))` emitted a **bare** comptype = `final` | the new §3.4.5 finality check reading the flag |
+  | 3 | **Rec-group extent** — `(rec …)` boundaries | flattened to singleton groups; `0x4e` was emitted **nowhere** | type canonicalisation, which made group identity observable |
+
+  **The audit, which must not be another read-through.** Two mechanical checks, either of which would
+  have caught all three:
+
+  - **A round-trip property test.** Assemble text → decode the bytes → compare the decoded `Module`
+    against what the *parser* recorded (type defs, `type_finals`, rec-group extents, segment modes and
+    reftypes, limits flags, memory indices, global mutability). Any field the parser fills and the
+    decoder cannot recover is, by definition, a fact the emitter dropped. This is the check the project
+    has been missing: every existing test asserts the module *runs*, and all three defects produced
+    modules that ran.
+  - **A field-coverage sweep.** For every field on `ModuleBuild`, grep whether the emitter reads it.
+    Defect 2 and 3 were both *unread fields* — `type_finals` and `rec_groups` did not exist because
+    nothing needed them; the parser had the information and threw it away.
+
+  **Then the shorthand review.** Every binary form with more than one legal encoding is a place this can
+  recur, because choosing the shorthand is only safe when it is semantics-preserving. Known candidates
+  to check deliberately: **element segments** (8 flag forms, two families — already burned once),
+  **data segments** (active / passive / active-with-memidx, and the `mem_index`), **limits** flags
+  (`shared`, `is64`, has-max), **memargs** (alignment, offset, and the `0x40` memory-index flag),
+  **block types** (empty / single valtype / typeidx), and **table** definitions (init-expr vs the inline
+  `(elem …)` shorthand — also already burned).
+
+  **Gate:** the round-trip property test exists and is green over the whole vendored `.wast` corpus (it
+  is a stronger statement than the conformance number, which only says the modules behave); every
+  `ModuleBuild` field is either read by the emitter or documented as deliberately not emitted; and the
+  suite/`.wat`-corpus counts do not regress. **Expect this to find more than three** — the mechanism has
+  a 3-for-3 record and nothing has ever looked for it directly.
 
 - **T11 — Optimization review (a DISCUSSION, not a blind pass).** *(Owner, 2026-08-06.)* `[ ]`
 

@@ -8,6 +8,17 @@ Load-bearing decisions for the `wasmrt` port. **Do not silently revert these.** 
 - **Boundary-faithful, idiomatic Rust.** The observable behavior/outputs and the `wasmrt.h` contract
   are fixed (verified by Rust↔oracle parity); internals are idiomatic Rust (ownership, enums,
   `Result`), not a Zig transliteration. File/module structure mirrors wazmrt for reviewability.
+- 🔒 **"wasmtime's SHAPE, our code" — the standing rule, reaffirmed by the owner 2026-08-08.** Where
+  wasmtime has already solved a structural problem, wasmrt adopts the **architecture** and writes its own
+  implementation: no code, no symbols, no headers, no data structures transcribed. Three applications so
+  far — the `wasmrt.h` surface (T8), the **shared store** (T7b), and the **engine-level type registry**
+  for cross-module type identity (T9h, approach approved 2026-08-08). **The Component Ledger stays
+  empty** and wasmrt remains 100% original Rust: `INDEX.md`'s "evaluate a reference project" trigger
+  requires a ledger entry for *copying or porting code*, and reading an architecture is explicitly free.
+  The test of compliance is that our version differs where our constraints differ — the C ABI's checked
+  value handles instead of refcounted objects, the store's `code`/`pools` split for disjoint borrows,
+  zero dependencies, `forbid(unsafe_code)`. If a design cannot be re-derived under those constraints,
+  that is the signal it was being copied rather than understood.
 - **Public API = wasmrt's own `wasmrt.h`** — NOT the standard wasm-c-api, NOT wasmtime's exact symbols.
   Strategy: **clean lean `wasmrt_*` C ABI (wasmtime-*shaped*) + a native `wasmrt` Rust crate.** No
   exact-wasmtime compat shim. This drops the entire wasm-c-api refcount object model (wazmrt's
