@@ -426,7 +426,8 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     feature gating, so they would have been silent no-ops), `wasmrt_linker_t` (core resolves imports
     **positionally**, by declaration order — name resolution existed only inside `wasi::link`),
     a store-attached WASI config (core builds WASI **per module**), and `wasmrt_trap_message`
-    promising "+ backtrace text" (there are no backtraces). Each was fixed rather than papered over.
+    promising "+ backtrace text" (there were none until T9a#7, two stages later). Each was fixed
+    rather than papered over.
   - **T8a — proposal gating (`features.rs`).** 14 flags, one per proposal wasmrt actually implements,
     **all ON by default**, plus a `Features::mvp()` floor. Gating fires at **validation**, never at
     execution, so nothing half-checked reaches the interpreter. Three things keep it honest: (1) **there

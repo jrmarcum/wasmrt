@@ -95,7 +95,7 @@ verification.
 Four shapes in `docs/port/wasmrt.h.draft` never matched the real core: per-proposal config toggles (core
 had no gating, so they would have been silent no-ops), a name-keyed linker (core resolved
 *positionally*), a store-attached WASI config (core builds WASI per module), and a promise of backtrace
-text (there are no backtraces).
+text (there were none until T9a#7, two stages later).
 
 ### 2.3 A decision resting on a false premise must be re-derived, not defended
 

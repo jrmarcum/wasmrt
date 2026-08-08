@@ -79,13 +79,24 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-- **T9 (0.10.0, IN PROGRESS)** — first pass landed **2026-08-07**, unreleased. Six correctness defects
-  fixed (**three of which no list had**, all found by asking why `br_table.wast` was still 161 skips
-  after the fix that was supposed to clear it), and **the size and performance axes measured for the
-  first time in the project's life**. Suite **61,975 / 453 / 2,247 — 99.3%** (2026-08-08, after T9a#4's memory half, link-time import type checking, and the decoder-strictness pass), no file lost a pass.
-  Cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady; CLI **621 KiB**, cdylib **493.5 KiB**,
-  freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** with `wasm-opt -Oz`).
-  Still open: T9a #4 (a **decision-gate** — see below), #5–#9, #11, #12, `pin`, and **tail calls**.
+- **T9 (0.10.0, IN PROGRESS)** — **eleven passes landed 2026-08-07/08**, unreleased. Suite
+  **61,987 / 441 / 2,247 — 99.3%**, **426 tests** (398 core + 28 capi), Miri 28/28, and **no file lost a
+  pass in any pass**. The size and performance axes were **measured for the first time in the project's
+  life**: cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady; CLI **621 KiB**, cdylib
+  **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** with `wasm-opt -Oz`).
+
+  T9a **#4, #5, #6, #7 and #11 are done**, along with most of #12 — imported memories *and* tables
+  (a `funcref` now carries its owning instance), GC constant expressions, declared subtyping with type
+  canonicalisation and a store-wide type registry, trap backtraces, and decoder strictness. **Eight
+  defects no list had** were found on the way, and **not one of them by reading the punch-list**:
+  `Op::MemorySize` reading another instance's memory, a cross-store `InstanceId` sharing the wrong
+  memory (found by *probing* a constraint the owner stated, rather than agreeing with it), three
+  separate "the assembler emits a different module than the text describes" defects (each caught by
+  some unrelated check reading a field the emitter had dropped), and — worst — **the start function,
+  which was decoded, validated and printed by the CLI but never executed** (§4.5.5), found while
+  asking where an *instantiation* trap would get its backtrace frames.
+
+  Still open: T9a **#8**, **#9**, #12's text-parser remainder, `pin`, and **tail calls**.
 
 **Next: finish T9** — the remaining punch-list, `pin`, and tail calls (1.0 cannot be claimed without
 them). Then **T10** (bug hunt + code hygiene), **T11** (optimization review — **no longer blocked, since

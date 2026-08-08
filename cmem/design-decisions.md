@@ -201,6 +201,11 @@ Each entry below records the answer and the reasoning, so none of them gets re-d
   4. **Trap frames: ship the API shape now, real backtraces at T9.** `wasmrt_trap_frame_count` returns
      0 until byte offsets are recorded. Committing the shape now avoids a breaking ABI change later,
      and reporting nothing is better than reporting a plausible-looking wrong frame.
+     ✅ **VINDICATED at T9a#7 (2026-08-08): real frames landed with NO ABI change** — not one signature
+     moved. Worth generalizing: **when a feature's data is missing but its shape is knowable, freezing
+     the shape early and returning honest emptiness costs nothing and buys a non-breaking fill-in.** It
+     works because the *shape* question (what does a frame consist of?) was answerable at T8 while the
+     *data* question (what are the byte offsets?) was not — separate them and only the second waits.
 
   Delivered 2026-08-06 as v0.9.0 (T8); the resulting invariants are in [architecture.md](architecture.md).
 - ~~core+capi crate split vs. a single multi-target crate.~~ **✅ RESOLVED (owner, 2026-07-27, at the T0

@@ -213,6 +213,51 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — THE START FUNCTION NEVER RAN (silent wrong output)
+
+**Suite 61,975 / 453 / 2,247 → 61,987 / 441 / 2,247 — 99.3%.** +12 passes, −12 failures, nothing
+regressed. `start.wast` **8/7 → 15/0**, `start0.wast` 5/3 → **8/0**, `linking3.wast` 11/1 → **12/0**,
+`linking.wast` +1.
+
+`Module::start` was decoded by `module.rs`, checked by `validate.rs` (twice — §3 and the instantiation
+pass), assembled by `wat.rs`, and printed by `wasmrt <file>`. **No code path ever called it.** §4.5.5
+step 11 requires the start function to run as the last step of instantiation; `Store::instantiate`
+built the instance and returned.
+
+```wat
+(module
+  (global $g (mut i32) (i32.const 0))
+  (func $init (global.set $g (i32.const 42)))
+  (start $init)
+  (func (export "get") (result i32) (global.get $g)))
+```
+
+`wasmrt run` printed **`0`**. No warning, no error, no unsupported-construct message — a module whose
+whole initialization lives in its start function ran with every global at its declared default and
+returned a plausible answer. **This is the worst instance of the silent-wrong-output class the port has
+produced.**
+
+**The fix** is five lines in `instantiate`, placed after the element and data segments so the start
+function can observe them (§4.5.5 orders it last, and a test pins that ordering — running it earlier
+still satisfies the naive "did it run?" test). A trap in it fails the instantiation; the caller never
+receives the `InstanceId`, so it can neither call into the instance nor name it as an import. The
+half-built slot is **not** reclaimed, for the same reason orphaned pool slots are not: index stability
+is what makes every other `InstanceId` in the store keep meaning what it meant.
+
+⚠️⚠️ **THE LESSON — and it is a triage lesson, not a coding one.** Ten of these assertions had been
+failing for **five releases** in files literally named `start.wast` and `start0.wast`. They survived
+every triage pass because triage read failures looking for a *diagnosis* — what does the message say,
+which construct is unsupported — and these messages said nothing useful. The question never asked was
+the cruder one: **does this file's NAME describe a feature, and does that feature work at all?**
+
+A feature can be fully decoded, fully validated, and reported by the CLI while never executing. Every
+stage that *inspects* it passes, so every stage that could have raised an alarm is satisfied. **Grep
+for the field's reader, not its writer.** Recorded as `best-practices.md` §3.1a.
+
+**How it was found:** not by triage at all — by asking, while wiring T9a#7's backtraces, where an
+*instantiation* trap would get its frames. That question has no answer unless something runs during
+instantiation, which led to asking what does. Nothing did.
+
 ## ✅ T9a#5 DONE 2026-08-08 — GC constant expressions
 
 **Suite 61,887 / 457 / 2,339 → 61,975 / 453 / 2,247 — 99.3%.** +88 passes, −4 failures, **−92 skips**.
