@@ -18,16 +18,39 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, type-use well-formedness) — **99.2%**
+## Spec-suite conformance — current (2026-08-08, T9a#4 complete) — **99.3%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | canon (08-08) | T9h registry (08-08) | type-use I (08-08) | **type-use II (08-08)** |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9h registry (08-08) | type-use I (08-08) | type-use II (08-08) | **T9a#4 tables (08-08)** |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,724 | 61,738 | 61,778 | **61,802** |
-| failed | 871 | 1,521 | 751 | 738 | 554 | 536 | 496 | **472** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,466 | **2,466** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.1% | 99.1% | 99.2% | **99.2%** of 62,274 |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,738 | 61,778 | 61,802 | **61,887** |
+| failed | 871 | 1,521 | 751 | 738 | 536 | 496 | 472 | **457** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,466 | **2,339** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.1% | 99.2% | 99.2% | **99.3%** of 62,344 |
+
+### The ninth 08-08 column: T9a#4 COMPLETE — the funcref encoding, then imported tables
+
++85 passes, −15 failures, **−127 skips**. `elem.wast` **63/13/17 → 75/6/0**, `imports.wast` +34 passes and
+−69 skips, `linking.wast` +24/−20, `table_grow.wast` → **50/0/0**, `imports4.wast` → **11/0/0**. No file
+lost a pass.
+
+**A `funcref` now carries its owning instance** (instance in bits 62..32, function index in 31..0 — bit 63
+is `I31_TAG`). ✅ **The property that made it safe: instance 0 packs to the bare index**, so the encoding
+change alone moved the suite by **+1/−1** — one genuine cross-instance case in `elem.wast` that had been
+silently wrong. **A value-model change verifiable as a no-op on the existing corpus is worth arranging.**
+
+🆕 **It caught a defect in the memory work from earlier the same day.** A table or memory *instance*'s
+type has `min = its CURRENT size`; `grow` updates it (§4.5.9). The memory pass had stored the *declared*
+minimum **and asserted that in a test**. No memory case in the suite contradicted it; the table case did.
+⚠️ **A test can encode a misreading of the spec and pass forever if nothing exercises it** — the sibling
+feature found this, not review.
+
+⚠️ **Unattributed: ~5% steady-state regression, handed to T11.** Cold start unchanged (~4.46 vs ~4.50 ms).
+Steady `sum(1000000)` ~55.7 vs ~52.7 ms, consistent across A/B/A, on a loop that touches no funcref, table
+or type. Two hypotheses tested and **rejected**: moving the new `TypeRegistry` to the end of `Pools`, and
+boxing it. Likely code layout in the giant `run` match — recorded as measured-but-unexplained rather than
+asserted.
 
 ### The eighth 08-08 column: the same type-use rules at their OTHER TWO sites. `call_indirect` → 0
 
@@ -241,7 +264,7 @@ re-run.
 
 ## Current test state (2026-08-08, type-use well-formedness)
 
-**405 workspace tests, all green** (379 core + 26 capi), clippy clean on all four build surfaces; the
+**408 workspace tests, all green** (382 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —

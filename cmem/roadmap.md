@@ -2,8 +2,8 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,802 / 472 / 2,466 — 99.2%**
-of 62,290 adjudicated (**first time over 99%**), **405 workspace tests**. T9's first pass landed T9a
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,887 / 457 / 2,339 — 99.3%**
+of 62,290 adjudicated (**first time over 99%**), **408 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
@@ -546,7 +546,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   concrete GC types costs 3 correct refusals to recover 1 false one, so equality stays. Residual: 1
   assertion, logged.
 
-  ### ◐ Progress 2026-08-08 (second) — decoder strictness. **61,593/697 → 61,691 / 599 / 2,469 = 99.2%**
+  ### ◐ Progress 2026-08-08 (second) — decoder strictness. **61,593/697 → 61,691 / 599 / 2,469 = 99.3%**
 
   **+98 passes, −98 failures, skips UNCHANGED** — the cleanest column in `testing.md`'s table, because
   nothing changed about what gets adjudicated; 98 assertions simply started passing. `binary.wast`
@@ -607,7 +607,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   self-contained keys risk exponential blowup on chained groups; the answer is an **engine-level type registry
   on `Store`** (what wasmtime does), which is a design decision rather than a patch.
 
-  ### ◐ Progress 2026-08-08 (fourth) — declared subtyping was never validated. **99.0% → 99.2%**
+  ### ◐ Progress 2026-08-08 (fourth) — declared subtyping was never validated. **99.0% → 99.3%**
 
   **61,691/599 → 61,712 / 578 / 2,469.** `type-subtyping.wast` **36/44/0 → 57/23/0** (+21 passes,
   −21 failures); nothing else in the suite moved and no file lost a pass. 395 workspace tests.
@@ -676,7 +676,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   ⚠️ **A stated constraint is worth probing, not agreeing with.** Two of three properties held; the third
   had shipped broken that morning, and no spec-suite assertion could have found it.
 
-  ### ◐ Progress 2026-08-08 (seventh) — the TEXT format's grammar. **99.1% → 99.2%**
+  ### ◐ Progress 2026-08-08 (seventh) — the TEXT format's grammar. **99.1% → 99.3%**
 
   **61,738/536 → 61,778 / 496 / 2,466.** +40 passes, −40 failures. **`block.wast` 13 → 0, `if.wast` 13 → 0,
   `loop.wast` 13 → 0** and `type.wast` 1 → 0 — three files to zero. No file lost a pass, and the **`.wat`
@@ -737,7 +737,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 1 | **`ref.null $ConcreteType` rejected by the assembler.** The `O::RefNull` arm matches only the *abstract* heap types and its `_ =>` returns `BadImmediate`. A concrete heap type is legal and encodes as a **positive s33 type index** — the same encoding `(ref $t)` already uses — so the fix is to fall through to type-name resolution. | `wat.rs` ~3059 | **161 skipped assertions in `br_table.wast` alone** (line 1052 is `(br_table … (ref.null $t) …)`, so the file's single module fails to build and *every* `assert_return` in it is skipped) + the only 2 of 534 wasmtk `.wat` files we cannot assemble. **The largest concentrated win available**, and it was previously logged as a cosmetic 2-file gap. |
   | 2 | 🆕 **`Op::MemorySize` reads ANOTHER instance's memory — SILENT WRONG OUTPUT.** It indexes `store.memories` with the **raw module-local immediate**, never routing through `ctx.maps.mem()`. `Op::MemoryGrow`, one line below, does it correctly. **The fourth instance of the shared-store defect class** (after `CallIndirect`, `exec_memory_init`, and the assembler shorthands) and the *only* remaining unmapped pool access — verified by auditing every `store.{memories,tables,globals,elem_values,data_dropped,elem_dropped}.get*` site. Clippy's `unused variable: maps` could not fire, because the same function's `MemoryGrow` arm does use `maps`. | `interp.rs` 2374 | `memory_size.wast` 16 failures — all four of its modules report `5`, which is *module 1's* page count. A core MVP instruction returning another module's answer. **Fix + a two-instance regression test.** |
   | 3 | 🆕 **The `.wast` runner redirects a failed module's assertions to an unrelated earlier module.** When a build fails, `current = None` — and `target(None)` then falls back to `self.named.last()`. So assertions belonging to the module that failed silently run against a *different* instance and are reported as **value mismatches**. The fallback itself is wanted (a file naming every module must still run bare actions); it must simply not apply after a *failed* build. | `wast.rs` ~290 | Inflates **failures**, never passes — so 98.8% is if anything understated. The real damage is diagnostic: `load1.wast` reports "got 0x0, expected 1", which sends you hunting a load bug that does not exist. Fix by tracking "the last build failed" distinctly from "there is no unnamed current module". |
-  | 4 | ◐ **Memories ✅ DONE 2026-08-08** (`Linker::define_memory` + resolution through a registered instance; shared, never copied; §4.5.9 limits matching). **Tables still refused** (`LinkError::UnsupportedImportKind`) — a `funcref` carries no instance identity, so a shared table would dispatch to the wrong function. 🚦 Owner decision required before the table half; two tests pin the refusal. | `linker.rs`, `interp.rs` | Was: `imports.wast` 108 skips, `linking.wast` 80 skips + 16 failures. **Now `imports.wast` 196/13/95 and `linking.wast` 107/11/28.** Remaining skips there are the table imports. |
+  | 4 | ✅ **DONE 2026-08-08, both halves.** Memories first (`Linker::define_memory`, shared never copied). Then **tables**, once a `funcref` carried its **owning instance** (bits 62..32 — bit 63 is `I31_TAG`): `call_indirect`/`call_ref` now dispatch into the reference's *owner*. ✅ **Instance 0 packs to the bare index**, so the encoding alone moved the suite +1/−1 — a value-model change arranged to be verifiably a no-op. 🆕 Also caught that a table's/memory's *instance* type has `min = CURRENT size`, not the declared one. | `interp.rs`, `linker.rs`, `wast.rs` | Was `imports.wast` 108 skips + `linking.wast` 80 skips/16 fails. **Now `imports.wast` 230/13/26, `linking.wast` 131/4/8, `elem.wast` 75/6/0, `table_grow.wast` 50/0/0.** |
   | 5 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. Consistent, so no disagreement — an honest missing feature. | `validate.rs`, `interp.rs` | `i31.wast` **31 failures** + part of `type-subtyping`. |
   | 6 | ✅ **DONE 2026-08-08, in two halves — and the logged cause was WRONG.** Not a missing depth model: there was **no declared-subtype validation at all**. Half one: finality (the decoder read `0x50`/`0x4f` identically) + §3.4.5 structural matching. Half two: **type canonicalisation** — rec groups reduced to structural keys, `is_subtype` comparing canonical ids, and `call_indirect` no longer comparing signatures by raw bits. Together they caught **two assembler defects**: open types emitted as final, and every `(rec …)` group flattened (`0x4e` never emitted). | `validate.rs`, `module.rs`, `wat.rs`, `interp.rs` | `type-subtyping.wast` 36/44 → **62/13**; `type-equivalence` 7/10/3 → **10/2/0**; `ref_cast`/`ref_test` → 0 failures. Residual: **cross-module** identity, ~11, needing a `Store` type registry. |
   | 7 | **No trap backtrace** — the `decode_body_tracked` byte offsets deferred at **T2**. The C ABI already ships the frame API in its **final shape**, reporting 0 frames deliberately, so this lands **without a breaking ABI change**. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only, but an embedder feels it most. |

@@ -236,6 +236,7 @@ impl Runner {
         }
         if let Some(id) = self.spectest_mem {
             l.define_memory("spectest", "memory", id, 0);
+            l.define_table("spectest", "table", id, 0);
         }
         for (name, id) in &self.registered {
             l.define_instance(name, *id);
@@ -255,7 +256,13 @@ impl Runner {
         }
         // Assembled from source rather than hand-built bytes: it goes through the same
         // assembler the suite's own modules do, so it cannot drift from what that accepts.
-        let Ok(bytes) = crate::wat::assemble(b"(module (memory (export \"memory\") 1 2))") else {
+        // `(memory 1 2)` and `(table 10 20 funcref)` are the types the suite declares for spectest's
+        // exports, and the exact limits matter: `imports.wast` asserts that importing either with a
+        // *wider* type is unlinkable. Both live in one owner module because a memory's and a table's
+        // identity in this engine is a store slot, so something must own them.
+        let Ok(bytes) = crate::wat::assemble(
+            b"(module (memory (export \"memory\") 1 2) (table (export \"table\") 10 20 funcref))",
+        ) else {
             return;
         };
         let Ok(md) = crate::module::decode(&bytes) else {
@@ -766,7 +773,17 @@ fn value_matches(got: Value, exp: &Sexpr) -> Result<bool, String> {
         // A bare `(ref.func)` / `(ref.extern)` asserts merely non-null; with a payload it
         // is exact. The abstract GC matchers assert non-null of that kind, which the
         // interpreter's untyped slot cannot distinguish — non-null is the honest check.
-        "ref.func" | "ref.extern" => {
+        // `(ref.func N)` names WHICH FUNCTION, so compare the function index — a funcref value also
+        // carries its owning instance in the high bits, and for any module past the first that would
+        // never equal the bare literal. `ref.extern N` is a host index with no such packing, so the
+        // two spellings no longer share their comparison.
+        "ref.func" => {
+            return match lit {
+                Some(a) => Ok((got as u32) == parse_int_lit(a)? as u32),
+                None => Ok(got != NULL_REF),
+            };
+        }
+        "ref.extern" => {
             return match lit {
                 Some(a) => Ok(got == parse_int_lit(a)? as Value),
                 None => Ok(got != NULL_REF),

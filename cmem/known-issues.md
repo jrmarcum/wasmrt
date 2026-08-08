@@ -213,6 +213,63 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ T9a#4 COMPLETE 2026-08-08 — the funcref encoding, and imported tables
+
+**Suite 61,802 / 472 / 2,466 → 61,887 / 457 / 2,339 — 99.3%.** +85 passes, −15 failures, **−127 skips**.
+`elem.wast` **63/13/17 → 75/6/0**, `imports.wast` **196/13/95 → 230/13/26**, `linking.wast`
+**107/11/28 → 131/4/8**, `table_grow.wast` → **50/0/0**, `imports4.wast` → **11/0/0**; `imports0`,
+`linking0`, `linking3` to zero skips. No file lost a pass. 408 workspace tests.
+
+**Option 1 of the T9a#4 gate, implemented: a `funcref` now carries the instance that produced it.**
+
+```text
+  bit 63      bits 62..32           bits 31..0
+  0           instance index        function index
+  ^ MUST be 0 — it is I31_TAG
+```
+
+⚠️ **The obvious layout (instance in bits 32..63) collides with `I31_TAG`** — recorded before the work
+started, and the reason the field is 31 bits. `NULL_REF` is all 64 bits set, so it stays distinct too.
+
+**The property that made this safe to introduce: instance 0 packs to the bare index.** Every
+single-instance program keeps bit-identical values, so landing the encoding alone moved the suite by
+exactly **+1/−1** — one genuine cross-instance case in `elem.wast` that had been wrong. A value-model
+change that can be verified to be a no-op on the existing corpus is worth arranging deliberately.
+
+Sites: producers (`ref.func`, element segments, const-exprs — all stamped with the defining instance)
+and consumers (`call_ref`, `call_indirect`, `ref_matches`). `call_indirect` and `call_ref` now dispatch
+into the funcref's **owner**, so the callee runs against its own memory and globals. `ref_matches` gained
+the instance table because a funcref's *type* lives in the owner's module, not the testing one.
+
+**Then imported tables**, with §4.5.9 matching (element type **equal** — a table is mutable, so a
+narrower actual type would let the importer write what the exporter's type forbids) and the spectest
+`table`. `Linker::define_table` publishes one by name.
+
+### 🆕 It caught a defect in the memory work from earlier the same day
+
+**A table or memory *instance*'s type has `min = its CURRENT size`, and `grow` updates it (§4.5.9).**
+The memory pass stored the **declared** minimum and asserted in a test that growth could not change what
+links. No memory case in the suite contradicted it. The table case did, and says so in its own comment:
+
+> `;; imported table limits should match, because external table size is 2 now`
+
+Both now read the current size, which equals the declared minimum until something grows. The wrong test
+was rewritten as the positive statement of the real rule. ⚠️ **A test can encode a misreading of the
+spec and pass forever if no case exercises it** — the sibling feature is what found this, not review.
+
+### ⚠️ Unattributed: ~5% steady-state regression, handed to T11
+
+Cold start is unchanged (~4.46 vs ~4.50 ms A/B/A). **Steady state measured ~5% slower** — ~55.7 ms vs
+~52.7 ms on `sum(1000000)`, consistent across A/B/A — **and I could not attribute it.** The steady loop
+is `loop`/`br_if` with i32 adds; it touches no funcref, no table and no type. Two hypotheses were tested
+and **both rejected**: moving the new `TypeRegistry` to the end of `Pools` (so the hot fields keep their
+offsets) did not recover it, and boxing it so `Pools` grows by 8 bytes rather than ~56 did not either.
+
+The remaining likely cause is **code layout** — the interpreter's `run` is one enormous match, and adding
+instructions to two arms shifts register allocation and I-cache alignment for the whole function. That is
+a known effect and exactly what **T11** is scoped to examine ("dispatch shape in `interp.rs`"). Recording
+it as measured-but-unexplained rather than asserting the cause.
+
 ## ✅ Fixed 2026-08-08 — the same type-use rules at their other two sites (`call_indirect`, functions)
 
 **Suite 61,778 / 496 / 2,466 → 61,802 / 472 / 2,466 — 99.2%.** +24 passes, −24 failures.

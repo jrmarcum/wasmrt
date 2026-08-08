@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — eight passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — nine passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.2%** (61,802 / 472 / 2,466 of 62,274) — **first time
-over 99%** — **405 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.3%** (61,887 / 457 / 2,339 of 62,344) — **first time
+over 99%** — **408 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -85,7 +85,16 @@ defects; `parse_type_use` is now one authority for the first two. **`call_indire
 begins" broke `select`/`stack`/`call_indirect`, because in **flat** instruction form `select (result i32)`
 puts its immediate exactly where a misplaced declaration would sit, so keyword scanning cannot tell them
 apart. **A rule that is obviously right is still a hypothesis until measured.**
-**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5, #7, #8, #9, `func.wast` 8 (the withdrawn
+**The ninth pass COMPLETED T9a#4.** A `funcref` now carries its owning instance (bits 62..32 — bit 63 is
+`I31_TAG`), so imported **tables** are linkable and `call_indirect`/`call_ref` dispatch into the
+reference's *owner*. ✅ **Instance 0 packs to the bare index**, so the encoding alone moved the suite by
++1/−1 — a value-model change arranged to be verifiably a no-op on the existing corpus. 🆕 **It caught a
+defect in that morning's memory work**: a table's or memory's *instance* type has `min = CURRENT size`
+(`grow` updates it, §4.5.9), but the memory pass stored the **declared** minimum and asserted that in a
+test — ⚠️ **a test can encode a misreading of the spec and pass forever if nothing exercises it.**
+⚠️ **~5% steady-state regression, unattributed and handed to T11** (two hypotheses tested and rejected;
+cold start unchanged).
+**Still open in T9:** #5, #7, #8, #9, `func.wast` 8 (the withdrawn
 body-order rule + duplicate identifiers), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.

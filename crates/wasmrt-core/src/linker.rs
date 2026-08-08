@@ -98,6 +98,8 @@ enum Def {
     /// memory index. Not the bytes: the importer must see the *same* memory, so what is stored
     /// is a reference to it, resolved at instantiation.
     Memory { instance: InstanceId, index: u32 },
+    /// A table belonging to an already-instantiated module, by that instance's own table index.
+    Table { instance: InstanceId, index: u32 },
     /// Every export of an already-instantiated module, published under one namespace —
     /// what the `.wast` `(register "name")` command does.
     Instance(InstanceId),
@@ -171,6 +173,16 @@ impl Linker {
     /// give the embedder a resource with no lifetime tied to anything.
     pub fn define_memory(&mut self, module: &str, name: &str, instance: InstanceId, index: u32) {
         self.insert(module, name, Def::Memory { instance, index });
+    }
+
+    /// Define an existing instance's table under `module`.`name`, so a later module can import it and
+    /// share the same entries.
+    ///
+    /// Linkable only since T9a#4's second half: a `funcref` now carries the instance that produced it,
+    /// so `call_indirect` on the shared table resolves each entry against its **owner**. Before that
+    /// this was refused outright, because linking it would have dispatched to the wrong function.
+    pub fn define_table(&mut self, module: &str, name: &str, instance: InstanceId, index: u32) {
+        self.insert(module, name, Def::Table { instance, index });
     }
 
     /// Publish every export of an already-instantiated module under the namespace `module`,
@@ -253,7 +265,7 @@ impl Linker {
                             let f = Rc::clone(rc);
                             imports.with_func(move |c, a, r| f(c, a, r))
                         }
-                        Some(Def::Global(_) | Def::Memory { .. }) => return Err(mismatch()),
+                        Some(Def::Global(_) | Def::Memory { .. } | Def::Table { .. }) => return Err(mismatch()),
                         Some(Def::Instance(_) | Def::Namespace(_)) => unreachable!(
                             "instances and namespaces are stored in `namespaces`, not `defs`"
                         ),
@@ -279,7 +291,7 @@ impl Linker {
                 ExternKind::Global => {
                     let v = match self.exact(&imp.module, &imp.name) {
                         Some(Def::Global(v)) => *v,
-                        Some(Def::Func(_) | Def::Memory { .. }) => return Err(mismatch()),
+                        Some(Def::Func(_) | Def::Memory { .. } | Def::Table { .. }) => return Err(mismatch()),
                         Some(_) => unreachable!("not stored in `defs`"),
                         None => match self.namespace(&imp.module) {
                             // A registered instance's exported global links by value — so this
@@ -313,7 +325,7 @@ impl Linker {
                     // the importer shares the exporter's memory instead of getting a copy.
                     let (inst, index) = match self.exact(&imp.module, &imp.name) {
                         Some(Def::Memory { instance, index }) => (*instance, *index),
-                        Some(Def::Func(_) | Def::Global(_)) => return Err(mismatch()),
+                        Some(Def::Func(_) | Def::Global(_) | Def::Table { .. }) => return Err(mismatch()),
                         Some(_) => unreachable!("not stored in `defs`"),
                         None => match self.namespace(&imp.module) {
                             Some(Def::Instance(id)) => {
@@ -330,10 +342,29 @@ impl Linker {
                     };
                     imports = imports.with_instance_memory(inst, index);
                 }
-                // A table stays refused: a `funcref` carries no instance identity, so a shared
-                // table would dispatch against the *calling* instance and silently call the
-                // wrong function (T9a#4). A tag import needs no backing, but nothing publishes
-                // one by name yet. Both refused loudly rather than half-linked.
+                ExternKind::Table => {
+                    // Resolved to (instance, that instance's table index) — the entries are shared,
+                    // never copied, which is only correct because a `funcref` carries its owner.
+                    let (inst, index) = match self.exact(&imp.module, &imp.name) {
+                        Some(Def::Table { instance, index }) => (*instance, *index),
+                        Some(Def::Func(_) | Def::Global(_) | Def::Memory { .. }) => {
+                            return Err(mismatch());
+                        }
+                        Some(_) => unreachable!("not stored in `defs`"),
+                        None => match self.namespace(&imp.module) {
+                            Some(Def::Instance(id)) => {
+                                let index = store
+                                    .export_index(*id, &imp.name, ExternKind::Table)
+                                    .ok_or_else(unknown)?;
+                                (*id, index)
+                            }
+                            _ => return Err(unknown()),
+                        },
+                    };
+                    imports = imports.with_instance_table(inst, index);
+                }
+                // A tag import needs no backing at all, but nothing publishes one by name yet —
+                // refused loudly rather than half-linked.
                 other => return Err(LinkError::UnsupportedImportKind(other)),
             }
         }
@@ -642,16 +673,52 @@ mod tests {
     }
 
     #[test]
-    fn an_imported_table_is_refused_loudly() {
-        // Still refused on purpose: a `funcref` carries no instance identity, so a shared table
-        // would dispatch to the wrong function (T9a#4). Memories have no such problem.
+    fn an_undefined_table_import_is_unknown_not_unsupported() {
+        // Tables became linkable at T9a#4's second half, so "nothing defines this" is now the right
+        // answer — the same distinction the `.wast` runner needs between a verdict and a gap.
         let l = Linker::new();
         let store = Store::new();
         assert_eq!(
             l.resolve(&store, &md(r#"(module (import "env" "t" (table 1 funcref)))"#))
                 .unwrap_err(),
-            LinkError::UnsupportedImportKind(ExternKind::Table)
+            LinkError::UnknownImport {
+                module: String::from("env"),
+                name: String::from("t"),
+            }
         );
+    }
+
+    #[test]
+    fn a_named_table_definition_links_and_is_shared() {
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let provider = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (table (export "t") 2 funcref)
+                       (func (export "peek") (result i32)
+                         (i32.eqz (ref.is_null (table.get (i32.const 0))))))"#),
+            )
+            .unwrap()
+            .unwrap();
+        let ti = store.export_index(provider, "t", ExternKind::Table).unwrap();
+        l.define_table("host", "tbl", provider, ti);
+
+        let consumer = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (import "host" "tbl" (table 2 funcref))
+                       (func $f)
+                       (elem declare func $f)
+                       (func (export "put") (table.set (i32.const 0) (ref.func $f))))"#),
+            )
+            .unwrap()
+            .unwrap();
+        // Slot 0 starts null, so the provider sees 0; after the consumer writes, it sees 1 — the
+        // same entries, not a copy taken at link time.
+        assert_eq!(as_i32(store.invoke(provider, "peek", &[]).unwrap()[0]), 0);
+        store.invoke(consumer, "put", &[]).unwrap();
+        assert_eq!(as_i32(store.invoke(provider, "peek", &[]).unwrap()[0]), 1);
     }
 
     #[test]

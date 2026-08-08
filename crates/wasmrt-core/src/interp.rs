@@ -99,6 +99,50 @@ pub const NULL_REF: Value = u64::MAX as Value;
 const I31_TAG: Value = 1 << 63;
 const _: () = assert!(I31_TAG == (1u128 << 63)); // i31 tag lives in the low 64 bits
 
+// --- funcref encoding: (owning instance, function index) ------------------------------
+//
+// **A `funcref` carries the identity of the instance that produced it.** Without that it is a bare
+// function index, and `call_indirect` resolves an index against the *calling* instance — so the moment
+// two instances share a table, instance A's `ref.func $a` is called as B's function of the same index.
+// A silent wrong call, which is why imported tables were refused until this existed (T9a#4).
+//
+// Layout, and the two constraints that fix it:
+//
+// ```text
+//   bit 63      bits 62..32           bits 31..0
+//   0           instance index        function index
+//   ^ MUST be 0
+// ```
+//
+// * **Bit 63 must stay clear**, because it is [`I31_TAG`]. The obvious layout — instance in bits
+//   32..=63 — collides with it, and a colliding funcref would read as an i31.
+// * `NULL_REF` is *all* 64 bits set, so it can never be a packed funcref for the same reason.
+//
+// The property that makes this safe to introduce: **instance 0 packs to the bare index**, so every
+// single-instance program keeps bit-identical values and only genuinely cross-instance references
+// change. That is why landing this moved the conformance suite not at all.
+const FUNCREF_INSTANCE_SHIFT: u32 = 32;
+/// Instances addressable by a `funcref`. 31 bits, not 32 — bit 63 belongs to [`I31_TAG`].
+const MAX_INSTANCES: usize = 1 << 31;
+
+/// Pack an owning instance and a function index into a `funcref` value.
+#[inline]
+fn pack_funcref(instance: usize, func: u32) -> Value {
+    ((instance as Value) << FUNCREF_INSTANCE_SHIFT) | Value::from(func)
+}
+
+/// The instance that produced a `funcref`. Callers must have established it is not `NULL_REF`.
+#[inline]
+fn funcref_instance(v: Value) -> usize {
+    ((v >> FUNCREF_INSTANCE_SHIFT) & 0x7fff_ffff) as usize
+}
+
+/// The function index within its owning instance.
+#[inline]
+fn funcref_index(v: Value) -> u32 {
+    v as u32
+}
+
 /// Default cap on live GC objects per instance. There is no collector (a proposal-scope
 /// decision), so this backstop keeps a guest allocation loop from exhausting host memory.
 const DEFAULT_MAX_GC_OBJECTS: usize = 1 << 24;
@@ -197,11 +241,6 @@ pub struct Memory {
     pub is64: bool,
     /// A `shared` memory (threads proposal) — required by `memory.atomic.wait*`.
     pub shared: bool,
-    /// The **declared** minimum in pages, kept alongside the current size because import
-    /// matching (§4.5.9) compares declared *types*, not current sizes. After a `memory.grow`
-    /// the two differ, and matching on the current size would accept an import whose declared
-    /// minimum was never large enough.
-    pub min: u64,
 }
 
 /// A reference table: `Value` slots (`NULL_REF` = uninitialized; a funcref is its function
@@ -209,6 +248,9 @@ pub struct Memory {
 pub struct Table {
     pub entries: Vec<Value>,
     pub max: Option<u32>,
+    /// The element type, for import matching (§4.5.9). The matching **minimum** is the table's
+    /// *current* length, not a stored declared value — see [`table_import_matches`].
+    pub element: crate::types::ValType,
 }
 
 /// The mutable runtime state of an instance, threaded as `&mut` through execution so a
@@ -294,6 +336,17 @@ struct Pools {
     /// caller's `call` site can try to catch it. Cleared once caught or once it escapes the
     /// invocation.
     pending_exn: Option<Exception>,
+    /// Store-wide type identity, shared by every instance in this store.
+    ///
+    /// Lives on `Pools` rather than [`Store`] because the interpreter needs it: a `call_indirect` on
+    /// a shared table must decide whether the callee's type satisfies the declared one, and the two
+    /// now come from different modules. `Pools` is what execution already threads.
+    ///
+    /// Placed **last** deliberately. It is consulted only at link time and on a *cross-instance*
+    /// `call_indirect`, so it must not sit among the fields the interpreter touches per instruction —
+    /// putting it after `limits` measured ~7% slower on the steady-state loop, which touches no types
+    /// at all. Field order in a hot struct is not cosmetic.
+    types: TypeRegistry,
 }
 
 /// A runtime trap or an execution-setup error.
@@ -539,6 +592,9 @@ pub struct Imports {
     /// names another instance's memory, and instantiation resolves it to that instance's
     /// store slot, so both instances index the same bytes.
     memories: Vec<MemoryImport>,
+    /// Table backings **in declaration order**, each naming another instance's table. Like a memory,
+    /// never copied — and correct only because a `funcref` now carries its owning instance.
+    tables: Vec<TableImport>,
 }
 
 impl fmt::Debug for Imports {
@@ -549,6 +605,7 @@ impl fmt::Debug for Imports {
             .field("funcs", &self.funcs.len())
             .field("globals", &self.globals.len())
             .field("memories", &self.memories.len())
+            .field("tables", &self.tables.len())
             .finish()
     }
 }
@@ -570,6 +627,14 @@ enum ImportedFunc {
 /// where the issuing store is verified).
 #[derive(Clone, Copy)]
 struct MemoryImport {
+    instance: InstanceId,
+    index: u32,
+}
+
+/// One table import's backing: another instance's table, named by that instance and its own table
+/// index. Refused outright until a `funcref` carried its owner (T9a#4).
+#[derive(Clone, Copy)]
+struct TableImport {
     instance: InstanceId,
     index: u32,
 }
@@ -625,6 +690,42 @@ impl Imports {
         self.memories.push(MemoryImport { instance, index });
         self
     }
+
+    /// Satisfy a table import with **another instance's** table, named by that instance's own table
+    /// index. Appended in the order the module declares its table imports.
+    ///
+    /// Both instances then index the *same* entries. This is only correct because a `funcref` carries
+    /// the instance that produced it: `call_indirect` resolves an entry against its **owner**, so a
+    /// reference the exporter stored still reaches the exporter's function when the importer calls it.
+    /// Before that encoding existed this was refused outright rather than dispatched wrongly.
+    #[must_use]
+    pub fn with_instance_table(mut self, instance: InstanceId, index: u32) -> Imports {
+        self.tables.push(TableImport { instance, index });
+        self
+    }
+}
+
+/// Does an existing table satisfy a declared import type (§4.5.9)?
+///
+/// Limits like a memory's — the actual minimum at least the declared one, a declared maximum requiring
+/// an actual no larger. The **element type must be equal**, not merely a subtype: a table is mutable,
+/// so a narrower actual element type would let the importer write a value the exporter's type forbids.
+fn table_import_matches(actual: &Table, declared: &crate::module::TableType) -> bool {
+    // ⚠️ The matching minimum is the table's **CURRENT length**, not the minimum it was declared
+    // with. A table *instance*'s type has `min = |elem|`, and `table.grow` updates it — so a table
+    // declared `(table 0 funcref)` and grown to 2 *does* satisfy an `(import … (table 2 funcref))`.
+    // `table_grow.wast` states it in a comment: "imported table limits should match, because
+    // external table size is 2 now."
+    //
+    // wasmrt got this wrong for **memories** first, storing the declared minimum and asserting that
+    // in a test; no memory case in the suite contradicted it, and the table case did. Both now read
+    // the current size, which equals the declared minimum until something grows.
+    actual.element == declared.element
+        && actual.entries.len() as u64 >= declared.limits.min
+        && match declared.limits.max {
+            Some(m) => actual.max.is_some_and(|a| u64::from(a) <= m),
+            None => true,
+        }
 }
 
 /// Do two signatures from **different modules** denote the same type?
@@ -682,9 +783,13 @@ fn cross_module_val_types_match(a_ids: &[u32], a: crate::types::ValType, b_ids: 
 /// import). The index type and `shared` flag must be equal, not merely compatible — they change
 /// what instructions are legal against the memory, so neither direction is substitutable.
 fn memory_import_matches(actual: &Memory, declared: &crate::module::MemoryType) -> bool {
+    // The matching minimum is the memory's **CURRENT size in pages** — a memory instance's type has
+    // `min = |bytes| / 64Ki` and `memory.grow` updates it. This originally stored and compared the
+    // *declared* minimum, which no memory case in the suite contradicted; the equivalent table case
+    // did (`table_grow.wast`), and the rule is the same for both.
     actual.is64 == declared.limits.is64
         && actual.shared == declared.limits.shared
-        && actual.min >= declared.limits.min
+        && (actual.bytes.len() / PAGE_SIZE) as u64 >= declared.limits.min
         && match declared.limits.max {
             Some(m) => actual.max.is_some_and(|a| a <= m),
             None => true,
@@ -728,8 +833,6 @@ pub struct Store {
     /// This store's identity, stamped into every [`InstanceId`] it issues.
     id: u64,
     code: Vec<InstanceData>,
-    /// Store-wide type identity, shared by every instance in this store.
-    types: TypeRegistry,
     host_funcs: Vec<HostFunc>,
     pools: Pools,
 }
@@ -741,7 +844,6 @@ impl Default for Store {
             // ordering depends on it.
             id: NEXT_STORE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
             code: Vec::new(),
-            types: TypeRegistry::default(),
             host_funcs: Vec::new(),
             pools: Pools::default(),
         }
@@ -1150,18 +1252,15 @@ impl Store {
                 crate::types::ExternKind::Tag => {}
             }
         }
-        // An imported TABLE is still refused, and not for want of plumbing: a `funcref` is a
-        // bare function index with no instance identity, so `call_indirect` on a shared table
-        // would dispatch against the *calling* instance and silently call the wrong function.
-        // Refusing to link beats linking and mis-dispatching (`cmem/known-issues.md`, T9a#4).
-        if n_tables > 0 {
-            return Err(Trap::UnsupportedImportKind);
-        }
+        // Imported tables are LINKABLE as of T9a#4's second half. They were refused until a `funcref`
+        // carried its owning instance, because a shared table would otherwise have had
+        // `call_indirect` resolve an entry against the *calling* instance — a silent wrong call.
         // A function import may be backed by a host callback OR another instance's export,
         // so both pools count toward the declared total.
         if imports.funcs.len() != n_funcs
             || imports.globals.len() != n_globals
             || imports.memories.len() != n_mems
+            || imports.tables.len() != n_tables
         {
             return Err(Trap::MissingImport);
         }
@@ -1175,7 +1274,7 @@ impl Store {
         // orphaned pool slots were not: interning is content-addressed, so nothing references them and
         // an identical group later reuses the same ids. It does mean repeated *failed* instantiations of
         // distinct type sections grow the registry, which is noted in `known-issues.md`.
-        let type_ids = self.types.assign(&module);
+        let type_ids = self.pools.types.assign(&module);
 
         // Import type matching for functions (§4.5.9). Checked here rather than in the linker
         // because this is the one place every caller passes through — a hand-built `Imports`
@@ -1217,7 +1316,7 @@ impl Store {
                         .func_type_index(*func)
                         .and_then(|ti| self.code[exporter].type_ids.get(ti as usize).copied()),
                 ) {
-                    (Some(want), Some(got)) => self.types.is_subtype(got, want),
+                    (Some(want), Some(got)) => self.pools.types.is_subtype(got, want),
                     // No index on one side — a re-exported *import* has no defining type index, and a
                     // hand-built `Module` has no registry ids. Fall back to the structural comparison
                     // rather than refusing: it is what this check did before, and it is right whenever
@@ -1238,10 +1337,19 @@ impl Store {
         // Globals: the imported values occupy the low indices, then each defined
         // initializer is evaluated against everything already in scope (so a defined global
         // may read an imported one, which is exactly what the spec allows).
+        // The index this instance will occupy. Known before it is pushed, and needed *now* because
+        // a `ref.func` in any initializer must be stamped with its owning instance.
+        let self_inst = self.code.len();
+        if self_inst >= MAX_INSTANCES {
+            // A funcref addresses its instance in 31 bits (bit 63 is `I31_TAG`). Refuse loudly at the
+            // ceiling rather than silently truncating an instance index into someone else's.
+            return Err(Trap::TableLimitExceeded);
+        }
+
         let mut globals: Vec<Value> = imports.globals;
         globals.reserve(module.global_inits.len());
         for init in &module.global_inits {
-            let v = eval_const_expr(init, &globals)?;
+            let v = eval_const_expr(init, &globals, self_inst)?;
             globals.push(v);
         }
 
@@ -1285,7 +1393,6 @@ impl Store {
                 max: mt.limits.max,
                 is64: mt.limits.is64,
                 shared: mt.limits.shared,
-                min: mt.limits.min,
             });
         }
 
@@ -1318,11 +1425,29 @@ impl Store {
         }
         let data_dropped: Vec<bool> = module.data.iter().map(|s| s.active).collect();
 
-        // Tables: allocate each defined table sized to its minimum, filled with `NULL_REF`,
+        // Imported tables occupy the LOW table indices — resolved, like memories, to the exporting
+        // instance's existing store slot. Correct only because a `funcref` now carries its owning
+        // instance (T9a#4): without that, `call_indirect` on a shared table would resolve an entry
+        // against the *calling* instance and silently call the wrong function.
+        let mut imported_tables: Vec<usize> = Vec::with_capacity(n_tables);
+        for (i, it) in imports.tables.iter().enumerate() {
+            let slot = self
+                .slot(it.instance)
+                .map_or(usize::MAX, |s| self.code[s].maps.table(it.index));
+            let actual = self.pools.tables.get(slot).ok_or(Trap::MissingImport)?;
+            let declared = module.tables.get(i).ok_or(Trap::MissingImport)?;
+            if !table_import_matches(actual, declared) {
+                return Err(Trap::IncompatibleImport);
+            }
+            imported_tables.push(slot);
+        }
+
+        // Tables: allocate each *defined* table sized to its minimum, filled with `NULL_REF`,
         // bounded by the per-instance entry budget.
-        let mut tables: Vec<Table> = Vec::with_capacity(module.tables.len());
+        let defined_tables = module.tables.get(n_tables..).unwrap_or(&[]);
+        let mut tables: Vec<Table> = Vec::with_capacity(defined_tables.len());
         let mut total_elems: usize = 0;
-        for tt in &module.tables {
+        for tt in defined_tables {
             let min = usize::try_from(tt.limits.min).map_err(|_| Trap::TableLimitExceeded)?;
             total_elems = total_elems
                 .checked_add(min)
@@ -1332,12 +1457,13 @@ impl Store {
             // with every entry set to it, not null. Evaluated against the globals resolved
             // so far, exactly as a global's own initializer is.
             let fill = match &tt.init {
-                Some(expr) => eval_const_expr(expr, &globals)?,
+                Some(expr) => eval_const_expr(expr, &globals, self_inst)?,
                 None => NULL_REF,
             };
             tables.push(Table {
                 entries: vec![fill; min],
                 max: tt.limits.max.and_then(|m| u32::try_from(m).ok()),
+                element: tt.element,
             });
         }
 
@@ -1347,14 +1473,23 @@ impl Store {
         let mut elem_dropped: Vec<bool> = Vec::with_capacity(module.elements.len());
         for elem in &module.elements {
             let mut vals: Vec<Value> = Vec::with_capacity(elem.funcs.len() + elem.exprs.len());
-            vals.extend(elem.funcs.iter().map(|&f| Value::from(f)));
+            // The funcidx shorthand (elem forms 0-3) denotes `ref.func` of THIS instance, so the
+            // values are stamped exactly as the instruction form would stamp them.
+            vals.extend(elem.funcs.iter().map(|&f| pack_funcref(self_inst, f)));
             for ex in &elem.exprs {
-                vals.push(eval_const_expr(ex, &globals)?);
+                vals.push(eval_const_expr(ex, &globals, self_inst)?);
             }
             if elem.mode == crate::module::ElementMode::Active {
-                let tbl = tables
-                    .get_mut(elem.table_index as usize)
-                    .ok_or(Trap::NoTable)?;
+                // Forks on the index exactly as data segments do: an *imported* table already lives
+                // in the pools, a *defined* one is still local until this instantiation commits, so
+                // defined resources stay out of the store until every step has succeeded.
+                let ti = elem.table_index as usize;
+                let tbl: &mut Table = if ti < n_tables {
+                    let slot = *imported_tables.get(ti).ok_or(Trap::NoTable)?;
+                    self.pools.tables.get_mut(slot).ok_or(Trap::NoTable)?
+                } else {
+                    tables.get_mut(ti - n_tables).ok_or(Trap::NoTable)?
+                };
                 let offset = eval_const_offset(&elem.offset_expr, &globals, false)?; // tables are 32-bit
                 let start = usize::try_from(offset).map_err(|_| Trap::TableOutOfBounds)?;
                 let end = start
@@ -1401,7 +1536,16 @@ impl Store {
                 .copied()
                 .chain(mem_base..mem_base + memories.len())
                 .collect(),
-            tables: base(self.pools.tables.len(), tables.len()),
+            // Imported tables keep the exporter's slots; defined ones take fresh slots after them,
+            // so index order matches the module's own table index space.
+            tables: {
+                let tbl_base = self.pools.tables.len();
+                imported_tables
+                    .iter()
+                    .copied()
+                    .chain(tbl_base..tbl_base + tables.len())
+                    .collect()
+            },
             globals: base(self.pools.globals.len(), globals.len()),
             data: base(self.pools.data_dropped.len(), data_dropped.len()),
             elems: base(self.pools.elem_values.len(), elem_values.len()),
@@ -2264,7 +2408,9 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 let Imm::Func(f) = instr.imm else {
                     return Err(Trap::UnsupportedInstruction);
                 };
-                frame.push(Value::from(f));
+                // Stamped with the producing instance, so the reference stays callable correctly
+                // after it is stored into a table another instance also holds.
+                frame.push(pack_funcref(ctx.inst, f));
                 pc += 1;
             }
             Op::RefAsNonNull => {
@@ -2298,11 +2444,19 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 if f_ref == NULL_REF {
                     return Err(Trap::NullReference);
                 }
-                let f = f_ref as u32;
-                let ft = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
+                // Resolved against the funcref's OWN instance, not the caller's. For a reference
+                // produced in this instance the two are the same; for one that arrived through a
+                // shared table they are not, and using the caller's would be the wrong function.
+                let owner = funcref_instance(f_ref);
+                let f = funcref_index(f_ref);
+                let ft = ctx
+                    .code
+                    .get(owner)
+                    .and_then(|d| d.module.func_type(f))
+                    .ok_or(Trap::UndefinedFunc)?;
                 let base = frame.stack_base(ft.params.len())?;
                 let args = frame.vstack[base..].to_vec();
-                let results = match call_function(ctx.code, ctx.host_funcs, store, ctx.inst, f, &args, depth + 1) {
+                let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
                     Ok(r) => r,
                     Err(e) => {
                         pc = frame.on_call_error(store, e)?;
@@ -2334,9 +2488,14 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 if entry == NULL_REF {
                     return Err(Trap::UninitializedElement);
                 }
-                let f = entry as u32;
+                // Unpacked, so a reference that arrived through a table another instance also holds
+                // dispatches to ITS function — the whole reason a funcref carries its owner. Before
+                // this, `entry as u32` resolved against the *calling* instance: a silent wrong call.
+                let owner = funcref_instance(entry);
+                let f = funcref_index(entry);
                 let want = ctx.module.func_sig(ci.type_index).ok_or(Trap::UndefinedType)?;
-                let got = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
+                let owner_data = ctx.code.get(owner).ok_or(Trap::UndefinedFunc)?;
+                let got = owner_data.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
                 // Matched on **type identity with subtyping**, by index — not by comparing the two
                 // signatures' shapes. Same lesson as import matching, and the third site to need it:
                 // two functions can both be `(func)` and still be different types, because rec-group
@@ -2344,21 +2503,41 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 // callee's type to be a *subtype* of the declared one, which is also why equality was
                 // wrong in the permissive direction (`assert_trap` cases returning a result).
                 //
-                // Both indices live in the *calling* module — a funcref is a bare function index
-                // resolved against `ctx.inst`, and imported tables are refused — so the module-local
-                // canonical comparison in `Module::is_subtype` is the right one here.
-                let matched = match ctx.module.func_type_index(f) {
-                    Some(got_ti) => ctx.module.is_subtype(got_ti, ci.type_index),
-                    // An *imported* function has no defining type index in this module. Fall back to
-                    // the structural comparison, which `func_types_equal` decides canonically.
-                    None => ctx.module.func_types_equal(&want, &got),
+                // When the callee belongs to ANOTHER instance the two type indices are in different
+                // modules, so they are compared through the store-wide registry — the same mechanism
+                // import matching uses. Same-instance stays on the cheaper module-local path.
+                let matched = if owner == ctx.inst {
+                    match ctx.module.func_type_index(f) {
+                        Some(got_ti) => ctx.module.is_subtype(got_ti, ci.type_index),
+                        // An *imported* function has no defining type index in this module. Fall back
+                        // to the structural comparison, which `func_types_equal` decides canonically.
+                        None => ctx.module.func_types_equal(&want, &got),
+                    }
+                } else {
+                    match (
+                        ctx.code[ctx.inst]
+                            .type_ids
+                            .get(ci.type_index as usize)
+                            .copied(),
+                        owner_data
+                            .module
+                            .func_type_index(f)
+                            .and_then(|ti| owner_data.type_ids.get(ti as usize).copied()),
+                    ) {
+                        (Some(want_id), Some(got_id)) => store.types.is_subtype(got_id, want_id),
+                        // No store-wide id on one side (a re-exported import has no defining type
+                        // index): fall back to the structural comparison rather than refusing.
+                        _ => ctx.module.func_types_equal(&want, &got),
+                    }
                 };
                 if !matched {
                     return Err(Trap::IndirectTypeMismatch);
                 }
                 let base = frame.stack_base(got.params.len())?;
                 let args = frame.vstack[base..].to_vec();
-                let results = match call_function(ctx.code, ctx.host_funcs, store, ctx.inst, f, &args, depth + 1) {
+                // Into the funcref's OWN instance, so the callee runs against its own memory,
+                // globals and tables. `ctx.inst` here was the silent-wrong-call.
+                let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
                     Ok(r) => r,
                     Err(e) => {
                         pc = frame.on_call_error(store, e)?;
@@ -2668,7 +2847,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let v = frame.pop();
-                frame.push_i32(i32::from(ref_matches(ctx.module, store, v, rt)));
+                frame.push_i32(i32::from(ref_matches(ctx.module, ctx.code, store, v, rt)));
                 pc += 1;
             }
             Op::RefCastOp => {
@@ -2676,7 +2855,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?; // peek — value stays
-                if !ref_matches(ctx.module, store, v, rt) {
+                if !ref_matches(ctx.module, ctx.code, store, v, rt) {
                     return Err(Trap::CastFailure);
                 }
                 pc += 1;
@@ -2686,7 +2865,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
-                pc = if ref_matches(ctx.module, store, v, dst) {
+                pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
                     frame.branch(label)?
                 } else {
                     pc + 1
@@ -2697,7 +2876,7 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                     return Err(Trap::UnsupportedInstruction);
                 };
                 let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
-                pc = if ref_matches(ctx.module, store, v, dst) {
+                pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
                     pc + 1
                 } else {
                     frame.branch(label)?
@@ -3045,7 +3224,9 @@ fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, instr: &Ins
 
 /// Interpret a data/element-segment offset constant expression as an address.
 fn eval_const_offset(expr: &[u8], globals: &[Value], is64: bool) -> Result<u64> {
-    let v = eval_const_expr(expr, globals)?;
+    // An offset is an integer, so the owning instance can never matter here — passed as 0 rather
+    // than threaded, and the validator refuses a `ref.func` in an offset position regardless.
+    let v = eval_const_expr(expr, globals, 0)?;
     Ok(if is64 {
         v as u64
     } else {
@@ -3110,8 +3291,7 @@ fn alloc_object(store: &mut Pools, type_index: u32, fields: Vec<Value>) -> Resul
 
 /// The type index of a *defined* function (for a funcref `ref.cast` to a concrete func type);
 /// `None` for an imported function.
-fn defined_func_type(module: &Module, v: Value) -> Option<u32> {
-    let fi = u32::try_from(v).ok()?;
+fn defined_func_type(module: &Module, fi: u32) -> Option<u32> {
     let imported = module.imported_func_count();
     if fi < imported {
         return None;
@@ -3133,7 +3313,10 @@ fn head_matches(module: &Module, actual: RefHeap, actual_ti: Option<u32>, target
 }
 
 /// Does GC reference value `v` match target reference type `rt` (`ref.test`/`ref.cast`)?
-fn ref_matches(module: &Module, store: &Pools, v: Value, rt: RefType) -> bool {
+/// `code` is needed for the `funcref` case: the value carries its owning instance, and a funcref's
+/// TYPE lives in that instance's module, not the testing one. Reading it from `module` gave the wrong
+/// answer for any reference that arrived through a shared table.
+fn ref_matches(module: &Module, code: &[InstanceData], store: &Pools, v: Value, rt: RefType) -> bool {
     if v == NULL_REF {
         return rt.nullable;
     }
@@ -3158,7 +3341,16 @@ fn ref_matches(module: &Module, store: &Pools, v: Value, rt: RefType) -> bool {
             };
             head_matches(module, kind, Some(obj.type_index), rt.heap)
         }
-        RefHeap::Func => head_matches(module, RefHeap::Func, defined_func_type(module, v), rt.heap),
+        RefHeap::Func => {
+            // Resolve the funcref's type index in the module that DEFINED it, then ask the testing
+            // module whether that satisfies the target. Cross-instance concrete comparison remains
+            // approximate -- the type-registry ids would decide it exactly -- and is logged.
+            let owner = funcref_instance(v);
+            let ti = code
+                .get(owner)
+                .and_then(|d| defined_func_type(&d.module, funcref_index(v)));
+            head_matches(module, RefHeap::Func, ti, rt.heap)
+        }
         _ => head_matches(module, RefHeap::Extern, None, rt.heap),
     }
 }
@@ -4827,7 +5019,9 @@ fn bin_i64(op: u8, a: i64, b: i64) -> Result<i64> {
 /// Evaluate a defined global's constant initializer (integer/float const, `global.get` of a
 /// prior global, and extended-const i32/i64 add/sub/mul). Reference and GC const-exprs are
 /// deferred with the reference-type execution slice.
-fn eval_const_expr(expr: &[u8], globals: &[Value]) -> Result<Value> {
+/// Evaluate a constant expression. `inst` is the index of the instance this expression belongs to,
+/// needed because `ref.func` produces a funcref and a funcref carries its owning instance.
+fn eval_const_expr(expr: &[u8], globals: &[Value], inst: usize) -> Result<Value> {
     let mut r = Reader::new(expr);
     let mut stack: Vec<Value> = Vec::new();
     loop {
@@ -4847,8 +5041,10 @@ fn eval_const_expr(expr: &[u8], globals: &[Value]) -> Result<Value> {
                 stack.push(NULL_REF);
             }
             0xd2 => {
-                // ref.func x — a funcref value is its function index.
-                stack.push(Value::from(r.read_var_u32()?));
+                // ref.func x — stamped with the instance this expression belongs to, exactly as the
+                // instruction form is. A table initializer that will be shared with another instance
+                // must still produce references callable against THIS one.
+                stack.push(pack_funcref(inst, r.read_var_u32()?));
             }
             byte @ 0x6a..=0x6c => {
                 let b = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?);
@@ -6257,20 +6453,110 @@ mod tests {
     }
 
     #[test]
-    fn imported_tables_still_reject_loudly() {
-        // Not plumbing: a `funcref` is a bare function index, so `call_indirect` on a shared
-        // table resolves against the CALLING instance and would silently call the wrong
-        // function (T9a#4). Refusing to link is the correct behaviour until the funcref value
-        // carries its owner — this test is what keeps that refusal from being "fixed" by
-        // accident.
+    fn a_lone_instance_cannot_satisfy_a_table_import() {
+        // Like a memory import: a table import needs another instance to share from, so a
+        // single-instance `Instance::new` has nothing to bind it to.
         let m = crate::wat::assemble(
             br#"(module (import "env" "t" (table 1 funcref)) (func (export "f")))"#,
         )
         .unwrap();
         let md = decode(&m).unwrap();
+        assert_eq!(Instance::new(md).err(), Some(Trap::MissingImport));
+    }
+
+    /// **The defect the funcref encoding exists to prevent.** Two instances share one table; the
+    /// exporter stores `ref.func` of *its* function 0 into it, and the importer calls slot 0 through
+    /// `call_indirect`. It must reach the EXPORTER's function.
+    ///
+    /// Both modules define a function at index 0 returning a different value, so the wrong answer and
+    /// the right one are distinguishable — the two-instance rule applied to the value model. Before a
+    /// funcref carried its owner this was a silent wrong call, which is why imported tables were
+    /// refused outright rather than shipped.
+    #[test]
+    fn a_shared_table_dispatches_to_the_funcrefs_own_instance() {
+        let mut store = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let provider = store
+            .instantiate(
+                mk(br#"(module
+                        (table (export "t") 1 funcref)
+                        (func $mine (result i32) (i32.const 0x11))
+                        (func (export "fill") (table.set (i32.const 0) (ref.func $mine)))
+                        (elem declare func $mine))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        let ti = store
+            .export_index(provider, "t", crate::types::ExternKind::Table)
+            .unwrap();
+        store.invoke(provider, "fill", &[]).unwrap();
+        let consumer = store
+            .instantiate(
+                mk(br#"(module
+                        (import "p" "t" (table 1 funcref))
+                        (type $sig (func (result i32)))
+                        (func $decoy (result i32) (i32.const 0x99))
+                        (func (export "go") (result i32)
+                          (call_indirect (type $sig) (i32.const 0))))"#),
+                Imports::new().with_instance_table(provider, ti),
+            )
+            .unwrap();
+        // 0x11 = the provider's function. 0x99 would mean the entry was resolved against the
+        // *calling* instance — the silent wrong call this encoding removes.
+        assert_eq!(as_i32(store.invoke(consumer, "go", &[]).unwrap()[0]), 0x11);
+    }
+
+    /// §4.5.9 table matching: the element type must be **equal** (a table is mutable, so a narrower
+    /// actual type would let the importer write what the exporter's type forbids) and the limits must
+    /// satisfy the declaration.
+    #[test]
+    fn a_table_import_whose_type_does_not_match_is_refused() {
+        let mut store = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let provider = store
+            .instantiate(mk(br#"(module (table (export "t") 1 funcref))"#), Imports::new())
+            .unwrap();
+        let ti = store
+            .export_index(provider, "t", crate::types::ExternKind::Table)
+            .unwrap();
+        // Wrong element type.
         assert_eq!(
-            Instance::new(md).err(),
-            Some(Trap::UnsupportedImportKind)
+            store
+                .instantiate(
+                    mk(br#"(module (import "p" "t" (table 1 externref)))"#),
+                    Imports::new().with_instance_table(provider, ti),
+                )
+                .err(),
+            Some(Trap::IncompatibleImport)
+        );
+        // Declared minimum larger than the actual.
+        assert_eq!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "p" "t" (table 2 funcref)))"#),
+                    Imports::new().with_instance_table(provider, ti),
+                )
+                .err(),
+            Some(Trap::IncompatibleImport)
+        );
+        // An unbounded table does not satisfy a bounded import.
+        assert_eq!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "p" "t" (table 1 4 funcref)))"#),
+                    Imports::new().with_instance_table(provider, ti),
+                )
+                .err(),
+            Some(Trap::IncompatibleImport)
+        );
+        // The matching declaration links.
+        assert!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "p" "t" (table 1 funcref)))"#),
+                    Imports::new().with_instance_table(provider, ti),
+                )
+                .is_ok()
         );
     }
 
@@ -6536,11 +6822,16 @@ mod tests {
         );
     }
 
-    /// Matching compares declared *types*, not current sizes. A memory grown past its declared
-    /// minimum must still fail an import that asks for more than it was declared with —
-    /// otherwise a `memory.grow` in the exporter silently changes what links.
+    /// ⚠️ **This test asserted the OPPOSITE and was wrong.** A memory *instance*'s type has
+    /// `min = its current page count`, and `memory.grow` updates it (§4.5.9), so a memory declared
+    /// `(memory 1)` and grown to 4 **does** satisfy an `(import … (memory 4))`.
+    ///
+    /// The original version stored a declared minimum and asserted that growth could not change what
+    /// links. No memory case in the spec suite contradicted it, so it stood — until the equivalent
+    /// **table** case did, in `table_grow.wast`, whose own comment says "imported table limits should
+    /// match, because external table size is 2 now". Kept as the positive statement of the real rule.
     #[test]
-    fn memory_import_matching_uses_the_declared_minimum_not_the_grown_size() {
+    fn memory_import_matching_uses_the_current_size_which_growth_updates() {
         let mut store = Store::new();
         let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
         let provider = store
@@ -6554,10 +6845,21 @@ mod tests {
         let index = store
             .export_index(provider, "m", crate::types::ExternKind::Memory)
             .unwrap();
-        assert_eq!(
+        // Declared 1, grown to 4 — so an import asking for 4 LINKS.
+        assert!(
             store
                 .instantiate(
                     mk(br#"(module (import "env" "m" (memory 4)))"#),
+                    Imports::new().with_instance_memory(provider, index),
+                )
+                .is_ok(),
+            "a grown memory satisfies an import up to its current size"
+        );
+        // And one asking for more than the current size still does not.
+        assert_eq!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "env" "m" (memory 5)))"#),
                     Imports::new().with_instance_memory(provider, index),
                 )
                 .err(),
