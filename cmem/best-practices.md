@@ -18,6 +18,8 @@ the fix was real but moved *other* files; `br_table` was failing three fixes ear
 independent fixes. (b) T9a#11 and #12 were logged as separate items with different symptoms; they were
 **one theme in two halves**. (c) T9a#6 read "GC subtyping depth not modelled"; the measured top item was
 **21 invalid modules being accepted**, because there was no declared-subtype validation *at all*.
+(d) T9a#5 was logged at 6 and delivered **88** — a different failure of estimation again, and the one
+§1.3 below is about.
 
 **Apply:** re-measure before starting any punch-list item. A cost figure assigned by reading a file for
 "the first construct that looks unsupported" is invention. Do not bank predicted value.
