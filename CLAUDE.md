@@ -96,6 +96,11 @@ per domain — same convention as wazmrt. **Start with [`cmem/INDEX.md`](cmem/IN
 - [`cmem/architecture.md`](cmem/architecture.md) · [`cmem/design-decisions.md`](cmem/design-decisions.md) — crates, dual-target, invariants NOT to drift
 - [`cmem/loaders.md`](cmem/loaders.md) — the `universalWasmLoader-*` consumers + the `wasmrt.h` surface
 - [`cmem/testing.md`](cmem/testing.md) · [`cmem/security-model.md`](cmem/security-model.md) · [`cmem/licensing.md`](cmem/licensing.md)
+- 🎓 [`cmem/best-practices.md`](cmem/best-practices.md) — **the lessons this port paid for, each with the
+  defect that bought it. READ THIS BEFORE STARTING A TASK.** Among them: a logged cost is a hypothesis
+  about a *cause* (wrong 3×); a stated constraint is worth **probing**, not agreeing with; silent-wrong-output
+  is where every serious defect has been; a gate that cannot fail is decoration; a guard one call-level away
+  from the iteration it guards is **no check**; which direction to err in is a property of the *consequence*.
 - [`cmem/roadmap.md`](cmem/roadmap.md) · [`cmem/known-issues.md`](cmem/known-issues.md) · [`cmem/reference-projects.md`](cmem/reference-projects.md)
 - [`cmem/releasing.md`](cmem/releasing.md) — versioning ladder + the binding per-release checklist
 
