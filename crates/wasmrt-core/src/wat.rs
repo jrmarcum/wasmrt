@@ -923,6 +923,13 @@ struct ModuleBuild {
     types: Vec<TypeDef>,
     /// Declared supertype of each type, index-aligned with `types`.
     supers: Vec<Option<u32>>,
+    /// `(start, len)` of each explicit `(rec …)` group, in order. Types not covered by one are
+    /// singleton groups, which is what the spec says they are — so the emitter needs no special case.
+    ///
+    /// The group is the unit of **type identity**, so dropping it (as the parser did) changes what
+    /// the module means: two members of one rec group are not the same types as two standalone
+    /// definitions of the same shape.
+    rec_groups: Vec<(u32, u32)>,
     /// Whether each type is **final**, index-aligned with `types`. Final is the default: only a
     /// bare `(sub …)` — without `final` — opens a type to being extended.
     ///
@@ -1022,6 +1029,11 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
                 type_forms.push(l);
             }
             Some("rec") => {
+                // Record the group's EXTENT, not just its members. A rec group is the unit of type
+                // identity (§3.1.4): `(rec (type (func)) (type (func)))` is a different type from two
+                // separate `(type (func))`s, so flattening the group — which this did — emits a module
+                // that is not the module the text describes.
+                let start = type_forms.len() as u32;
                 for t in &want_list(field)?[1..] {
                     if t.keyword() == Some("type") {
                         let l = want_list(t)?;
@@ -1029,6 +1041,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
                         type_forms.push(l);
                     }
                 }
+                b.rec_groups.push((start, type_forms.len() as u32 - start));
             }
             _ => {}
         }
@@ -1981,44 +1994,70 @@ fn emit_module(
     };
     let mut out = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
-    // 1 — types.
+    // 1 — types. The section is a vector of REC GROUPS, not of types: each entry is either a
+    // `0x4e`-wrapped group or a bare subtype (a singleton group). The count is therefore the number
+    // of groups, and emitting one entry per type — which this did — silently merges every explicit
+    // `(rec …)` into singletons and changes what the types *are*.
     if !b.types.is_empty() {
         let mut c = Vec::new();
-        uleb(&mut c, b.types.len() as u64);
-        for (i, t) in b.types.iter().enumerate() {
-            // Choose the wrapper from BOTH facts, because they are independent: `0x50` is `sub`
-            // (open), `0x4f` is `sub final`, and a bare composite type is the shorthand for
-            // "final, no supertype". Keying only on the supertype — as this did — emitted a bare
-            // composite for `(sub (struct …))` and thereby marked an *open* type final.
-            let sup = b.supers.get(i).copied().flatten();
-            let is_final = b.type_finals.get(i).copied().unwrap_or(true);
-            if !is_final || sup.is_some() {
-                c.push(if is_final { 0x4f } else { 0x50 });
-                match sup {
-                    Some(s) => {
-                        uleb(&mut c, 1);
-                        uleb(&mut c, u64::from(s));
-                    }
-                    // Open with no supertype: an empty supertype vector, not an absent wrapper.
-                    None => uleb(&mut c, 0),
+        // Walk the type index space, emitting an explicit group where one starts and a singleton
+        // everywhere else. Counting first because the vector length precedes the entries.
+        let mut entries: Vec<(u32, u32, bool)> = Vec::new(); // (start, len, explicit)
+        let mut i = 0u32;
+        while (i as usize) < b.types.len() {
+            match b.rec_groups.iter().find(|(s, _)| *s == i) {
+                Some(&(s, len)) if len > 0 => {
+                    entries.push((s, len, true));
+                    i += len;
+                }
+                _ => {
+                    entries.push((i, 1, false));
+                    i += 1;
                 }
             }
-            match t {
-                TypeDef::Func(s) => {
-                    c.push(0x60);
-                    val_type_vec(&mut c, &s.params)?;
-                    val_type_vec(&mut c, &s.results)?;
-                }
-                TypeDef::Struct(fields) => {
-                    c.push(0x5f);
-                    uleb(&mut c, fields.len() as u64);
-                    for f in fields {
-                        emit_gc_field(&mut c, *f)?;
+        }
+        uleb(&mut c, entries.len() as u64);
+        for (start, len, explicit) in entries {
+            if explicit {
+                c.push(0x4e);
+                uleb(&mut c, u64::from(len));
+            }
+            for j in start..start + len {
+                let i = j as usize;
+                // Choose the wrapper from BOTH facts, because they are independent: `0x50` is `sub`
+                // (open), `0x4f` is `sub final`, and a bare composite type is the shorthand for
+                // "final, no supertype". Keying only on the supertype — as this did — emitted a bare
+                // composite for `(sub (struct …))` and thereby marked an *open* type final.
+                let sup = b.supers.get(i).copied().flatten();
+                let is_final = b.type_finals.get(i).copied().unwrap_or(true);
+                if !is_final || sup.is_some() {
+                    c.push(if is_final { 0x4f } else { 0x50 });
+                    match sup {
+                        Some(s) => {
+                            uleb(&mut c, 1);
+                            uleb(&mut c, u64::from(s));
+                        }
+                        // Open with no supertype: an empty supertype vector, not an absent wrapper.
+                        None => uleb(&mut c, 0),
                     }
                 }
-                TypeDef::Array(f) => {
-                    c.push(0x5e);
-                    emit_gc_field(&mut c, *f)?;
+                match &b.types[i] {
+                    TypeDef::Func(s) => {
+                        c.push(0x60);
+                        val_type_vec(&mut c, &s.params)?;
+                        val_type_vec(&mut c, &s.results)?;
+                    }
+                    TypeDef::Struct(fields) => {
+                        c.push(0x5f);
+                        uleb(&mut c, fields.len() as u64);
+                        for f in fields {
+                            emit_gc_field(&mut c, *f)?;
+                        }
+                    }
+                    TypeDef::Array(f) => {
+                        c.push(0x5e);
+                        emit_gc_field(&mut c, *f)?;
+                    }
                 }
             }
         }

@@ -368,45 +368,6 @@ fn check_declared_subtyping(module: &Module) -> ValidateResult<()> {
     Ok(())
 }
 
-/// Reference subtyping **as the declared-supertype check may use it**: like [`subtype_of`], but it
-/// treats a pair it cannot decide as matching rather than as a mismatch.
-///
-/// wasmrt compares concrete types **by index**; the spec compares them **by structure**, so two
-/// structurally identical rec groups are one type with two indices. Without that canonicalisation
-/// (logged in `known-issues.md`) `subtype_of` reports "unrelated" for pairs that are in fact equal —
-/// `type-subtyping.wast` has several valid modules whose fields are `(ref $f1)` against `(ref $f2)`
-/// where both rec groups spell out the same `(func)`.
-///
-/// So this check errs toward **accepting** an undecidable pair, which is the opposite of the choice
-/// made for cross-store function-import matching — deliberately, because the consequences differ.
-/// There, accepting binds a call to a mismatched signature (silent wrong call); here, accepting
-/// merely preserves the behaviour that already existed, while refusing would turn valid modules
-/// away. Measured: refusing costs 6 valid `type-subtyping.wast` modules and buys nothing.
-///
-/// "Undecidable" is kept as narrow as the information allows — both sides concrete, the **same
-/// family head**, and nullability still respected — so kind mismatches, arity, mutability and every
-/// abstract-type comparison are all still decided.
-fn decl_subtype_of(module: &Module, sub: V, sup: V) -> bool {
-    if subtype_of(module, sub, sup) {
-        return true;
-    }
-    if !(sub.is_concrete() && sup.is_concrete()) {
-        return false;
-    }
-    if sub.ref_heap() != sup.ref_heap() {
-        return false;
-    }
-    if sup.is_non_null_ref() && !sub.is_non_null_ref() {
-        return false;
-    }
-    // Decidable in the NEGATIVE: if the supposed supertype is itself a declared subtype of the
-    // other, the two are genuinely related the wrong way round — that is an answer, not an unknown,
-    // and treating it as undecidable would accept a real variance violation (measured: it let a
-    // contravariance breach through). Only a pair with no declared relationship in either direction
-    // is a candidate for being two spellings of one canonical type.
-    !module.is_subtype(sup.concrete_index(), sub.concrete_index())
-}
-
 /// Does composite type `sub` match `sup` (§3.4.5)? The variance is the whole content of this
 /// function, and getting a direction backwards is silent: it would accept a hierarchy that lets a
 /// caller pass the wrong type to a `call_ref`.
@@ -420,12 +381,12 @@ fn comp_type_matches(module: &Module, sub: &CompType, sup: &CompType) -> bool {
                 && b.params
                     .iter()
                     .zip(&a.params)
-                    .all(|(&bp, &ap)| decl_subtype_of(module, bp, ap))
+                    .all(|(&bp, &ap)| subtype_of(module, bp, ap))
                 // Results are COVARIANT: the subtype may promise something more specific.
                 && a.results
                     .iter()
                     .zip(&b.results)
-                    .all(|(&ar, &br)| decl_subtype_of(module, ar, br))
+                    .all(|(&ar, &br)| subtype_of(module, ar, br))
         }
         // A struct subtype may APPEND fields, never remove or reorder them: the prefix must match
         // so that any code holding the supertype reads the same fields at the same indices.
@@ -462,9 +423,17 @@ fn field_matches(
                 // A mutable field is INVARIANT — written through as well as read — so the two must
                 // be the same type. `==` is the same index-vs-structure approximation as
                 // `decl_subtype_of` and errs the same way, accepting what it cannot separate.
-                a == b || (a.is_concrete() && b.is_concrete() && a.ref_heap() == b.ref_heap())
+                // Invariant: it must be the *same* type, decided canonically rather than by index —
+                // two spellings of one type are one type, and `==` on the packed bits misses that.
+                // Nullability is still part of the type, so it must match too: `(mut (ref $t))` and
+                // `(mut (ref null $t))` are different fields.
+                a == b
+                    || (a.is_concrete()
+                        && b.is_concrete()
+                        && a.is_non_null_ref() == b.is_non_null_ref()
+                        && module.types_equal(a.concrete_index(), b.concrete_index()))
             } else {
-                decl_subtype_of(module, a, b)
+                subtype_of(module, a, b)
             }
         }
         _ => false,
@@ -2400,13 +2369,14 @@ mod tests {
         );
     }
 
-    /// **The limit of the check, asserted rather than left to be discovered.** wasmrt compares
-    /// concrete types by *index*; the spec compares them by *structure*, so two structurally
-    /// identical rec groups are one type. Without that canonicalisation this pair is undecidable,
-    /// and `decl_subtype_of` accepts rather than refuses — which is what keeps the valid
-    /// `type-subtyping.wast` modules building. Writing it the strict way costs 6 of them.
+    /// Two structurally identical rec groups are **one type** (§3.1.4), so `$f1` and `$f2` here are
+    /// the same type and the extension is valid.
+    ///
+    /// This used to be pinned as a *limitation* — the check could not tell the pair apart, so it
+    /// accepted rather than refused. Canonicalisation decides it properly, and the approximation
+    /// that stood in for it is gone.
     #[test]
-    fn structurally_equal_rec_groups_are_accepted_because_they_cannot_be_told_apart() {
+    fn structurally_equal_rec_groups_are_the_same_type() {
         assert_eq!(
             v("(module
                  (rec (type $f1 (sub (func))) (type $s1 (sub (struct (field (ref $f1))))))
@@ -2414,6 +2384,52 @@ mod tests {
                  (type (sub $s2 (struct (field (ref $f1))))))"),
             Ok(())
         );
+    }
+
+    /// The other direction, which is the one that makes canonicalisation a *check* and not a
+    /// rubber stamp: a rec group whose member refers to **its own** member is a different type from
+    /// one referring **outward** to an identically-shaped type, even though the two spell out the
+    /// same bytes locally. `type-rec.wast` asserts this and wasmrt used to get it wrong in both
+    /// directions — accepting the invalid module, because it compared indices.
+    #[test]
+    fn a_self_referential_rec_group_differs_from_one_referring_outward() {
+        // Group B's struct points at group A's `$f1`, not at its own `$f2`, so `$f2` is NOT `$f1`
+        // and a `(ref $f1)` global cannot hold a `$f2` function.
+        assert_eq!(
+            v("(module
+                 (rec (type $f1 (func)) (type (struct (field (ref $f1)))))
+                 (rec (type $f2 (func)) (type (struct (field (ref $f1)))))
+                 (func $f (type $f2))
+                 (global (ref $f1) (ref.func $f)))"),
+            Err(ValidateError::TypeMismatch)
+        );
+        // Written self-referentially in both groups, they ARE the same type and it is valid.
+        assert_eq!(
+            v("(module
+                 (rec (type $f1 (func)) (type (struct (field (ref $f1)))))
+                 (rec (type $f2 (func)) (type (struct (field (ref $f2)))))
+                 (func $f (type $f2))
+                 (global (ref $f1) (ref.func $f)))"),
+            Ok(())
+        );
+    }
+
+    /// A rec group is the unit of identity, so **group size is part of the type**: a two-member group
+    /// of `(func)`s is not the same type as a standalone `(func)`. The assembler was flattening every
+    /// `(rec …)` into singletons, which silently changed what its output meant.
+    #[test]
+    fn rec_group_membership_is_part_of_type_identity() {
+        let two = crate::wat::assemble(
+            b"(module (rec (type $a (func)) (type $b (func))) (type $c (func)))",
+        )
+        .expect("assemble");
+        let md = decode(&two).expect("decode");
+        // $a and $b are members of one group of two; $c is its own singleton. None are equal.
+        assert!(!md.types_equal(0, 2), "a two-member group is not a singleton");
+        assert!(!md.types_equal(0, 1), "distinct positions in a group are distinct types");
+        // The emitted binary must actually contain the rec wrapper (0x4e), or none of the above is
+        // being tested — it was absent before, which is how the flattening went unnoticed.
+        assert!(two.contains(&0x4e), "the type section must carry the rec group");
     }
 
     #[test]

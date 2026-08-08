@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — four passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — five passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.1%** (61,712 / 578 / 2,469 of 62,290) — **first time
-over 99%** — **395 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.1%** (61,724 / 554 / 2,466 of 62,278) — **first time
+over 99%** — **397 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -48,11 +48,17 @@ accepted (T9a#6, whose logged cause was again wrong). Finality is now enforced (
 `0x50` and `0x4f` identically, discarding it) plus §3.4.5 structural matching; it also caught the
 **assembler silently turning open types final**. ⚠️ **A strict version was measured and rejected — it
 refused 6 VALID modules; the direction to err in is a property of the consequence, not a house style.**
-🔧 **That measurement names the next item: no type canonicalisation** — wasmrt compares concrete types by
-**index**, the spec by **structure**, so identical rec groups are two types. **~40 assertions** across
-`type-subtyping`/`type-rec`/`type-equivalence`; the largest in-scope cluster left, and a feature not a patch.
-**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), **type canonicalisation (~40)**, #5, #7,
-#8, #9, #12's **text-parser** remainder (`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
+**The fifth pass implemented TYPE CANONICALISATION.** Rec groups are reduced to structural keys at decode,
+so two groups spelling out the same shape are **one type**; `is_subtype` compares canonical ids, and since
+every subtype question in the engine funnels through it, one line carried the fix. It also caught
+`call_indirect` comparing signatures by **raw bits** (a second site), and 🆕 **the assembler flattening every
+`(rec …)` group — `0x4e` was never emitted**, silently changing what its types *were*. That is the **third**
+"assembler emits a different module than the text describes" defect in two passes, so the emitter deserves a
+dedicated look at T10. Canonicalisation also let the previous pass's `decl_subtype_of` approximation be
+**deleted**, with byte-identical suite results.
+**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), **cross-module type identity (~11 — needs an
+engine-level type registry on `Store`, which is a design decision)**, #5, #7, #8, #9, #12's **text-parser**
+remainder (`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`

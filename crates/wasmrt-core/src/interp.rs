@@ -2134,7 +2134,11 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 let f = entry as u32;
                 let want = ctx.module.func_sig(ci.type_index).ok_or(Trap::UndefinedType)?;
                 let got = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
-                if want.params != got.params || want.results != got.results {
+                // Compared canonically: the declared and actual signatures may name the same types
+                // through different indices, and raw slice equality reports those as a mismatch —
+                // measured as spurious `indirect call type mismatch` traps in `type-equivalence.wast`.
+                // `func_types_equal` tries the slice compare first, so the common case is unchanged.
+                if !ctx.module.func_types_equal(&want, &got) {
                     return Err(Trap::IndirectTypeMismatch);
                 }
                 let base = frame.stack_base(got.params.len())?;

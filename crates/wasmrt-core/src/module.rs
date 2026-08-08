@@ -248,6 +248,18 @@ pub struct Module {
     /// Declared supertype of each type index (GC sub types), or `None`. Read by
     /// [`Module::is_subtype`].
     pub supertypes: Vec<Option<u32>>,
+    /// **Canonical type identity**, parallel to `comp_types`: `type_canon[t]` is the *lowest* type
+    /// index structurally equal to `t`, so two types are the same type iff their entries match.
+    ///
+    /// The spec decides type identity **structurally**, on canonical rec groups (§3.1.4) — two rec
+    /// groups spelling out the same shape are one type. wasmrt otherwise compares concrete types by
+    /// **index**, which is a different relation, and the gap showed up four ways at once: valid
+    /// modules rejected, `ref.test` answering wrongly, `assert_trap` cases returning a result, and
+    /// invalid modules accepted.
+    ///
+    /// Empty for a hand-built `Module` that never went through `decode`; [`Module::canon_id`] then
+    /// falls back to the identity, which is exactly the old index-comparison behaviour.
+    pub type_canon: Vec<u32>,
     /// Whether each type is **final** — closed to further subtyping. Parallel to `comp_types`.
     ///
     /// Final is the *default*: only the `0x50` (`sub`) wrapper opens a type. `0x4f` is `sub final`
@@ -410,14 +422,72 @@ impl Module {
     /// supertype chain?
     #[must_use]
     pub fn is_subtype(&self, a: u32, b: u32) -> bool {
+        // Compared CANONICALLY, not by index: `a` may be a different index naming the same type as
+        // `b`, or its supertype chain may pass through one. Every subtype question in the engine —
+        // the validator's `subtype_of`, the declared-supertype check, and `ref.test`/`ref.cast` at
+        // run time — comes through here, so this is where structural identity takes effect.
+        let cb = self.canon_id(b);
         let mut cur = Some(a);
         while let Some(c) = cur {
-            if c == b {
+            if self.canon_id(c) == cb {
                 return true;
             }
+            // Terminates because a declared supertype is always a strictly lower index (enforced at
+            // decode), so the walk is finite even on a hand-built module.
             cur = self.supertypes.get(c as usize).copied().flatten();
         }
         false
+    }
+
+    /// The canonical identity of type `t` — the lowest type index structurally equal to it.
+    ///
+    /// Falls back to `t` itself when there is no canonical table (a `Module` built by hand rather
+    /// than decoded), which reduces to comparing indices: the previous behaviour, not a panic.
+    #[must_use]
+    pub fn canon_id(&self, t: u32) -> u32 {
+        self.type_canon.get(t as usize).copied().unwrap_or(t)
+    }
+
+    /// Are types `a` and `b` **the same type** (§3.1.4 structural identity)?
+    #[must_use]
+    pub fn types_equal(&self, a: u32, b: u32) -> bool {
+        self.canon_id(a) == self.canon_id(b)
+    }
+
+    /// Are two value types the same type, deciding **concrete** references canonically?
+    ///
+    /// `==` on the packed bits is not the same question: a concrete reference packs a module-local
+    /// type index, so two spellings of one type compare unequal. Nullability is part of the type and
+    /// must still match.
+    #[must_use]
+    pub fn val_types_equal(&self, a: ValType, b: ValType) -> bool {
+        a == b
+            || (a.is_concrete()
+                && b.is_concrete()
+                && a.is_non_null_ref() == b.is_non_null_ref()
+                && self.types_equal(a.concrete_index(), b.concrete_index()))
+    }
+
+    /// Do two function signatures denote the same type, concrete references compared canonically?
+    ///
+    /// The slice equality is tried **first** because it is what almost every call sees, and it is a
+    /// single memcmp; the per-element canonical walk runs only when the bits actually differ. That
+    /// keeps `call_indirect`'s check off the canonical path in the common case.
+    #[must_use]
+    pub fn func_types_equal(&self, a: &FuncType, b: &FuncType) -> bool {
+        if a.params == b.params && a.results == b.results {
+            return true;
+        }
+        a.params.len() == b.params.len()
+            && a.results.len() == b.results.len()
+            && a.params
+                .iter()
+                .zip(&b.params)
+                .all(|(&x, &y)| self.val_types_equal(x, y))
+            && a.results
+                .iter()
+                .zip(&b.results)
+                .all(|(&x, &y)| self.val_types_equal(x, y))
     }
 
     /// The name recorded for function `index` in the name section, if any. Scans linearly;
@@ -449,6 +519,7 @@ struct Decoder {
     comp_types: Vec<CompType>,
     supertypes: Vec<Option<u32>>,
     type_finals: Vec<bool>,
+    type_canon: Vec<u32>,
     /// Composite kind of each type index, pre-scanned before bodies are decoded so a
     /// `(ref $t)` value type can collapse to the right family even for a forward reference.
     type_kinds: Vec<CompKind>,
@@ -590,6 +661,7 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
         comp_types: d.comp_types,
         supertypes: d.supertypes,
         type_finals: d.type_finals,
+        type_canon: d.type_canon,
         functions,
         tags,
         imports,
@@ -850,9 +922,13 @@ fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
     let mut comp: Vec<CompType> = Vec::new();
     let mut supers: Vec<Option<u32>> = Vec::new();
     let mut finals: Vec<bool> = Vec::new();
+    // (start, len) of each rec group. A type written without `(rec …)` is its own singleton group,
+    // which is what the spec says it is — so this needs no special case downstream.
+    let mut groups: Vec<(u32, u32)> = Vec::new();
     let mut nrec = r.read_var_u32()?;
     while nrec > 0 {
         nrec -= 1;
+        let start = comp.len() as u32;
         if r.peek_byte()? == 0x4e {
             r.read_byte()?; // rec group
             let mut k = r.read_var_u32()?;
@@ -863,11 +939,142 @@ fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
         } else {
             decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers, &mut finals)?;
         }
+        groups.push((start, comp.len() as u32 - start));
     }
+    d.type_canon = canonicalize(&comp, &supers, &finals, &groups);
     d.comp_types = comp;
     d.supertypes = supers;
     d.type_finals = finals;
     Ok(())
+}
+
+/// Assign each type its **canonical identity**: the lowest type index structurally equal to it.
+///
+/// Rec groups are the unit of identity (§3.1.4), so each group is reduced to a structural key in
+/// which a reference to a *member of the same group* becomes its position — making the group's shape
+/// independent of where it landed in the index space — and a reference *outside* becomes the target's
+/// already-assigned canonical id. Groups are keyed in order, so an outside reference is always to an
+/// earlier group whose canonical id is known. The one exception is a reference forward out of the
+/// group, which is invalid; it is keyed by a distinct sentinel so this stays **total**:
+/// canonicalisation must never fail or panic on hostile input, and the bad index is the validator's
+/// to report.
+fn canonicalize(
+    comp: &[CompType],
+    supers: &[Option<u32>],
+    finals: &[bool],
+    groups: &[(u32, u32)],
+) -> Vec<u32> {
+    // A `BTreeMap`, not a linear scan over previously-seen keys: the number of rec groups is
+    // attacker-controlled, and a scan would be O(groups²) — a module of 100k singleton groups would
+    // be a denial of service on the decoder. `alloc`'s BTreeMap needs no dependency and no hasher.
+    let mut seen: alloc::collections::BTreeMap<Vec<u8>, u32> = alloc::collections::BTreeMap::new();
+    let mut canon: Vec<u32> = Vec::with_capacity(comp.len());
+    for &(start, len) in groups {
+        // `canon` is filled in index order, so its length is exactly `start` here — which is what
+        // makes "outside the group" and "not yet canonicalised" the same test in `push_type_ref`.
+        let key = rec_group_key(comp, supers, finals, &canon, start, len);
+        let first = *seen.entry(key).or_insert(start);
+        for i in 0..len {
+            canon.push(first + i);
+        }
+    }
+    canon
+}
+
+/// The structural key of one rec group: every member in order, with type references normalised.
+fn rec_group_key(
+    comp: &[CompType],
+    supers: &[Option<u32>],
+    finals: &[bool],
+    canon: &[u32],
+    start: u32,
+    len: u32,
+) -> Vec<u8> {
+    let mut k = Vec::new();
+    for i in 0..len {
+        let t = (start + i) as usize;
+        // Finality and the declared supertype are part of a type's identity, not decoration: two
+        // otherwise identical types differing in either are different types.
+        k.push(u8::from(finals.get(t).copied().unwrap_or(true)));
+        match supers.get(t).copied().flatten() {
+            Some(s) => {
+                k.push(1);
+                push_type_ref(&mut k, canon, start, len, s);
+            }
+            None => k.push(0),
+        }
+        match comp.get(t) {
+            Some(CompType::Func(ft)) => {
+                k.push(0x60);
+                push_u32(&mut k, ft.params.len() as u32);
+                for &v in &ft.params {
+                    push_val_type(&mut k, canon, start, len, v);
+                }
+                push_u32(&mut k, ft.results.len() as u32);
+                for &v in &ft.results {
+                    push_val_type(&mut k, canon, start, len, v);
+                }
+            }
+            Some(CompType::Struct(fs)) => {
+                k.push(0x5f);
+                push_u32(&mut k, fs.len() as u32);
+                for f in fs {
+                    push_field_type(&mut k, canon, start, len, f);
+                }
+            }
+            Some(CompType::Array(f)) => {
+                k.push(0x5e);
+                push_field_type(&mut k, canon, start, len, f);
+            }
+            // Cannot happen for a decoded module; keyed distinctly rather than assumed away.
+            None => k.push(0xff),
+        }
+    }
+    k
+}
+
+fn push_u32(k: &mut Vec<u8>, v: u32) {
+    k.extend_from_slice(&v.to_le_bytes());
+}
+
+fn push_field_type(k: &mut Vec<u8>, canon: &[u32], start: u32, len: u32, f: &FieldType) {
+    k.push(u8::from(f.mutable));
+    match f.storage {
+        StorageType::I8 => k.push(0x78),
+        StorageType::I16 => k.push(0x77),
+        StorageType::Val(v) => push_val_type(k, canon, start, len, v),
+    }
+}
+
+/// A value type, with a **concrete** reference reduced to (nullability, normalised target) so the
+/// module-local type index it packs cannot leak into the key.
+fn push_val_type(k: &mut Vec<u8>, canon: &[u32], start: u32, len: u32, v: ValType) {
+    if v.is_concrete() {
+        k.push(0xc0 | u8::from(v.is_non_null_ref()));
+        push_type_ref(k, canon, start, len, v.concrete_index());
+    } else {
+        k.push(0x00);
+        push_u32(k, v.bits());
+    }
+}
+
+fn push_type_ref(k: &mut Vec<u8>, canon: &[u32], start: u32, len: u32, t: u32) {
+    if t >= start && t < start + len {
+        // Inside this group: its POSITION, so the group's shape does not depend on where the group
+        // sits in the index space. This is what makes two identical rec groups compare equal — and
+        // what keeps a group that refers to its OWN member distinct from one referring outward.
+        k.push(0x01);
+        push_u32(k, t - start);
+    } else if let Some(&c) = canon.get(t as usize) {
+        k.push(0x02);
+        push_u32(k, c);
+    } else {
+        // A reference forward, out of the group — invalid, and not canonicalisable. Keyed by its raw
+        // index so two different bad modules are not accidentally equated, and so this stays total:
+        // the validator reports the bad index; the decoder does not panic on it.
+        k.push(0x03);
+        push_u32(k, t);
+    }
 }
 
 /// Decode one sub type: an optional `0x50`/`0x4f` wrapper carrying a supertype list (GC

@@ -18,16 +18,30 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, declared subtyping) — **99.1%**
+## Spec-suite conformance — current (2026-08-08, type canonicalisation) — **99.1%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a/b (08-07) | T9a#4 (08-08) | decoder (08-08) | **subtyping (08-08)** |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a#4 (08-08) | decoder (08-08) | subtyping (08-08) | **canon (08-08)** |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,247 | 61,593 | 61,691 | **61,712** |
-| failed | 871 | 1,521 | 751 | 738 | 655 | 697 | 599 | **578** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,932 | 2,469 | 2,469 | **2,469** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | 98.9% | 99.0% | **99.1%** of 62,290 |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,593 | 61,691 | 61,712 | **61,724** |
+| failed | 871 | 1,521 | 751 | 738 | 697 | 599 | 578 | **554** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,469 | 2,469 | 2,469 | **2,466** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | 99.0% | 99.1% | **99.1%** of 62,278 |
+
+### The fifth 08-08 column: type canonicalisation. +12 passes, −24 failures, **six files improved, none regressed**
+
+`type-subtyping` 57/23 → **62/13**, `type-equivalence` 7/10/3 → **10/2/0**, `type-rec` 7/11 → **7/9**,
+`ref_cast` and `ref_test` to **zero failures**, `br_on_cast_fail` 13/3 → 15/1. Cold start unmoved
+(~4.59 vs ~4.69 ms — type sections are small, so canonicalising them is free at this scale).
+
+⚠️ **A MEASUREMENT-TOOLING FINDING that affects how every conformance diff in this file was made.** The
+per-file line prints only when `verbose || failed > 0` ([main.rs](../crates/wasmrt/src/main.rs)), so a
+file reaching **zero failures disappears from a non-verbose run** — and a diff keyed on those lines reads
+that as the file losing all its passes. It raised exactly that false alarm here (`br_on_cast_fail` looked
+like −6 passes; it was actually +2). The direction is always *false alarm*, never *false all-clear*, so
+no earlier conclusion in this file was wrong — but **run the suite with `-v` on both sides when diffing
+per-file**, or a genuine improvement is indistinguishable from a catastrophe.
 
 ### The fourth 08-08 column: declared subtyping. +21 passes, −21 failures, skips unchanged
 
@@ -171,9 +185,9 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-08, declared subtyping)
+## Current test state (2026-08-08, type canonicalisation)
 
-**395 workspace tests, all green** (369 core + 26 capi), clippy clean on all four build surfaces; the
+**397 workspace tests, all green** (371 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —

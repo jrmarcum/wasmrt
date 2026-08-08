@@ -2,8 +2,8 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,712 / 578 / 2,469 — 99.1%**
-of 62,290 adjudicated (**first time over 99%**), **395 workspace tests**. T9's first pass landed T9a
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,724 / 554 / 2,466 — 99.1%**
+of 62,290 adjudicated (**first time over 99%**), **397 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
@@ -578,6 +578,35 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   ~5% slower cold. Removing the redundant `body` field recovered it: same-session A/B/A gives ~4.5 ms vs
   ~4.4 ms at 48 KB, a 2–3% difference inside the recorded spread. Steady-state untouched by construction.
 
+  ### ◐ Progress 2026-08-08 (fifth) — type canonicalisation. **61,712/578 → 61,724 / 554 / 2,466**
+
+  **+12 passes, −24 failures; six files improved and none regressed** — `type-subtyping` 57/23 → **62/13**,
+  `type-equivalence` 7/10/3 → **10/2/0**, `type-rec` 7/11 → **7/9**, `ref_cast` and `ref_test` to zero
+  failures, `br_on_cast_fail` 13/3 → 15/1. Cold start unmoved (~4.59 vs ~4.69 ms A/B/A). 397 tests.
+
+  Rec groups are the unit of type identity (§3.1.4), so `Module` gained **`type_canon`** — the lowest type
+  index structurally equal to each type — computed at decode by reducing every group to a structural key in
+  which a reference to a *member of the same group* becomes its **position** and one *outside* becomes the
+  target's canonical id. `Module::is_subtype` compares those ids, and because **every** subtype question in
+  the engine funnels through it, one line carried the fix. `call_indirect` was a **second site**, comparing
+  signature `ValType` vectors by raw bits; `func_types_equal` now tries the slice compare first so the hot
+  path is unchanged. `canonicalize` interns via `BTreeMap`, not a scan: rec-group count is attacker-controlled
+  and O(groups²) would be a DoS on the decoder.
+
+  🆕 **The assembler was flattening every `(rec …)` group — `0x4e` was never emitted.** Since the group IS the
+  unit of identity, that silently changed what the types were, and it is why canonicalisation initially
+  *regressed* `type-rec.wast`. **Third "assembler emits a different module than the text describes" defect in
+  two passes** — give the emitter a dedicated look at T10 rather than waiting for a fourth.
+
+  ✅ It let the previous pass's `decl_subtype_of` approximation be **deleted** with byte-identical results.
+  ⚠️ **Measurement-tooling finding:** the per-file line prints only when `verbose || failed > 0`, so a file
+  reaching **zero failures vanishes** from a non-verbose run and a line-keyed diff reads that as total loss.
+  It raised exactly that false alarm here. **Diff with `-v` on both sides.**
+
+  🔧 **Still open: cross-module type identity (~11 assertions).** A canonical id is module-local, and
+  self-contained keys risk exponential blowup on chained groups; the answer is an **engine-level type registry
+  on `Store`** (what wasmtime does), which is a design decision rather than a patch.
+
   ### ◐ Progress 2026-08-08 (fourth) — declared subtyping was never validated. **99.0% → 99.1%**
 
   **61,691/599 → 61,712 / 578 / 2,469.** `type-subtyping.wast` **36/44/0 → 57/23/0** (+21 passes,
@@ -650,7 +679,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   ### T9a — Correctness defects (real bugs) `[◐]`
 
   **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
-  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5, #7, #8, #9 open · **#6 ✅** · **#11 ✅** · **#12 ◐ (binary half done;
+  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5, #7, #8, #9 open · **#6 ✅ (both halves)** · **#11 ✅** · **#12 ◐ (binary half done;
   the text-parser remainder moved to `wat.rs`)** · #10 not a defect.
   Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
   `store1` 4 → 0 · `ref_is_null` 1 → 0 · `i31` 31 → 6 · `load1` 15 → 5 · `type-subtyping` 20 skips → 8 ·
@@ -663,7 +692,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 3 | 🆕 **The `.wast` runner redirects a failed module's assertions to an unrelated earlier module.** When a build fails, `current = None` — and `target(None)` then falls back to `self.named.last()`. So assertions belonging to the module that failed silently run against a *different* instance and are reported as **value mismatches**. The fallback itself is wanted (a file naming every module must still run bare actions); it must simply not apply after a *failed* build. | `wast.rs` ~290 | Inflates **failures**, never passes — so 98.8% is if anything understated. The real damage is diagnostic: `load1.wast` reports "got 0x0, expected 1", which sends you hunting a load bug that does not exist. Fix by tracking "the last build failed" distinctly from "there is no unnamed current module". |
   | 4 | ◐ **Memories ✅ DONE 2026-08-08** (`Linker::define_memory` + resolution through a registered instance; shared, never copied; §4.5.9 limits matching). **Tables still refused** (`LinkError::UnsupportedImportKind`) — a `funcref` carries no instance identity, so a shared table would dispatch to the wrong function. 🚦 Owner decision required before the table half; two tests pin the refusal. | `linker.rs`, `interp.rs` | Was: `imports.wast` 108 skips, `linking.wast` 80 skips + 16 failures. **Now `imports.wast` 196/13/95 and `linking.wast` 107/11/28.** Remaining skips there are the table imports. |
   | 5 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. Consistent, so no disagreement — an honest missing feature. | `validate.rs`, `interp.rs` | `i31.wast` **31 failures** + part of `type-subtyping`. |
-  | 6 | ✅ **DONE 2026-08-08 — and the logged cause was WRONG.** Not a missing depth model: there was **no declared-subtype validation at all**. Finality (the decoder read `0x50`/`0x4f` identically) + §3.4.5 structural matching now enforced; it also caught the **assembler silently emitting open types as final**. | `validate.rs`, `module.rs`, `wat.rs` | Was `type-subtyping.wast` 36/44 → **57/23**. The residual is **type canonicalisation**, ~40 assertions across three files. |
+  | 6 | ✅ **DONE 2026-08-08, in two halves — and the logged cause was WRONG.** Not a missing depth model: there was **no declared-subtype validation at all**. Half one: finality (the decoder read `0x50`/`0x4f` identically) + §3.4.5 structural matching. Half two: **type canonicalisation** — rec groups reduced to structural keys, `is_subtype` comparing canonical ids, and `call_indirect` no longer comparing signatures by raw bits. Together they caught **two assembler defects**: open types emitted as final, and every `(rec …)` group flattened (`0x4e` never emitted). | `validate.rs`, `module.rs`, `wat.rs`, `interp.rs` | `type-subtyping.wast` 36/44 → **62/13**; `type-equivalence` 7/10/3 → **10/2/0**; `ref_cast`/`ref_test` → 0 failures. Residual: **cross-module** identity, ~11, needing a `Store` type registry. |
   | 7 | **No trap backtrace** — the `decode_body_tracked` byte offsets deferred at **T2**. The C ABI already ships the frame API in its **final shape**, reporting 0 frames deliberately, so this lands **without a breaking ABI change**. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only, but an embedder feels it most. |
   | 8 | **`reference-types.wat` → `UndefinedType`**, oracle says valid. Undiagnosed. | ? | 1 wasmtk file. Re-verified still failing 2026-08-06. |
   | 9 | **`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`**, oracle assembles **and runs** them — so this is our type-checker being wrong, not the input. | `validate.rs` | 2 wasmtk files. Re-verified still failing 2026-08-06. |

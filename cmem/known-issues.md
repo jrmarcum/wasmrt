@@ -213,6 +213,68 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — type canonicalisation: types were compared by index, the spec compares by structure
+
+**Suite 61,712 / 578 / 2,469 → 61,724 / 554 / 2,466 — 99.1%.** +12 passes, −24 failures. **Six files
+improved and none regressed:** `type-subtyping` 57/23 → **62/13**, `type-equivalence` 7/10/3 → **10/2/0**,
+`type-rec` 7/11 → **7/9**, `ref_cast` and `ref_test` to **zero failures**, `br_on_cast_fail` 13/3 → 15/1.
+397 workspace tests. **Cold start unmoved** (~4.59 vs ~4.69 ms A/B/A) — type sections are small, so
+canonicalising them costs nothing at this scale.
+
+Rec groups are the unit of type identity (§3.1.4): two groups spelling out the same shape are **one type**.
+`Module` now carries `type_canon`, where `type_canon[t]` is the lowest type index structurally equal to `t`,
+computed at decode by reducing each group to a structural key — a reference to a *member of the same group*
+becomes its **position** (so the group's shape is independent of where it landed in the index space), a
+reference *outside* becomes the target's already-assigned canonical id. `Module::is_subtype` compares those
+ids, and since **every** subtype question in the engine funnels through it — the validator's `subtype_of`,
+the declared-supertype check, and `ref.test`/`ref.cast` at run time — one line carried the whole fix.
+
+Three details worth keeping:
+
+- **`canonicalize` uses a `BTreeMap`, not a linear scan** over previously-seen keys. The number of rec
+  groups is attacker-controlled; a scan is O(groups²), so a module of 100k singleton groups would be a
+  denial of service **on the decoder**. `alloc`'s BTreeMap needs no dependency and no hasher.
+- **It is total.** A reference forward out of its group is invalid and not canonicalisable; it is keyed by
+  a distinct sentinel rather than treated as an error, so the decoder never panics on hostile input and the
+  bad index stays the validator's to report.
+- **`call_indirect` was a second, separate site.** It compared signature `ValType` vectors by raw bits, so
+  two spellings of one type trapped as `indirect call type mismatch`. Now `func_types_equal`, which tries
+  the slice compare **first** — one memcmp, what almost every call sees — and only walks canonically when
+  the bits actually differ, so the hot path is unchanged.
+
+### 🆕 The assembler was flattening every `(rec …)` group — `0x4e` was never emitted
+
+The blocker, and the reason canonicalisation initially *regressed* `type-rec.wast`: `(rec …)` was parsed by
+appending its members individually, so the emitted type section contained **singleton groups** and the rec
+grouping was gone. Since the group is the unit of identity, that silently changed what the types *were* —
+`(rec (type (func)) (type (func)))` became two standalone `(func)`s, which are different types. The
+emitter now walks the index space emitting `0x4e`-wrapped groups where one starts and singletons elsewhere,
+and a test asserts the wrapper is actually present in the bytes.
+
+**This is the third "the assembler emits a different module than the text describes" defect in two passes**
+— after `(sub …)` marking open types final, and element-segment form 4 rewriting a segment's type at T8.
+The pattern: the emitter reconstructs a form from *some* of the facts the parser saw, and the dropped fact
+turns out to be semantic. Worth a dedicated look at the emitter in T10 rather than waiting for the next one.
+
+### What canonicalisation let us delete
+
+`decl_subtype_of` — the "accept an undecidable pair" approximation added one pass earlier — is **gone**, and
+the suite is byte-identical without it. Its test was rewritten from *"structurally equal rec groups are
+accepted because they cannot be told apart"* to *"…are the same type"*, plus the converse the approximation
+could never have expressed: a group referring to **its own** member is a different type from one referring
+**outward**, which `type-rec.wast` asserts and wasmrt used to get wrong.
+
+### 🔧 Still open: **cross-module** type identity (~11 assertions)
+
+Deliberately out of this pass. A canonical id is module-local, and a key containing such ids is not
+comparable across modules; making keys self-contained (inlining each referenced group) risks exponential
+blowup on chained groups. The real answer is an **engine-level type registry on the `Store`**, interning
+rec groups as modules are added, so cross-module comparison is id equality — what wasmtime does. Measured
+cost of not having it: **7 "Unlinkable: module linked" + 4 "an import does not match"** across
+`type-subtyping`/`type-rec`/`type-equivalence`. It is a design decision (a new structure on `Store`), not a
+patch. The remaining ~10 in those files are separate: 6 `assert_trap`-got-a-result and ~4 over-acceptances
+in `type-rec` ("type mismatch", "unknown type").
+
 ## ✅ Fixed 2026-08-08 — declared subtyping was never validated (21 invalid modules accepted)
 
 **Suite 61,691 / 599 / 2,469 → 61,712 / 578 / 2,469 — 99.1%.** `type-subtyping.wast` **36/44/0 →
