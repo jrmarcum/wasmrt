@@ -213,6 +213,32 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ T9a#5 DONE 2026-08-08 — GC constant expressions
+
+**Suite 61,887 / 457 / 2,339 → 61,975 / 453 / 2,247 — 99.3%.** +88 passes, −4 failures, **−92 skips**.
+`i31.wast` **0/6/66 → 61/2/5**, `array.wast` **6/2/43 → 18/2/29**, `struct.wast` **6/3/17 → 21/3/0**.
+No file lost a pass, none gained a failure. 411 workspace tests.
+
+Six forms, in both the validator and the interpreter: `struct.new`, `struct.new_default`, `array.new`,
+`array.new_default`, `array.new_fixed`, `ref.i31`. **The same six on both sides**, deliberately — a
+validator that accepts what the evaluator rejects (or the reverse) is the disagreement class a previous
+defect had, where `v128.const` evaluated correctly in a const-expr but validated as invalid.
+
+`eval_const_expr` now takes an `Option<(&Module, &mut Pools)>`: the GC forms need the field layouts and
+the heap. Passed as `None` at the one site that cannot produce a reference — a segment *offset* is an
+integer — so that site keeps rejecting `struct.new` rather than being handed a heap it has no use for.
+
+### ⚠️ The measurement lesson, in a NEW direction: a cost counted in FAILURES understates a defect that stops modules BUILDING
+
+**T9a#5's logged cost was 6.** The real value was **88** — and the discrepancy is structural, not an
+estimating error. `ConstantExpressionRequired` on a global initializer makes the whole *module* fail to
+validate, and every later assertion in that file then has no target and is **skipped**. `i31.wast` was
+0 passed / 6 failed / **66 skipped**: the 6 was the visible cost, the 66 was the actual one.
+
+**Apply: when triaging, read the SKIP column too.** A defect that appears as a handful of failures but
+sits in a module-level position (a global initializer, a type definition, a section) is worth its file's
+skips, not its failures. The three GC files carried 126 skips between them.
+
 ## ✅ T9a#4 COMPLETE 2026-08-08 — the funcref encoding, and imported tables
 
 **Suite 61,802 / 472 / 2,466 → 61,887 / 457 / 2,339 — 99.3%.** +85 passes, −15 failures, **−127 skips**.

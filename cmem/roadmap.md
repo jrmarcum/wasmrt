@@ -2,8 +2,8 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,887 / 457 / 2,339 — 99.3%**
-of 62,290 adjudicated (**first time over 99%**), **408 workspace tests**. T9's first pass landed T9a
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,975 / 453 / 2,247 — 99.3%**
+of 62,290 adjudicated (**first time over 99%**), **411 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
@@ -723,6 +723,26 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   Withdrawn rather than forced; ~4 assertions stay open, worth revisiting only with a body-structure-aware
   pass. **A rule that is obviously right is still a hypothesis until it is measured.**
 
+  ### ◐ Progress 2026-08-08 (tenth) — T9a#5, GC constant expressions. **Logged 6, delivered 88**
+
+  **61,887/457 → 61,975 / 453 / 2,247.** +88 passes, −4 failures, **−92 skips**. `i31.wast` **0/6/66 →
+  61/2/5**, `array.wast` 6/2/43 → **18/2/29**, `struct.wast` 6/3/17 → **21/3/0**. Nothing regressed.
+  411 tests.
+
+  Six forms in both the validator and the interpreter: `struct.new`, `struct.new_default`, `array.new`,
+  `array.new_default`, `array.new_fixed`, `ref.i31`. **The same six on both sides**, deliberately — a
+  validator that accepts what the evaluator rejects (or the reverse) is the disagreement class that once
+  made `v128.const` in a const-expr a false rejection. `eval_const_expr` takes an
+  `Option<(&Module, &mut Pools)>` for the field layouts and the heap, passed as `None` at the one site
+  that cannot produce a reference -- a segment *offset* is an integer.
+
+  ⚠️⚠️ **THE MEASUREMENT LESSON IN A NEW DIRECTION: a cost counted in FAILURES understates any defect that
+  stops a module BUILDING.** `ConstantExpressionRequired` on a global initializer fails the whole module,
+  and every later assertion in that file then has no target and is **skipped**. `i31.wast` was 0 passed /
+  6 failed / **66 skipped** — the 6 was the visible cost, the 66 the real one, and the three GC files
+  carried 126 skips between them. **Read the skip column when triaging**, especially for a defect sitting
+  in a module-level position: a global initializer, a type definition, a section.
+
   ### T9a — Correctness defects (real bugs) `[◐]`
 
   **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
@@ -738,7 +758,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 2 | 🆕 **`Op::MemorySize` reads ANOTHER instance's memory — SILENT WRONG OUTPUT.** It indexes `store.memories` with the **raw module-local immediate**, never routing through `ctx.maps.mem()`. `Op::MemoryGrow`, one line below, does it correctly. **The fourth instance of the shared-store defect class** (after `CallIndirect`, `exec_memory_init`, and the assembler shorthands) and the *only* remaining unmapped pool access — verified by auditing every `store.{memories,tables,globals,elem_values,data_dropped,elem_dropped}.get*` site. Clippy's `unused variable: maps` could not fire, because the same function's `MemoryGrow` arm does use `maps`. | `interp.rs` 2374 | `memory_size.wast` 16 failures — all four of its modules report `5`, which is *module 1's* page count. A core MVP instruction returning another module's answer. **Fix + a two-instance regression test.** |
   | 3 | 🆕 **The `.wast` runner redirects a failed module's assertions to an unrelated earlier module.** When a build fails, `current = None` — and `target(None)` then falls back to `self.named.last()`. So assertions belonging to the module that failed silently run against a *different* instance and are reported as **value mismatches**. The fallback itself is wanted (a file naming every module must still run bare actions); it must simply not apply after a *failed* build. | `wast.rs` ~290 | Inflates **failures**, never passes — so 98.8% is if anything understated. The real damage is diagnostic: `load1.wast` reports "got 0x0, expected 1", which sends you hunting a load bug that does not exist. Fix by tracking "the last build failed" distinctly from "there is no unnamed current module". |
   | 4 | ✅ **DONE 2026-08-08, both halves.** Memories first (`Linker::define_memory`, shared never copied). Then **tables**, once a `funcref` carried its **owning instance** (bits 62..32 — bit 63 is `I31_TAG`): `call_indirect`/`call_ref` now dispatch into the reference's *owner*. ✅ **Instance 0 packs to the bare index**, so the encoding alone moved the suite +1/−1 — a value-model change arranged to be verifiably a no-op. 🆕 Also caught that a table's/memory's *instance* type has `min = CURRENT size`, not the declared one. | `interp.rs`, `linker.rs`, `wast.rs` | Was `imports.wast` 108 skips + `linking.wast` 80 skips/16 fails. **Now `imports.wast` 230/13/26, `linking.wast` 131/4/8, `elem.wast` 75/6/0, `table_grow.wast` 50/0/0.** |
-  | 5 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. Consistent, so no disagreement — an honest missing feature. | `validate.rs`, `interp.rs` | `i31.wast` **31 failures** + part of `type-subtyping`. |
+  | 5 | ✅ **DONE 2026-08-08.** Six forms in both validator and interpreter — `struct.new`, `struct.new_default`, `array.new`, `array.new_default`, `array.new_fixed`, `ref.i31` — the **same set on both sides**, so the two cannot disagree about what a constant expression is (the `v128.const` false-rejection class). `eval_const_expr` takes an `Option<(&Module, &mut Pools)>`, `None` at the offset site that cannot produce a reference. | `validate.rs`, `interp.rs` | ⚠️ **Logged cost 6; real value 88.** A rejected global initializer fails the whole MODULE, so every later assertion in the file was skipped: `i31.wast` **0/6/66 → 61/2/5**, `array.wast` 6/2/43 → **18/2/29**, `struct.wast` 6/3/17 → **21/3/0**. **A cost counted in failures understates a defect that stops modules building — read the skip column.** |
   | 6 | ✅ **DONE 2026-08-08, in two halves — and the logged cause was WRONG.** Not a missing depth model: there was **no declared-subtype validation at all**. Half one: finality (the decoder read `0x50`/`0x4f` identically) + §3.4.5 structural matching. Half two: **type canonicalisation** — rec groups reduced to structural keys, `is_subtype` comparing canonical ids, and `call_indirect` no longer comparing signatures by raw bits. Together they caught **two assembler defects**: open types emitted as final, and every `(rec …)` group flattened (`0x4e` never emitted). | `validate.rs`, `module.rs`, `wat.rs`, `interp.rs` | `type-subtyping.wast` 36/44 → **62/13**; `type-equivalence` 7/10/3 → **10/2/0**; `ref_cast`/`ref_test` → 0 failures. Residual: **cross-module** identity, ~11, needing a `Store` type registry. |
   | 7 | **No trap backtrace** — the `decode_body_tracked` byte offsets deferred at **T2**. The C ABI already ships the frame API in its **final shape**, reporting 0 frames deliberately, so this lands **without a breaking ABI change**. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only, but an embedder feels it most. |
   | 8 | **`reference-types.wat` → `UndefinedType`**, oracle says valid. Undiagnosed. | ? | 1 wasmtk file. Re-verified still failing 2026-08-06. |

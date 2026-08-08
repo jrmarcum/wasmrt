@@ -614,6 +614,78 @@ fn validate_const_expr(
                     push(&mut stack, V::FUNCREF_NN)?;
                 }
             }
+            // The GC constant forms (§3.3.11). Typed here exactly as their instruction
+            // counterparts are in the body validator — the *same* six the interpreter evaluates, so
+            // the two cannot disagree about what a constant expression is. They were rejected by
+            // both, which was consistent but stopped whole modules building: a rejected global
+            // initializer takes every later assertion in the file with it.
+            0xfb => {
+                gate(Some(Feature::Gc), features)?;
+                let sub = r.read_var_u32()?;
+                match sub {
+                    // struct.new t / struct.new_default t
+                    0x00 | 0x01 => {
+                        let ti = r.read_var_u32()?;
+                        let fields = module
+                            .struct_fields(ti)
+                            .ok_or(ValidateError::UndefinedType)?
+                            .to_vec();
+                        if sub == 0x00 {
+                            // Fields are popped in declaration order, so check them in reverse.
+                            for f in fields.iter().rev() {
+                                let got = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                                if !subtype_of(module, got, f.storage.unpacked()) {
+                                    return Err(ValidateError::TypeMismatch);
+                                }
+                            }
+                        }
+                        push(&mut stack, V::concrete_ref(false, RefHeap::Struct, ti))?;
+                    }
+                    // array.new t (init, len) / array.new_default t (len)
+                    0x06 | 0x07 => {
+                        let ti = r.read_var_u32()?;
+                        let f = module
+                            .array_field(ti)
+                            .ok_or(ValidateError::UndefinedType)?;
+                        let len = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                        if len != V::I32 {
+                            return Err(ValidateError::TypeMismatch);
+                        }
+                        if sub == 0x06 {
+                            let init = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                            if !subtype_of(module, init, f.storage.unpacked()) {
+                                return Err(ValidateError::TypeMismatch);
+                            }
+                        }
+                        push(&mut stack, V::concrete_ref(false, RefHeap::Array, ti))?;
+                    }
+                    // array.new_fixed t n
+                    0x08 => {
+                        let ti = r.read_var_u32()?;
+                        let n = r.read_var_u32()?;
+                        let f = module
+                            .array_field(ti)
+                            .ok_or(ValidateError::UndefinedType)?;
+                        for _ in 0..n {
+                            let got = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                            if !subtype_of(module, got, f.storage.unpacked()) {
+                                return Err(ValidateError::TypeMismatch);
+                            }
+                        }
+                        push(&mut stack, V::concrete_ref(false, RefHeap::Array, ti))?;
+                    }
+                    // ref.i31
+                    0x1c => {
+                        let got = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                        if got != V::I32 {
+                            return Err(ValidateError::TypeMismatch);
+                        }
+                        push(&mut stack, V::I31REF_NN)?;
+                    }
+                    // Everything else in the 0xFB family is not constant. Refused, not assumed.
+                    _ => return Err(ValidateError::ConstantExpressionRequired),
+                }
+            }
             0x6a..=0x6c => {
                 // i32 add/sub/mul (extended-const)
                 gate(Some(Feature::ExtendedConst), features)?;
@@ -2223,6 +2295,85 @@ mod tests {
         ]);
         let md = decode(&bytes).unwrap();
         assert_eq!(validate(&md), Err(ValidateError::TypeMismatch));
+    }
+
+    // --- GC constant expressions, §3.3.11 (T9a#5, 2026-08-08) ---
+
+    /// The six GC forms that are constant. Validator and interpreter accept exactly the same set, so
+    /// they cannot disagree about what a constant expression is — the failure mode a previous defect
+    /// had (`v128.const` evaluated fine but validated as invalid, a false rejection).
+    #[test]
+    fn the_gc_constant_forms_are_accepted_in_a_global_initializer() {
+        for src in [
+            r#"(module (type $s (struct (field f32)))
+                (global (ref $s) (struct.new $s (f32.const 1))))"#,
+            r#"(module (type $s (struct (field f32)))
+                (global (ref $s) (struct.new_default $s)))"#,
+            r#"(module (type $v (array f32))
+                (global (ref $v) (array.new $v (f32.const 1) (i32.const 3))))"#,
+            r#"(module (type $v (array f32))
+                (global (ref $v) (array.new_default $v (i32.const 3))))"#,
+            r#"(module (type $v (array f32))
+                (global (ref $v) (array.new_fixed $v 2 (f32.const 1) (f32.const 2))))"#,
+            r#"(module (global (ref i31) (ref.i31 (i32.const 2))))"#,
+        ] {
+            assert_eq!(v(src), Ok(()), "should be a valid constant expression: {src}");
+        }
+    }
+
+    /// …and the typing is real, not a rubber stamp: operand types, arity and the *result* type are all
+    /// checked, and a non-constant `0xFB` form is still refused.
+    #[test]
+    fn gc_constant_expressions_are_still_type_checked() {
+        // Wrong field type.
+        assert!(matches!(
+            v(r#"(module (type $s (struct (field f32)))
+                 (global (ref $s) (struct.new $s (i64.const 1))))"#),
+            Err(ValidateError::TypeMismatch)
+        ));
+        // `array.new` wants an i32 length.
+        assert!(matches!(
+            v(r#"(module (type $v (array f32))
+                 (global (ref $v) (array.new $v (f32.const 1) (f32.const 3))))"#),
+            Err(ValidateError::TypeMismatch)
+        ));
+        // `ref.i31` wants an i32.
+        assert!(matches!(
+            v(r#"(module (global (ref i31) (ref.i31 (f32.const 2))))"#),
+            Err(ValidateError::TypeMismatch)
+        ));
+        // A GC op that is NOT constant stays refused — the set is enumerated, not opened up.
+        assert!(matches!(
+            v(r#"(module (type $s (struct (field f32)))
+                 (global f32 (struct.get $s 0 (ref.null $s))))"#),
+            Err(ValidateError::ConstantExpressionRequired | ValidateError::TypeMismatch)
+        ));
+    }
+
+    /// The interpreter must actually *produce* the value, not merely permit it — a validator that
+    /// accepts what the evaluator rejects is the same disagreement in the other direction.
+    #[test]
+    fn gc_constant_expressions_evaluate_at_instantiation() {
+        let src = r#"(module
+            (type $s (struct (field i32) (field i32)))
+            (type $v (array i32))
+            (global $g (ref $s) (struct.new $s (i32.const 7) (i32.const 9)))
+            (global $a (ref $v) (array.new $v (i32.const 5) (i32.const 3)))
+            (global $i (ref i31) (ref.i31 (i32.const 42)))
+            (func (export "field") (result i32) (struct.get $s 1 (global.get $g)))
+            (func (export "len") (result i32) (array.len (global.get $a)))
+            (func (export "elem") (result i32) (array.get $v (global.get $a) (i32.const 2)))
+            (func (export "i31") (result i32) (i31.get_s (global.get $i))))"#;
+        let md = decode(&crate::wat::assemble(src.as_bytes()).unwrap()).unwrap();
+        assert_eq!(validate(&md), Ok(()));
+        let mut inst = crate::interp::Instance::new(md).expect("instantiate");
+        for (name, want) in [("field", 9), ("len", 3), ("elem", 5), ("i31", 42)] {
+            assert_eq!(
+                crate::interp::as_i32(inst.invoke(name, &[]).unwrap()[0]),
+                want,
+                "{name}"
+            );
+        }
     }
 
     // --- declared subtyping, §3.4.5 (2026-08-08) ---

@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — nine passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — ten passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.3%** (61,887 / 457 / 2,339 of 62,344) — **first time
-over 99%** — **408 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.3%** (61,975 / 453 / 2,247 of 62,428) — **first time
+over 99%** — **411 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -94,7 +94,12 @@ defect in that morning's memory work**: a table's or memory's *instance* type ha
 test — ⚠️ **a test can encode a misreading of the spec and pass forever if nothing exercises it.**
 ⚠️ **~5% steady-state regression, unattributed and handed to T11** (two hypotheses tested and rejected;
 cold start unchanged).
-**Still open in T9:** #5, #7, #8, #9, `func.wast` 8 (the withdrawn
+**The tenth pass did T9a#5, GC constant expressions** — six forms in both validator and interpreter.
+⚠️⚠️ **Its lesson: a cost counted in FAILURES understates any defect that stops a module BUILDING.** Logged
+at 6, it delivered **88**: `ConstantExpressionRequired` on a global initializer fails the whole module, so
+every later assertion in the file was skipped. `i31.wast` was 0/6/**66 skipped** → **61/2/5**. **Read the
+skip column when triaging.**
+**Still open in T9:** #7, #8, #9, `func.wast` 8 (the withdrawn
 body-order rule + duplicate identifiers), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.

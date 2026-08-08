@@ -18,16 +18,32 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, T9a#4 complete) — **99.3%**
+## Spec-suite conformance — current (2026-08-08, T9a#5 GC const-exprs) — **99.3%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9h registry (08-08) | type-use I (08-08) | type-use II (08-08) | **T9a#4 tables (08-08)** |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | **T9a#5 GC consts (08-08)** |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,738 | 61,778 | 61,802 | **61,887** |
-| failed | 871 | 1,521 | 751 | 738 | 536 | 496 | 472 | **457** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,466 | **2,339** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.1% | 99.2% | 99.2% | **99.3%** of 62,344 |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | **61,975** |
+| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | **453** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | **2,247** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | **99.3%** of 62,428 |
+
+### The tenth 08-08 column: T9a#5, GC constant expressions. **Logged cost 6, real value 88**
+
++88 passes, −4 failures, **−92 skips**. `i31.wast` **0/6/66 → 61/2/5**, `array.wast` **6/2/43 → 18/2/29**,
+`struct.wast` **6/3/17 → 21/3/0**. Nothing regressed.
+
+Six forms in both validator and interpreter — `struct.new`, `struct.new_default`, `array.new`,
+`array.new_default`, `array.new_fixed`, `ref.i31` — **the same six on both sides**, so the two cannot
+disagree about what a constant expression is.
+
+⚠️⚠️ **THE MEASUREMENT LESSON IN A NEW DIRECTION: a cost counted in FAILURES understates any defect that
+stops a module BUILDING.** `ConstantExpressionRequired` on a global initializer fails the whole module, and
+every later assertion in the file then has no target and is **skipped**. `i31.wast` was 0 passed / 6 failed
+/ **66 skipped** — the 6 was the visible cost, the 66 the actual one. **Read the skip column when
+triaging**, especially for defects in module-level positions (global initializers, type definitions,
+sections).
 
 ### The ninth 08-08 column: T9a#4 COMPLETE — the funcref encoding, then imported tables
 
@@ -264,7 +280,7 @@ re-run.
 
 ## Current test state (2026-08-08, type-use well-formedness)
 
-**408 workspace tests, all green** (382 core + 26 capi), clippy clean on all four build surfaces; the
+**411 workspace tests, all green** (385 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —

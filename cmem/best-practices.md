@@ -13,7 +13,7 @@ been wrong, which is a much better predictor of how it will be wrong next.
 
 ### 1.1 A logged cost is a hypothesis about a CAUSE, not a measurement
 
-**Wrong three times.** (a) `ref.null $t` was credited with "161 skipped assertions in `br_table.wast`" —
+**Wrong four times.** (a) `ref.null $t` was credited with "161 skipped assertions in `br_table.wast`" —
 the fix was real but moved *other* files; `br_table` was failing three fixes earlier and needed **four**
 independent fixes. (b) T9a#11 and #12 were logged as separate items with different symptoms; they were
 **one theme in two halves**. (c) T9a#6 read "GC subtyping depth not modelled"; the measured top item was
@@ -28,11 +28,21 @@ The roadmap said the remaining text-parser work was "`func.wast` 21". Surveying 
 showed **`block`/`if`/`loop` at 13 failures each with an identical breakdown** — the signature of one
 shared cause, and nearly twice the logged size. Identical numbers across sibling files are a tell.
 
-### 1.3 Diff the OUTPUT counts, not exit codes
+### 1.3 A cost counted in FAILURES understates any defect that stops a module BUILDING
+
+**T9a#5 was logged at 6 and delivered 88.** The discrepancy was structural, not an estimating error:
+`ConstantExpressionRequired` on a global initializer fails the whole *module*, and every later assertion in
+that file then has no target and is **skipped**. `i31.wast` read 0 passed / 6 failed / **66 skipped** — the 6
+was the visible cost, the 66 the actual one. Three GC files carried 126 skips between them.
+
+**Apply:** read the **skip** column, not just the failure column. A defect in a module-level position — a
+global initializer, a type definition, a section — is worth its file's skips.
+
+### 1.4 Diff the OUTPUT counts, not exit codes
 
 A pass/fail count that moved is evidence; an exit code is not. This is binding across the project.
 
-### 1.4 Know what your measurement tool omits
+### 1.5 Know what your measurement tool omits
 
 The `.wast` runner prints a per-file line only when `verbose || failed > 0`. So a file reaching **zero
 failures disappears** from a non-verbose run, and a diff keyed on those lines reads that as the file
@@ -42,7 +52,7 @@ was +2). **Run `wasmrt wast <dir> -v` on both sides when diffing per-file.**
 The direction of that flaw was *false alarm*, never *false all-clear*. Work out which direction your
 tooling can lie in; one of them is survivable and the other is not.
 
-### 1.5 Benchmarks: same-session A/B/A, and say when it is noise
+### 1.6 Benchmarks: same-session A/B/A, and say when it is noise
 
 Run-to-run spread is several percent and a single session drifted **~10%**. Report "unchanged within
 noise" when that is what the numbers say — do not pick the favourable run. Cold-start numbers are

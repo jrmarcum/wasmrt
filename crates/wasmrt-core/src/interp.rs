@@ -1349,7 +1349,7 @@ impl Store {
         let mut globals: Vec<Value> = imports.globals;
         globals.reserve(module.global_inits.len());
         for init in &module.global_inits {
-            let v = eval_const_expr(init, &globals, self_inst)?;
+            let v = eval_const_expr(init, &globals, self_inst, Some((&module, &mut self.pools)))?;
             globals.push(v);
         }
 
@@ -1457,7 +1457,9 @@ impl Store {
             // with every entry set to it, not null. Evaluated against the globals resolved
             // so far, exactly as a global's own initializer is.
             let fill = match &tt.init {
-                Some(expr) => eval_const_expr(expr, &globals, self_inst)?,
+                Some(expr) => {
+                    eval_const_expr(expr, &globals, self_inst, Some((&module, &mut self.pools)))?
+                }
                 None => NULL_REF,
             };
             tables.push(Table {
@@ -1477,7 +1479,12 @@ impl Store {
             // values are stamped exactly as the instruction form would stamp them.
             vals.extend(elem.funcs.iter().map(|&f| pack_funcref(self_inst, f)));
             for ex in &elem.exprs {
-                vals.push(eval_const_expr(ex, &globals, self_inst)?);
+                vals.push(eval_const_expr(
+                    ex,
+                    &globals,
+                    self_inst,
+                    Some((&module, &mut self.pools)),
+                )?);
             }
             if elem.mode == crate::module::ElementMode::Active {
                 // Forks on the index exactly as data segments do: an *imported* table already lives
@@ -3226,7 +3233,7 @@ fn exec_memory_init(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, instr: &Ins
 fn eval_const_offset(expr: &[u8], globals: &[Value], is64: bool) -> Result<u64> {
     // An offset is an integer, so the owning instance can never matter here — passed as 0 rather
     // than threaded, and the validator refuses a `ref.func` in an offset position regardless.
-    let v = eval_const_expr(expr, globals, 0)?;
+    let v = eval_const_expr(expr, globals, 0, None)?;
     Ok(if is64 {
         v as u64
     } else {
@@ -5021,9 +5028,18 @@ fn bin_i64(op: u8, a: i64, b: i64) -> Result<i64> {
 /// deferred with the reference-type execution slice.
 /// Evaluate a constant expression. `inst` is the index of the instance this expression belongs to,
 /// needed because `ref.func` produces a funcref and a funcref carries its owning instance.
-fn eval_const_expr(expr: &[u8], globals: &[Value], inst: usize) -> Result<Value> {
+fn eval_const_expr(
+    expr: &[u8],
+    globals: &[Value],
+    inst: usize,
+    gc: Option<(&Module, &mut Pools)>,
+) -> Result<Value> {
     let mut r = Reader::new(expr);
     let mut stack: Vec<Value> = Vec::new();
+    // The GC constant forms need the module (for field layouts) and the heap (to allocate into).
+    // `None` at the sites that cannot produce one — a segment *offset* is an integer — so those keep
+    // rejecting `struct.new` and friends rather than being handed a heap they have no use for.
+    let mut gc = gc;
     loop {
         match r.read_byte()? {
             0x0b => break,
@@ -5045,6 +5061,75 @@ fn eval_const_expr(expr: &[u8], globals: &[Value], inst: usize) -> Result<Value>
                 // instruction form is. A table initializer that will be shared with another instance
                 // must still produce references callable against THIS one.
                 stack.push(pack_funcref(inst, r.read_var_u32()?));
+            }
+            // The GC constant forms (§3.3.11). Rejected by both validator and interpreter until now,
+            // which was consistent but cost far more than its logged size: a global initializer that
+            // fails to validate stops the whole *module* building, and every later assertion in the
+            // file is then skipped for want of a target.
+            0xfb => {
+                let (module, pools) = gc.as_mut().ok_or(Trap::ConstantExpr)?;
+                match r.read_var_u32()? {
+                    // struct.new t — fields popped in declaration order.
+                    0x00 => {
+                        let ti = r.read_var_u32()?;
+                        let sf = module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                        let base = stack.len().checked_sub(sf.len()).ok_or(Trap::ConstantExpr)?;
+                        let obj: Vec<Value> = sf
+                            .iter()
+                            .enumerate()
+                            .map(|(k, f)| pack_field(f.storage, stack[base + k]))
+                            .collect();
+                        stack.truncate(base);
+                        let v = alloc_object(pools, ti, obj)?;
+                        stack.push(v);
+                    }
+                    // struct.new_default t
+                    0x01 => {
+                        let ti = r.read_var_u32()?;
+                        let sf = module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                        let obj: Vec<Value> = sf.iter().map(|f| default_field(f.storage)).collect();
+                        let v = alloc_object(pools, ti, obj)?;
+                        stack.push(v);
+                    }
+                    // array.new t — (init, len)
+                    0x06 => {
+                        let ti = r.read_var_u32()?;
+                        let f = module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                        let n = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?) as u32 as usize;
+                        let init = pack_field(f.storage, stack.pop().ok_or(Trap::ConstantExpr)?);
+                        let v = alloc_object(pools, ti, vec![init; n])?;
+                        stack.push(v);
+                    }
+                    // array.new_default t — (len)
+                    0x07 => {
+                        let ti = r.read_var_u32()?;
+                        let f = module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                        let n = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?) as u32 as usize;
+                        let v = alloc_object(pools, ti, vec![default_field(f.storage); n])?;
+                        stack.push(v);
+                    }
+                    // array.new_fixed t n — n elements already on the stack.
+                    0x08 => {
+                        let ti = r.read_var_u32()?;
+                        let n = r.read_var_u32()? as usize;
+                        let f = module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                        let base = stack.len().checked_sub(n).ok_or(Trap::ConstantExpr)?;
+                        let elems: Vec<Value> = stack[base..]
+                            .iter()
+                            .map(|&v| pack_field(f.storage, v))
+                            .collect();
+                        stack.truncate(base);
+                        let v = alloc_object(pools, ti, elems)?;
+                        stack.push(v);
+                    }
+                    // ref.i31 — unboxed, so no allocation. `NULL_REF` is checked before `I31_TAG`
+                    // everywhere that reads a reference, which is what keeps the two apart.
+                    0x1c => {
+                        let x = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?);
+                        stack.push(I31_TAG | Value::from(x as u32 & 0x7fff_ffff));
+                    }
+                    _ => return Err(Trap::ConstantExpr),
+                }
             }
             byte @ 0x6a..=0x6c => {
                 let b = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?);
