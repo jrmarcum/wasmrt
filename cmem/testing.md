@@ -18,16 +18,35 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, T9h type registry) — **99.1%**
+## Spec-suite conformance — current (2026-08-08, type-use well-formedness) — **99.2%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | decoder (08-08) | subtyping (08-08) | canon (08-08) | **T9h registry (08-08)** |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | subtyping (08-08) | canon (08-08) | T9h registry (08-08) | **type-use (08-08)** |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,691 | 61,712 | 61,724 | **61,738** |
-| failed | 871 | 1,521 | 751 | 738 | 599 | 578 | 554 | **536** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,469 | 2,469 | 2,466 | **2,466** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.0% | 99.1% | 99.1% | **99.1%** of 62,274 |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,712 | 61,724 | 61,738 | **61,778** |
+| failed | 871 | 1,521 | 751 | 738 | 578 | 554 | 536 | **496** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,469 | 2,466 | 2,466 | **2,466** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.1% | 99.1% | 99.1% | **99.2%** of 62,274 |
+
+### The seventh 08-08 column: type-use well-formedness. **`block`, `if`, `loop` all reach ZERO failures**
+
++40 passes, −40 failures; **`block.wast` 13→0, `if.wast` 13→0, `loop.wast` 13→0**, `type.wast` 1→0. No file
+lost a pass; the `.wat` corpus held at 533/534, which is the check that matters when *tightening* a parser.
+
+**The text format's own grammar was not being enforced.** A **type use** has a fixed clause order (§6.4.4) —
+`(type x)?` then `(param …)*` then `(result …)*` — and the assembler collected clauses in whatever order they
+appeared, so `(block (result i32) (param i32))` assembled and the **validator** then reported a stack-height
+mismatch. Wrong stage, and 36 assertions across three files on that one rule. Two more from the same place:
+a block parameter **cannot be named** (only functions have local slots to name), and giving both a
+`(type x)` *and* explicit clauses requires them to **match** — the assembler returned on the type index and
+silently discarded the clauses, so the module meant something the text did not say.
+
+⚠️ **Where the rule lives matters.** The first attempt put the order check in `parse_sig` and moved **one**
+assertion: `parse_block_type` calls `parse_sig` **one clause at a time**, so its order state reset on every
+call and could never see a sequence. The check has to be where the loop is. **A guard placed one call-level
+away from the iteration it is guarding is not a weaker check — it is no check at all**, and the measurement
+is what said so.
 
 ### The sixth 08-08 column: T9h, the `Store` type registry. **`type-subtyping.wast` reaches 72/0/0**
 
@@ -203,9 +222,9 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-08, T9h type registry)
+## Current test state (2026-08-08, type-use well-formedness)
 
-**401 workspace tests, all green** (375 core + 26 capi), clippy clean on all four build surfaces; the
+**404 workspace tests, all green** (378 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —

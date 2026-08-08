@@ -59,6 +59,14 @@ pub enum Error {
     UnknownLabel,
     /// Nesting beyond the assembler's control-depth cap.
     NestingTooDeep,
+    /// A clause in the wrong place. The text format fixes the order of a **type use**
+    /// (§6.4.4) — `(type x)?` then `(param …)*` then `(result …)*` — and any other order is
+    /// malformed *text*, not an ill-typed module.
+    ///
+    /// Its own variant because the stage matters: the spec suite asserts these with
+    /// `assert_malformed`, and the assembler accepting them meant the **validator** reported
+    /// them instead, as a stack-height mismatch on a module that should never have assembled.
+    UnexpectedToken,
     /// A text construct this release does not assemble yet. Loud by design.
     Unsupported(&'static str),
 }
@@ -1347,9 +1355,30 @@ fn parse_sig(
     mut names: Option<&mut Vec<Option<String>>>,
 ) -> Result<Sig> {
     let mut sig = Sig::default();
+    // A **type use** has a fixed clause order (§6.4.4): `(type x)?` then `(param …)*` then
+    // `(result …)*`. Anything else is malformed *text*.
+    //
+    // This used to collect `param`/`result` in whatever order they appeared and ignore `type`
+    // entirely, so `(block (result i32) (param i32))` assembled — and the resulting module was
+    // then refused by the *validator* as a stack-height mismatch. 41 assertions across
+    // `block`/`if`/`loop`/`call_indirect`/`func` were being rejected at the wrong stage for that
+    // one reason. Other clause kinds (`export`, `import`, `local`, and the body itself) are still
+    // skipped, because `parse_sig` is handed a whole `(func …)` field list as well as a bare
+    // block type; only the *relative* order of the type-use clauses is enforced here.
+    let (mut seen_type, mut seen_param, mut seen_result) = (false, false, false);
     for item in items {
         match item.keyword() {
+            Some("type") if is_type_use_clause(item) => {
+                if seen_type || seen_param || seen_result {
+                    return Err(Error::UnexpectedToken);
+                }
+                seen_type = true;
+            }
             Some("param") => {
+                if seen_result {
+                    return Err(Error::UnexpectedToken);
+                }
+                seen_param = true;
                 let l = want_list(item)?;
                 // `(param $x i32)` names one; `(param i32 i32)` is an anonymous run.
                 if l.len() >= 2 && is_id(&l[1]) {
@@ -1367,6 +1396,7 @@ fn parse_sig(
                 }
             }
             Some("result") => {
+                seen_result = true;
                 for t in &want_list(item)?[1..] {
                     sig.results.push(parse_val_type(t, type_names)?);
                 }
@@ -1375,6 +1405,17 @@ fn parse_sig(
         }
     }
     Ok(sig)
+}
+
+/// Is this `(type …)` a **type use** — a reference to a declared type inside a signature or block
+/// type — rather than a module-level `(type $x (func …))` *definition*?
+///
+/// The two are told apart by shape: a use is `(type x)` with exactly the index or name, while a
+/// definition carries the composite type as a further list. `parse_sig` is handed a `(func …)` field
+/// list, which never contains a definition, but it is also handed slices assembled elsewhere — so
+/// this is checked rather than assumed.
+fn is_type_use_clause(item: &Sexpr) -> bool {
+    item.as_list().is_some_and(|l| l.len() == 2 && !l[1].as_list().is_some())
 }
 
 /// Read an inline `(import "module" "name")` clause, if present.
@@ -3853,13 +3894,42 @@ enum BlockTy {
 fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<BlockTy> {
     let mut sig = Sig::default();
     let mut type_ref = None;
+    // A type use has a fixed clause order (§6.4.4): `(type x)?` then `(param …)*` then
+    // `(result …)*`. Enforced **here** rather than in `parse_sig`, because this loop hands
+    // `parse_sig` one clause at a time — so `parse_sig`'s own order state resets on every call and
+    // could never see the sequence. That is why `(block (result i32) (param i32))` assembled and was
+    // then refused by the *validator* as a stack-height mismatch: the wrong stage, and 36 assertions
+    // across `block`/`if`/`loop` alone.
+    let (mut seen_param, mut seen_result) = (false, false);
     while let Some(s) = items.get(*j) {
         match s.keyword() {
             Some("type") => {
+                if type_ref.is_some() || seen_param || seen_result {
+                    return Err(Error::UnexpectedToken);
+                }
                 type_ref = Some(resolve_by_name(ctx.type_names, nth(want_list(s)?, 1)?)?);
                 *j += 1;
             }
             Some("param" | "result") => {
+                let is_param = s.keyword() == Some("param");
+                if is_param && seen_result {
+                    return Err(Error::UnexpectedToken);
+                }
+                // A block parameter cannot be NAMED: `(block (param $x i32))` is malformed text.
+                // Only a function's parameters bind identifiers, because only a function has locals
+                // for them to name; a block's operands are stack values with no local slots.
+                if is_param
+                    && want_list(s)?
+                        .get(1)
+                        .is_some_and(|first| is_id(first))
+                {
+                    return Err(Error::UnexpectedToken);
+                }
+                if is_param {
+                    seen_param = true;
+                } else {
+                    seen_result = true;
+                }
                 let one = parse_sig(core::slice::from_ref(s), ctx.type_names, None)?;
                 sig.params.extend(one.params);
                 sig.results.extend(one.results);
@@ -3869,6 +3939,22 @@ fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<Blo
         }
     }
     if let Some(ti) = type_ref {
+        // When a type use gives BOTH a `(type x)` and explicit `(param …)`/`(result …)`, the
+        // explicit clauses are not an alternative — they must **match** the referenced type
+        // exactly (§6.4.4). This used to `return` here and silently discard them, so
+        // `(block (type $sig) (result i32))` against a `(type $sig (func))` assembled as `$sig`
+        // and the module meant something the text did not say. The suite calls that
+        // "inline function type" and asserts it is malformed.
+        if seen_param || seen_result {
+            let declared = match ctx.types.get(ti as usize) {
+                Some(TypeDef::Func(s)) => s,
+                // A block type naming a non-function type is malformed, not merely unmatched.
+                _ => return Err(Error::UnexpectedToken),
+            };
+            if declared.params != sig.params || declared.results != sig.results {
+                return Err(Error::UnexpectedToken);
+            }
+        }
         return Ok(BlockTy::TypeIndex(ti));
     }
     // The shorthand forms: no params and at most one result.
@@ -4010,6 +4096,84 @@ mod tests {
     /// left the file unbuildable, so each is pinned separately. Every case round-trips
     /// through decode+validate: "assemble returned Ok" is not evidence, as the missing
     /// label vector above showed.
+    // --- type-use well-formedness, §6.4.4 (2026-08-08) ---
+
+    /// A **type use** has a fixed clause order: `(type x)?` then `(param …)*` then `(result …)*`.
+    /// Any other order is malformed **text** — and the assembler used to accept all of them, so the
+    /// *validator* reported them as stack-height mismatches: the wrong stage, and 36 assertions
+    /// across `block`/`if`/`loop` on this one rule.
+    #[test]
+    fn a_type_use_clause_out_of_order_is_malformed() {
+        // `(result)` before `(param)`.
+        assert_eq!(
+            asm("(module (func (i32.const 0) (block (result i32) (param i32))))").unwrap_err(),
+            Error::UnexpectedToken
+        );
+        // `(type)` after `(param)`/`(result)`.
+        for src in [
+            r#"(module (type $s (func (param i32) (result i32)))
+                (func (i32.const 0) (block (param i32) (type $s) (result i32))))"#,
+            r#"(module (type $s (func (param i32) (result i32)))
+                (func (i32.const 0) (block (result i32) (type $s) (param i32))))"#,
+        ] {
+            assert_eq!(asm(src).unwrap_err(), Error::UnexpectedToken, "{src}");
+        }
+        // The canonical order still assembles — the rule is an order check, not a ban.
+        assert!(
+            asm(r#"(module (func (result i32) (i32.const 0)
+                     (block (param i32) (result i32))))"#)
+                .is_ok()
+        );
+    }
+
+    /// A block parameter cannot be **named**: only a function's parameters bind identifiers, because
+    /// only a function has local slots for them to name.
+    #[test]
+    fn a_named_block_parameter_is_malformed() {
+        assert_eq!(
+            asm("(module (func (param i32) (result i32) (block (param $x i32))))").unwrap_err(),
+            Error::UnexpectedToken
+        );
+        // Unnamed is fine.
+        assert!(asm("(module (func (i32.const 0) (block (param i32) (drop))))").is_ok());
+    }
+
+    /// Giving BOTH a `(type x)` and explicit `(param …)`/`(result …)` is legal only when they
+    /// **match** the referenced type. The assembler used to `return` on the type index and silently
+    /// discard the explicit clauses, so the module meant something the text did not say — the same
+    /// class as the emitter defects, reached from the parser side.
+    #[test]
+    fn an_inline_block_type_must_match_the_referenced_type() {
+        // `$sig` is `(func)`, but the block also claims a result.
+        assert_eq!(
+            asm(r#"(module (type $sig (func))
+                    (func (block (type $sig) (result i32) (i32.const 0)) (unreachable)))"#)
+                .unwrap_err(),
+            Error::UnexpectedToken
+        );
+        // Params disagree in arity.
+        assert_eq!(
+            asm(r#"(module (type $sig (func (param i32 i32) (result i32)))
+                    (func (i32.const 0) (block (type $sig) (param i32) (result i32))
+                     (unreachable)))"#)
+                .unwrap_err(),
+            Error::UnexpectedToken
+        );
+        // An exact restatement is accepted — the check must not reject agreement.
+        assert!(
+            asm(r#"(module (type $sig (func (param i32) (result i32)))
+                    (func (result i32) (i32.const 0)
+                      (block (type $sig) (param i32) (result i32))))"#)
+                .is_ok()
+        );
+        // And the bare `(type $sig)` form, with nothing to disagree with, still works.
+        assert!(
+            asm(r#"(module (type $sig (func (param i32) (result i32)))
+                    (func (result i32) (i32.const 0) (block (type $sig))))"#)
+                .is_ok()
+        );
+    }
+
     /// T9b. §5.5.13 requires the data-count section only when `memory.init`/`data.drop`
     /// appear. Emitting it always cost 3 bytes per module with data segments — and the
     /// section must still be there when it IS required, or the module stops decoding.

@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — six passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — seven passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.1%** (61,738 / 536 / 2,466 of 62,274) — **first time
-over 99%** — **401 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.2%** (61,778 / 496 / 2,466 of 62,274) — **first time
+over 99%** — **404 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -71,8 +71,16 @@ defects in two passes, **all three found by accident** by some other check readi
 dropped. T10a names the mechanism (the emitter reconstructs a form from a *subset* of the parser's facts)
 and specifies a **round-trip property test** + a **`ModuleBuild` field-coverage sweep** instead of a
 read-through — every existing test asserts the module *runs*, and all three defects produced modules that ran.
-**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5, #7, #8, #9, #12's
-**text-parser** remainder (`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
+**The seventh pass enforced the TEXT format's own grammar.** A type use has a fixed clause order (§6.4.4) —
+`(type x)?` then `(param …)*` then `(result …)*` — which the assembler ignored, so
+`(block (result i32) (param i32))` assembled and the *validator* reported it as a stack-height mismatch.
+**`block`/`if`/`loop` all went 13 failures → 0.** Also: a block parameter cannot be named, and `(type x)`
+plus explicit clauses must match (they were silently discarded). ⚠️ **Where a guard lives matters — the
+first attempt put the rule in `parse_sig` and moved ONE assertion of forty, because `parse_block_type`
+calls it one clause at a time; a guard one call-level away from the iteration it guards is no check at all.**
+**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5, #7, #8, #9, the rest of the
+text-parser work (`func.wast` 17 + `call_indirect.wast` 7 — duplicate identifiers, a distinct rule),
+`pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`

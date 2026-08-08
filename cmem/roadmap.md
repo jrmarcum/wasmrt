@@ -2,8 +2,8 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,738 / 536 / 2,466 — 99.1%**
-of 62,290 adjudicated (**first time over 99%**), **401 workspace tests**. T9's first pass landed T9a
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,778 / 496 / 2,466 — 99.2%**
+of 62,290 adjudicated (**first time over 99%**), **404 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
@@ -546,7 +546,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   concrete GC types costs 3 correct refusals to recover 1 false one, so equality stays. Residual: 1
   assertion, logged.
 
-  ### ◐ Progress 2026-08-08 (second) — decoder strictness. **61,593/697 → 61,691 / 599 / 2,469 = 99.1%**
+  ### ◐ Progress 2026-08-08 (second) — decoder strictness. **61,593/697 → 61,691 / 599 / 2,469 = 99.2%**
 
   **+98 passes, −98 failures, skips UNCHANGED** — the cleanest column in `testing.md`'s table, because
   nothing changed about what gets adjudicated; 98 assertions simply started passing. `binary.wast`
@@ -607,7 +607,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   self-contained keys risk exponential blowup on chained groups; the answer is an **engine-level type registry
   on `Store`** (what wasmtime does), which is a design decision rather than a patch.
 
-  ### ◐ Progress 2026-08-08 (fourth) — declared subtyping was never validated. **99.0% → 99.1%**
+  ### ◐ Progress 2026-08-08 (fourth) — declared subtyping was never validated. **99.0% → 99.2%**
 
   **61,691/599 → 61,712 / 578 / 2,469.** `type-subtyping.wast` **36/44/0 → 57/23/0** (+21 passes,
   −21 failures); nothing else in the suite moved and no file lost a pass. 395 workspace tests.
@@ -675,6 +675,32 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
 
   ⚠️ **A stated constraint is worth probing, not agreeing with.** Two of three properties held; the third
   had shipped broken that morning, and no spec-suite assertion could have found it.
+
+  ### ◐ Progress 2026-08-08 (seventh) — the TEXT format's grammar. **99.1% → 99.2%**
+
+  **61,738/536 → 61,778 / 496 / 2,466.** +40 passes, −40 failures. **`block.wast` 13 → 0, `if.wast` 13 → 0,
+  `loop.wast` 13 → 0** and `type.wast` 1 → 0 — three files to zero. No file lost a pass, and the **`.wat`
+  corpus held at 533/534**, which is the check that matters when tightening a *parser*. 404 tests.
+
+  **Found by measurement, not from the list.** #12's remainder was logged as "`func.wast` 21, the text
+  parser". Surveying the worst in-scope files showed `block`/`if`/`loop` at 13 failures **each with an
+  identical breakdown** — the signature of one shared cause, and the largest in-scope cluster left.
+
+  **A type use has a fixed clause order (§6.4.4):** `(type x)?` then `(param …)*` then `(result …)*`. The
+  assembler collected clauses in whatever order they appeared and ignored `(type …)` outright, so
+  `(block (result i32) (param i32))` assembled and the **validator** reported the result as a stack-height
+  mismatch — the wrong stage, on 36 assertions. Two more from the same function: a block parameter **cannot
+  be named** (only functions have local slots to name), and `(type x)` **plus** explicit clauses must
+  **match** — they were silently discarded, so the module meant something the text did not say, which is the
+  emitter-defect class reached from the parser side.
+
+  ⚠️ **Where a guard lives matters: one call-level away is NO check.** The first attempt put the order rule in
+  `parse_sig` and moved **one** assertion of forty, because `parse_block_type` calls `parse_sig` **one clause
+  at a time** — the order state was built and destroyed per clause and could never observe a sequence. The
+  check had to move to the loop that iterates. Only the measurement said so.
+
+  **Still open in this cluster:** `func.wast` 17 and `call_indirect.wast` 7 — duplicate **identifiers**
+  (locals, funcs, types) are a distinct rule from clause order and were not touched.
 
   ### T9a — Correctness defects (real bugs) `[◐]`
 

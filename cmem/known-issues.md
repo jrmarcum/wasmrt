@@ -213,6 +213,42 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — the text format's own grammar was not enforced (type-use well-formedness)
+
+**Suite 61,738 / 536 / 2,466 → 61,778 / 496 / 2,466 — 99.2%.** +40 passes, −40 failures.
+**`block.wast` 13 → 0, `if.wast` 13 → 0, `loop.wast` 13 → 0** — three files to zero failures — plus
+`type.wast` 1 → 0. No file lost a pass; **the `.wat` corpus held at 533/534**, which is the check that
+matters when *tightening* a parser rather than a checker. 404 workspace tests.
+
+Found by measurement, not from the list: the roadmap's #12 remainder was logged as "`func.wast` 21, the text
+parser", but surveying the worst in-scope files showed `block`/`if`/`loop` at 13 failures **each with an
+identical breakdown** — the signature of one shared cause. It was the largest in-scope cluster left.
+
+**A type use has a fixed clause order (§6.4.4):** `(type x)?` then `(param …)*` then `(result …)*`. The
+assembler collected clauses in whatever order they appeared and ignored `(type …)` outright, so
+`(block (result i32) (param i32))` assembled — and the **validator** then reported the resulting module as a
+stack-height mismatch. Wrong stage, 36 assertions on that one rule. Two more from the same function:
+
+- **A block parameter cannot be named.** `(block (param $x i32))` is malformed: only a function's parameters
+  bind identifiers, because only a function has local slots for them to name.
+- **`(type x)` plus explicit clauses must MATCH.** The assembler returned on the type index and silently
+  discarded the explicit `(param …)`/`(result …)`, so `(block (type $sig) (result i32))` against a
+  `(type $sig (func))` assembled as `$sig` and the module meant something the text did not say. The suite
+  calls this "inline function type". **Same class as the emitter defects T10a is about, reached from the
+  parser side** — a fact was present and dropped.
+
+### ⚠️ Where a guard lives matters: one call-level away is no check at all
+
+The first attempt put the order check in `parse_sig` and moved **one** assertion out of forty. The reason is
+worth keeping: **`parse_block_type` calls `parse_sig` one clause at a time** (`from_ref(s)`), so the order
+state was constructed and destroyed per clause and could never observe a sequence. The check had to move to
+the loop that actually iterates. A guard placed one call-level away from the iteration it guards is not a
+weaker check — it is **no check**, and only the measurement said so.
+
+**Still open in this cluster:** `func.wast` (9 "unexpected token", 3 "duplicate local", 1 "duplicate func",
+plus 2 wrong results and 2 malformed imports) and `call_indirect.wast` (7 "unexpected token"). Duplicate
+**identifiers** — locals, funcs, types — are a distinct rule from clause order and were not touched.
+
 ## ✅ T9h DONE 2026-08-08 — cross-module type identity via a `Store` type registry
 
 **Suite 61,724 / 554 / 2,466 → 61,738 / 536 / 2,466 — 99.1%.** +14 passes, −18 failures, no file lost a
