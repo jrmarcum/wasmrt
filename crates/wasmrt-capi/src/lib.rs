@@ -227,6 +227,20 @@ pub struct wasmrt_error {
 
 pub struct wasmrt_trap {
     message: CString,
+    /// The wasm call stack, innermost first, **copied** when the trap was built.
+    ///
+    /// Copied rather than borrowed because a `wasmrt_trap_t` outlives the state that produced it:
+    /// the engine keeps exactly one backtrace and the next call overwrites it, while a C caller may
+    /// hold the trap for as long as it likes.
+    frames: Vec<CapturedFrame>,
+}
+
+/// One captured frame. The name is **owned here** so `name_out` can hand back a pointer that stays
+/// valid for the trap's whole life — pointing into the module would tie the trap to the store.
+struct CapturedFrame {
+    func_index: u32,
+    offset: u32,
+    name: Option<CString>,
 }
 
 fn err(msg: impl AsRef<str>) -> *mut wasmrt_error {
@@ -235,10 +249,35 @@ fn err(msg: impl AsRef<str>) -> *mut wasmrt_error {
     })
 }
 
+/// A trap with no wasm frames — what a *host* callback raises. It did not come from guest code, so
+/// there is no guest stack to report.
 fn trap_obj(msg: impl AsRef<str>) -> *mut wasmrt_trap {
     ffi::into_raw(wasmrt_trap {
         message: cstring(msg),
+        frames: Vec::new(),
     })
+}
+
+/// A trap that came out of the engine: take its message and snapshot the store's backtrace.
+///
+/// Must be called before anything else runs on `inner`, since the backtrace is only valid until the
+/// next invocation.
+fn engine_trap(inner: &Store, message: CString) -> *mut wasmrt_trap {
+    let frames = inner
+        .backtrace()
+        .iter()
+        .map(|f| CapturedFrame {
+            func_index: f.func_index,
+            offset: f.offset,
+            // The name section is not required to be UTF-8; a name that is not gets dropped rather
+            // than mangled, leaving the caller the index — which is never wrong.
+            name: inner
+                .frame_name(f)
+                .and_then(|n| core::str::from_utf8(n).ok())
+                .map(cstring),
+        })
+        .collect();
+    ffi::into_raw(wasmrt_trap { message, frames })
 }
 
 /// Build a `CString`, replacing interior NULs rather than failing — a diagnostic must never
@@ -1125,7 +1164,7 @@ capi! {
                 // caller can tell "the guest misbehaved" from "linking was wrong".
                 let msg = trap_message(&t);
                 #[allow(unsafe_code, reason = "writing a caller out-parameter")]
-                unsafe { ffi::out(trap_out, ffi::into_raw(wasmrt_trap { message: msg })) };
+                unsafe { ffi::out(trap_out, engine_trap(&s.inner, msg)) };
                 core::ptr::null_mut()
             }
         }
@@ -1323,7 +1362,7 @@ capi! {
         if let Err(t) = s.inner.invoke(id, "_initialize", &[]) {
             let msg = trap_message(&t);
             #[allow(unsafe_code, reason = "writing a caller out-parameter")]
-            unsafe { ffi::out(trap_out, ffi::into_raw(wasmrt_trap { message: msg })) };
+            unsafe { ffi::out(trap_out, engine_trap(&s.inner, msg)) };
         }
         core::ptr::null_mut()
     }
@@ -1412,7 +1451,7 @@ capi! {
             Err(t) => {
                 let msg = trap_message(&t);
                 #[allow(unsafe_code, reason = "writing a caller out-parameter")]
-                unsafe { ffi::out(trap_out, ffi::into_raw(wasmrt_trap { message: msg })) };
+                unsafe { ffi::out(trap_out, engine_trap(&s.inner, msg)) };
                 core::ptr::null_mut()
             }
         }
@@ -1566,23 +1605,46 @@ capi! {
 }
 
 capi! {
-    /// Always 0 in this release — see the header. Per-instruction byte offsets are not
-    /// recorded yet, so there is nothing truthful to report, and an approximate frame is
-    /// worse than none.
-    fn wasmrt_trap_frame_count(_p: *const wasmrt_trap) -> usize {
-        0
+    /// Frames in this trap's backtrace, innermost first. Zero for a trap a host callback
+    /// raised, and zero for a NULL handle.
+    fn wasmrt_trap_frame_count(p: *const wasmrt_trap) -> usize {
+        #[allow(unsafe_code, reason = "borrowing a caller handle via the ffi primitive")]
+        (unsafe { ffi::opt_ref(p) }).map_or(0, |t| t.frames.len())
     }
 }
 
 capi! {
+    /// Read frame `i`. Returns false — writing no out-parameter — for a NULL handle or an
+    /// index at or past the count, so a caller that loops past the end gets a clean stop
+    /// rather than a stale frame.
+    ///
+    /// Every out-parameter is optional; pass NULL for the ones you do not want. `name_out`
+    /// receives NULL when the guest carries no name for the function, and is borrowed until
+    /// the trap is deleted.
     fn wasmrt_trap_frame(
-        _p: *const wasmrt_trap,
-        _i: usize,
-        _func_index_out: *mut u32,
-        _offset_out: *mut u32,
-        _name_out: *mut *const c_char,
+        p: *const wasmrt_trap,
+        i: usize,
+        func_index_out: *mut u32,
+        offset_out: *mut u32,
+        name_out: *mut *const c_char,
     ) -> bool {
-        false
+        #[allow(unsafe_code, reason = "borrowing a caller handle via the ffi primitive")]
+        let Some(t) = (unsafe { ffi::opt_ref(p) }) else {
+            return false;
+        };
+        let Some(f) = t.frames.get(i) else {
+            return false;
+        };
+        #[allow(unsafe_code, reason = "writing caller out-parameters")]
+        unsafe {
+            ffi::out(func_index_out, f.func_index);
+            ffi::out(offset_out, f.offset);
+            ffi::out(
+                name_out,
+                f.name.as_ref().map_or(core::ptr::null(), |n| n.as_ptr()),
+            );
+        }
+        true
     }
 }
 

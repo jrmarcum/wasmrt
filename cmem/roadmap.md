@@ -2,17 +2,17 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,975 / 453 / 2,247 — 99.3%**
-of 62,290 adjudicated (**first time over 99%**), **411 workspace tests**. T9's first pass landed T9a
-#1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
-**T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
-option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
-category, unskipped for the first time, revealed had never existed — then **T9a#11 + most of #12, the
-decoder-strictness cluster** (seven checks making the *decoder* the stage that rejects a malformed
-binary), and then a **cross-store `InstanceId`** fix: an id from one store resolved against another and
-a guest silently shared the wrong memory. Still open: T9a#4's **table** half (🚦 still a decision-gate — a `funcref` carries no instance
-identity), #5, #6, #7, #8, #9, the text-parser remainder of #12, **T9e `pin`**, **T9f tail calls**.
-The T8 block below is kept as the v0.9.0 release record.
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,987 / 441 / 2,247 — 99.3%**
+of 62,428 adjudicated, **426 workspace tests** (398 core + 28 capi), Miri **28/28**. T9's first pass
+landed T9a #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
+**T9d (licensing/docs)**. **2026-08-08 landed eight further passes**, closing T9a **#4 (both halves,
+via a funcref that carries its owning instance), #5, #6, #7, #11** and most of **#12**, plus four
+defects the list never had: a cross-store `InstanceId` that let a guest silently share the wrong
+memory, and — found while wiring #7 — **the start function, which was decoded, validated and printed
+but never executed** (§4.5.5).
+
+**Still open in T9:** T9a **#8**, **#9**, the text-parser remainder of **#12**, **T9e `pin`**,
+**T9f tail calls**. #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
 
 ### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
@@ -516,8 +516,9 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
      just plumbing; imported **tables** need the funcref encoding decided first, and that touches a
      recorded invariant. **Do not implement imported tables without it.**
 
-  **Still open in T9:** T9a #4's **table** half (gated as above), #5, #6, #7, #8, #9, #11, #12 ·
-  **T9e `pin`** · **T9f tail calls**. #10 stays a non-issue by design.
+  **Still open in T9** (as of the eleventh pass): T9a **#8**, **#9**, the text-parser remainder of
+  **#12** · **T9e `pin`** · **T9f tail calls**. #10 stays a non-issue by design. Note 2 above is
+  now **resolved** — the funcref carries its owning instance and imported tables ship.
 
   ### ◐ Progress 2026-08-08 — T9a#4 memory half. Suite 61,247/655/2,932 → **61,593 / 697 / 2,469**
 
@@ -743,11 +744,69 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   carried 126 skips between them. **Read the skip column when triaging**, especially for a defect sitting
   in a module-level position: a global initializer, a type definition, a section.
 
+  ### ◐ Progress 2026-08-08 (eleventh) — T9a#7 trap backtraces, **+ the start function never ran**
+
+  **61,975/453 → 61,987 / 441 / 2,247 = 99.3%.** +12 passes, −12 failures, **nothing regressed** —
+  and every one of those 12 came from the *second* item, not the one on the list. **426 tests**
+  (398 core + 28 capi). Miri **28/28**. CLI size **unchanged to the byte**; cdylib **+512 B**.
+
+  **T9a#7 — trap backtraces, real frames end to end.** Three decisions, each measured:
+
+  1. **Where the byte offset lives.** `Instr` gained a `pub offset: u32` that is **free**: `Imm` is 64
+     bytes at 16-byte alignment, so `Instr` was already 80 bytes with 15 of padding after the one-byte
+     opcode. A test pins `size_of::<Instr>() == 80` so that an optimization pass which shrinks `Imm`
+     (a live T11 candidate) **fails loudly** instead of silently starting to pay 16 bytes per
+     instruction. The alternatives — a parallel `Vec<u32>`, or restoring the `Code::body` bytes removed
+     in T9b at a ~5% cold-start cost — were both rejected on that basis.
+  2. **How the pc escapes `run`.** ⚠️ **THE LESSON OF THIS PASS: the plumbing for a cold feature can
+     cost the hot path, so measure the plumbing.** `run` has 51 `return Err` sites plus a long tail of
+     `?`, so per-site recording is untenable; the obvious fix is `pc: &mut usize`. **Measured, that
+     cost 3.6%** (2160 ms vs 2083 ms on the steady-state loop, bracketed A/B/A) — the deref does not
+     survive the opaque calls in the loop body. Wrapping the loop in a **one-shot closure** keeps `pc`
+     a plain local that LLVM holds in a register while still leaving it readable after any exit:
+     re-measured at **2087 ms against a 2083–2095 baseline band**, i.e. free. A diagnostics-only
+     feature paying 3.6% of the "fast" axis forever would have been a bad trade made invisibly.
+  3. **When frames are built.** On the way **out**, one per frame as the error passes through
+     `call_function` — not as a shadow stack maintained during execution. A shadow stack costs a push
+     and a pop on every call whether or not anything ever traps; this costs nothing until something
+     does. `Pools.backtrace` is cleared per invocation and **when EH catches**, so a caught exception
+     never leaves its frames for the next real trap to inherit.
+
+  The C ABI's frame API was frozen in its final shape at T8 and stubbed to 0 frames; it is now live
+  with **no ABI change**, exactly as designed. A `wasmrt_trap_t` **copies** the frames, because it
+  outlives the single backtrace the engine keeps. Offsets are reported **absolute from the start of
+  the module** — the form `wasm-objdump` prints — so a consumer needs no rebasing.
+
+  ### 🆕 The start function was decoded, validated, printed — and never executed
+
+  **Found while tracing where an instantiation trap gets its frames**, by asking who runs
+  `Module::start`. Nobody did. §4.5.5 step 11 requires it to run as the last step of instantiation;
+  wasmrt's `Store::instantiate` simply returned. `(start $f)` parsed, assembled, type-checked, and was
+  printed by `wasmrt <file>` — every stage but the one that matters.
+
+  **This is the silent-wrong-output class again**, and the worst instance so far: a module whose entire
+  initialization is a start function ran with every global at its declared default and every effect
+  missing, returning a plausible answer with no error anywhere. Fixed in `instantiate`, after the data
+  and element segments so it can observe them (a test pins that ordering, since running it earlier
+  still passes the naive test). A trap in it fails the instantiation.
+
+  `start.wast` **8/7 → 15/0**, `start0.wast` 5/3 → **8/0**, `linking.wast` +1, `linking3.wast`
+  **11/1 → 12/0**. Five core tests added.
+
+  ⚠️⚠️ **THE LESSON: 10 assertions in a file literally named `start.wast` sat failing for five
+  releases.** The triage habit had been to read failures for a *diagnosis* — what does the message say
+  — and these said nothing useful. The question never asked was the simpler one: **does this file's
+  NAME describe a feature, and does that feature work at all?** A feature can be fully decoded, fully
+  validated, and reported by the CLI while never executing; every stage that *inspects* it passes, so
+  only running it finds out. **Before diagnosing a file's failures, spend one minute asking whether its
+  headline feature works end to end.**
+
   ### T9a — Correctness defects (real bugs) `[◐]`
 
-  **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
-  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5, #7, #8, #9 open · **#6 ✅ (both halves)** · **#11 ✅** · **#12 ◐ (binary half done;
-  the text-parser remainder moved to `wat.rs`)** · #10 not a defect.
+  **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ · **#4 ✅** ·
+  **#5 ✅** · **#6 ✅** · **#7 ✅** · #8, #9 open · **#11 ✅** · **#12 ◐ (binary half done;
+  the text-parser remainder moved to `wat.rs`)** · #10 not a defect ·
+  **#13 ✅ (unlisted — the start function never ran)**.
   Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
   `store1` 4 → 0 · `ref_is_null` 1 → 0 · `i31` 31 → 6 · `load1` 15 → 5 · `type-subtyping` 20 skips → 8 ·
   `imports` +171 passes · `linking` +52 passes / −4 failures.
@@ -760,7 +819,8 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 4 | ✅ **DONE 2026-08-08, both halves.** Memories first (`Linker::define_memory`, shared never copied). Then **tables**, once a `funcref` carried its **owning instance** (bits 62..32 — bit 63 is `I31_TAG`): `call_indirect`/`call_ref` now dispatch into the reference's *owner*. ✅ **Instance 0 packs to the bare index**, so the encoding alone moved the suite +1/−1 — a value-model change arranged to be verifiably a no-op. 🆕 Also caught that a table's/memory's *instance* type has `min = CURRENT size`, not the declared one. | `interp.rs`, `linker.rs`, `wast.rs` | Was `imports.wast` 108 skips + `linking.wast` 80 skips/16 fails. **Now `imports.wast` 230/13/26, `linking.wast` 131/4/8, `elem.wast` 75/6/0, `table_grow.wast` 50/0/0.** |
   | 5 | ✅ **DONE 2026-08-08.** Six forms in both validator and interpreter — `struct.new`, `struct.new_default`, `array.new`, `array.new_default`, `array.new_fixed`, `ref.i31` — the **same set on both sides**, so the two cannot disagree about what a constant expression is (the `v128.const` false-rejection class). `eval_const_expr` takes an `Option<(&Module, &mut Pools)>`, `None` at the offset site that cannot produce a reference. | `validate.rs`, `interp.rs` | ⚠️ **Logged cost 6; real value 88.** A rejected global initializer fails the whole MODULE, so every later assertion in the file was skipped: `i31.wast` **0/6/66 → 61/2/5**, `array.wast` 6/2/43 → **18/2/29**, `struct.wast` 6/3/17 → **21/3/0**. **A cost counted in failures understates a defect that stops modules building — read the skip column.** |
   | 6 | ✅ **DONE 2026-08-08, in two halves — and the logged cause was WRONG.** Not a missing depth model: there was **no declared-subtype validation at all**. Half one: finality (the decoder read `0x50`/`0x4f` identically) + §3.4.5 structural matching. Half two: **type canonicalisation** — rec groups reduced to structural keys, `is_subtype` comparing canonical ids, and `call_indirect` no longer comparing signatures by raw bits. Together they caught **two assembler defects**: open types emitted as final, and every `(rec …)` group flattened (`0x4e` never emitted). | `validate.rs`, `module.rs`, `wat.rs`, `interp.rs` | `type-subtyping.wast` 36/44 → **62/13**; `type-equivalence` 7/10/3 → **10/2/0**; `ref_cast`/`ref_test` → 0 failures. Residual: **cross-module** identity, ~11, needing a `Store` type registry. |
-  | 7 | **No trap backtrace** — the `decode_body_tracked` byte offsets deferred at **T2**. The C ABI already ships the frame API in its **final shape**, reporting 0 frames deliberately, so this lands **without a breaking ABI change**. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only, but an embedder feels it most. |
+  | 7 | ✅ **DONE 2026-08-08.** The byte offsets deferred at **T2**. `Instr.offset: u32` rides in existing padding (pinned by a `size_of` test); frames are built **on the way out** through `call_function`, not as a shadow stack; the frozen C ABI went live with **no ABI change**. ⚠️ The obvious `pc: &mut usize` plumbing **measured 3.6% slower** on the steady loop — a one-shot closure recovered it. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only (0 suite assertions, as predicted) — but tracing where an *instantiation* trap gets its frames is what uncovered #13. |
+  | 13 | 🆕 ✅ **DONE 2026-08-08 — the start function never ran. SILENT WRONG OUTPUT.** §4.5.5 step 11. `Module::start` was decoded, validated, assembled and printed by the CLI; nothing executed it. A module initialized entirely by `(start $f)` returned defaults with no error at any stage. Fixed in `instantiate`, **after** the segments so it can observe them; a trap in it fails the instantiation. | `interp.rs` | **+12 assertions.** `start.wast` 8/7 → **15/0**, `start0.wast` 5/3 → **8/0**, `linking3.wast` 11/1 → **12/0**, `linking.wast` +1. **10 of them sat in files named for the feature for five releases** — see the lesson above. |
   | 8 | **`reference-types.wat` → `UndefinedType`**, oracle says valid. Undiagnosed. | ? | 1 wasmtk file. Re-verified still failing 2026-08-06. |
   | 9 | **`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`**, oracle assembles **and runs** them — so this is our type-checker being wrong, not the input. | `validate.rs` | 2 wasmtk files. Re-verified still failing 2026-08-06. |
   | 10 | **`wasmrt_caller_get_memory` always returns `false`.** A durable handle must be tagged against a live store, and during a callback the store is mid-borrow. Callbacks use `wasmrt_caller_read`/`_write` instead — the shape the loaders actually need. | `capi/src/lib.rs` | None today. Revisit only if a loader needs the handle form. |

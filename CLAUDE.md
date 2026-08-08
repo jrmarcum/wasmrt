@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — ten passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — eleven passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.3%** (61,975 / 453 / 2,247 of 62,428) — **first time
-over 99%** — **411 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.3%** (61,987 / 441 / 2,247 of 62,428),
+**426 workspace tests** (398 core + 28 capi), Miri 28/28, no file lost a pass in any pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -99,12 +99,25 @@ cold start unchanged).
 at 6, it delivered **88**: `ConstantExpressionRequired` on a global initializer fails the whole module, so
 every later assertion in the file was skipped. `i31.wast` was 0/6/**66 skipped** → **61/2/5**. **Read the
 skip column when triaging.**
-**Still open in T9:** #7, #8, #9, `func.wast` 8 (the withdrawn
-body-order rule + duplicate identifiers), `pin`, **tail calls**.
+**The eleventh pass did T9a#7, trap backtraces — and found that THE START FUNCTION NEVER RAN.** #7 is
+diagnostics and was correctly predicted to be worth 0 assertions; `Instr` gained an `offset: u32` that
+is **free** (it fits the padding `Imm`'s alignment already forced — pinned by a `size_of` test so a
+future `Imm` shrink fails the build), frames are built **on the way out** rather than as a shadow
+stack, and the C ABI frozen at T8 went live with **no ABI change**. ⚠️ **The lesson: the PLUMBING for a
+cold feature can cost the hot path.** Threading `pc: &mut usize` through `run` **measured 3.6% slower**
+on the steady loop; a one-shot closure recovered it — a permanent tax on the "fast" axis would have
+been paid invisibly. 🆕 Asking where an *instantiation* trap gets its frames led to asking who runs
+`Module::start`: **nobody**. §4.5.5 step 11 was absent while the field was decoded, validated and
+printed by the CLI — worth **+12 assertions**, 10 of them sitting in files named `start.wast` and
+`start0.wast` for five releases. ⚠️⚠️ **A feature can be fully decoded, validated and printed and still
+never execute; before diagnosing a file's failures, check that the feature it is NAMED for works.**
+**Still open in T9:** #8, #9, `func.wast` 8 (the withdrawn body-order rule + duplicate identifiers),
+`pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`
-fix was real but did not move `br_table.wast`, which needed three further unlisted fixes. Detail is in
+fix was real but did not move `br_table.wast`, which needed three further unlisted fixes. The full set
+of recurring lessons is in [`cmem/best-practices.md`](cmem/best-practices.md); detail is in
 [`cmem/roadmap.md`](cmem/roadmap.md); [`cmem/INDEX.md`](cmem/INDEX.md) carries the fuller status.
 
 ## Project memory lives in `cmem/` — read it first

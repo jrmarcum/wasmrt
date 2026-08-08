@@ -14,6 +14,24 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 _Next: **0.10.0 (T9)** — the correctness punch-list, tail calls, licensing and docs, size + performance
 measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt and code-hygiene pass; **0.12.0 (T11)** — an optimization review of the shipped binaries and the C ABI; and **0.13.0 (T12)** — a security review of the penetration surfaces, with recommended mitigations._
 
+### Fixed
+
+- **The start function now runs.** `(start $f)` was decoded, validated and reported by the CLI, but
+  never executed — so a module whose initialization lived in its start function ran with every global
+  at its declared default and no error reported anywhere. It now runs as the last step of
+  instantiation (§4.5.5), after the data and element segments so it can observe them; a trap in it
+  fails the instantiation.
+
+### Added
+
+- **Trap backtraces.** A trap now reports the wasm call stack that produced it — function index, the
+  byte offset of the trapping instruction (absolute from the start of the module, as `wasm-objdump`
+  prints it), and the name from the name section when the guest carries one.
+  - The CLI prints it to stderr beneath the trap line.
+  - The C ABI's `wasmrt_trap_frame_count` / `wasmrt_trap_frame` were frozen in their final shape at
+    0.9.0 and now return real frames: **no ABI change**, and existing callers keep working.
+  - Rust embedders get `Store::backtrace()` / `Instance::backtrace()` and `frame_name()`.
+
 ## [0.9.0] — the `wasmrt.h` C ABI (stage T8)
 
 wasmrt is now **embeddable from C**. This release adds the finalized `wasmrt.h` surface, the engine

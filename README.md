@@ -15,7 +15,7 @@ parity testing at every step.
 > `wasmrt <file.wasm>` gives a real verdict on any module wasmrt can run.
 >
 > It reads and writes the **text format** and runs the **official spec testsuite**: `wasmrt wast <dir>`
-> scores **98.9% (61,247 assertions passing)**, with every one of the 284 files parsing.
+> scores **99.3% (61,987 assertions passing)**, with every one of the 284 files parsing.
 >
 > It is **embeddable from C** via [`wasmrt.h`](crates/wasmrt-capi/include/wasmrt.h) — compile,
 > link host functions, instantiate, call exports, and read or write guest memory. You can restrict

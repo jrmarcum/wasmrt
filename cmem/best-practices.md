@@ -60,6 +60,23 @@ Run-to-run spread is several percent and a single session drifted **~10%**. Repo
 noise" when that is what the numbers say — do not pick the favourable run. Cold-start numbers are
 meaningless without the module size beside them.
 
+### 1.7 The PLUMBING for a cold feature can cost the hot path — measure the plumbing, not the feature
+
+T9a#7 (trap backtraces) is pure diagnostics: it does nothing until something traps. But making the
+trapping position *observable* meant getting `pc` out of `run`, and the obvious spelling —
+`pc: &mut usize` threaded through the loop — **measured 3.6% slower** on the steady-state benchmark
+(2160 ms vs 2083 ms, A/B/A). The deref does not survive the opaque calls in the loop body. Wrapping
+the loop in a one-shot closure keeps `pc` a plain local that LLVM holds in a register, while still
+leaving it readable after any exit: **2087 ms against a 2083–2095 baseline band** — free.
+
+The trap is that the *feature* is obviously cold, so the change reads as obviously free, and nobody
+benchmarks it. A permanent 3.6% tax on a stated success axis would have been paid invisibly.
+
+**Apply:** benchmark any change that touches a hot loop's *locals or signature*, however cold the
+feature motivating it. And when a design rests on a size or layout claim ("this field is free, it
+fits in existing padding"), **pin it with a `size_of` test** so the day the claim stops holding is a
+build failure, not a silent regression.
+
 ---
 
 ## 2. What to distrust
@@ -101,10 +118,25 @@ one. That is why `SectionId::order()` is a table.
 dropped table initializers; element-segment form 4 rewriting a segment's type; `br_table`'s missing
 label vector; `(data "a""b")` concatenating; `Op::MemorySize` reading another instance's memory; a
 repeated section silently replacing the first; a cross-store `InstanceId` sharing the wrong memory; the
-assembler emitting open types as final and flattening rec groups.
+assembler emitting open types as final and flattening rec groups; **the start function never running**.
 
 **Apply:** when hunting, weight this class above everything else. Ask "what would a wrong answer look
 like?" before "what would an error look like?"
+
+### 3.1a A feature can be fully decoded, validated and PRINTED, and still never execute
+
+`Module::start` was parsed by the assembler, checked by the validator, reported by `wasmrt <file>` —
+and no code path ever called it. §4.5.5 requires it to run as the last step of instantiation. Every
+stage that *inspects* a feature passed, so every stage that could have noticed was satisfied.
+
+The cost was 10 assertions sitting failed for five releases in files literally named `start.wast` and
+`start0.wast`. The triage habit had been to read failures for a *diagnosis* — what does the message
+say — and these said nothing useful, so they stayed on the pile.
+
+**Apply:** before diagnosing a file's failures, spend one minute on the cruder question: **does the
+feature this file is named for work end to end?** Write the five-line module, run it, look at the
+answer. Presence in the decoder, the validator and the printer is not evidence that anything runs it —
+grep for the field's *reader*, not its writer.
 
 ### 3.2 The emitter reconstructs a form from a SUBSET of the parser's facts
 

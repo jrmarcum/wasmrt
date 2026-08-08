@@ -423,16 +423,23 @@ wasmrt_trap_t *wasmrt_trap_new(const char *message);
 const char *wasmrt_trap_message(const wasmrt_trap_t *);
 void        wasmrt_trap_delete(wasmrt_trap_t *);
 
-/* Stack frames, innermost first.
+/* Stack frames, innermost first. Snapshotted when the trap was created, so they stay valid
+ * for as long as the trap does — you may keep it across further calls.
  *
- * The shape is fixed now so it never needs a breaking change, but THIS RELEASE ALWAYS
- * REPORTS ZERO FRAMES: per-instruction byte offsets are not recorded yet, so there is
- * nothing truthful to report. It is deliberately empty rather than approximate — a
- * plausible-looking wrong frame is worse than none. Real frames land with the byte-offset
- * work; `wasmrt_trap_message` carries the reason meanwhile.
+ * A trap raised by one of YOUR host callbacks reports zero frames: it did not come out of
+ * guest code, so there is no guest stack to show. `wasmrt_trap_message` always has the reason.
+ *
+ * `func_index_out` indexes the instance's function space, imports included — the same
+ * numbering `ref.func` and the name section use.
+ *
+ * `offset_out` is the byte offset of the trapping instruction FROM THE START OF THE MODULE,
+ * which is what `wasm-objdump` prints, so it can be looked up directly with no rebasing.
  *
  * `name_out` receives the function's name from the name section, or NULL if the guest was
- * built stripped. */
+ * built stripped. Borrowed until the trap is deleted.
+ *
+ * Every out-parameter is optional — pass NULL for any you do not want. `wasmrt_trap_frame`
+ * returns false, writing nothing, for an index at or past the count. */
 size_t wasmrt_trap_frame_count(const wasmrt_trap_t *);
 bool   wasmrt_trap_frame(const wasmrt_trap_t *, size_t i,
                          uint32_t *func_index_out, uint32_t *offset_out,

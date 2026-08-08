@@ -399,10 +399,20 @@ pub enum Imm {
     Atomic(Atomic),
 }
 
-/// A decoded instruction: an opcode and its immediate.
+/// A decoded instruction: an opcode, its immediate, and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instr {
     pub op: Op,
+    /// Byte offset of this instruction **within its function body**, for trap backtraces.
+    ///
+    /// **Free.** `Imm` is 64 bytes with 16-byte alignment, so `Instr` was already 80 bytes with 15
+    /// of them padding after the one-byte opcode; this `u32` lands in that padding and `Instr` is
+    /// still 80. A test pins that, because the moment `Imm` shrinks this stops being free and the
+    /// trade should be re-decided rather than silently paid.
+    ///
+    /// Relative to the body, not absolute: `Code::body_offset` carries the body's own position, and
+    /// keeping this relative means it cannot overflow on a module whose sections are large.
+    pub offset: u32,
     pub imm: Imm,
 }
 
@@ -800,8 +810,11 @@ fn decode_simd(r: &mut Reader, sub: u32) -> DecodeResult<Instr> {
             }
         }
     }
+    // `offset` is filled in by the caller at push time, which is the only place the instruction's
+    // start is known — a decoder for one family cannot see it.
     Ok(Instr {
         op: Op::Simd,
+        offset: 0,
         imm: Imm::Simd(s),
     })
 }
@@ -826,6 +839,7 @@ fn decode_atomic(r: &mut Reader, sub: u32) -> DecodeResult<Instr> {
     }
     Ok(Instr {
         op: Op::Atomic,
+        offset: 0,
         imm: Imm::Atomic(at),
     })
 }
@@ -863,107 +877,115 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
     let mut list: Vec<Instr> = Vec::new();
 
     while !r.at_end() {
+        // Where this instruction starts, for trap backtraces. Captured before the opcode byte is
+        // consumed, so it points at the instruction rather than its first immediate.
+        let at = u32::try_from(r.pos()).unwrap_or(u32::MAX);
         let b0 = r.read_byte()?;
 
         if b0 == 0xfb {
             // 0xFB-prefixed GC op: a LEB sub-opcode picks the internal Op tag.
             let instr = match r.read_var_u32()? {
-                0x00 => Instr { op: Op::StructNew, imm: Imm::GcType(r.read_var_u32()?) },
-                0x01 => Instr { op: Op::StructNewDefault, imm: Imm::GcType(r.read_var_u32()?) },
-                0x02 => Instr { op: Op::StructGet, imm: read_gc_field(&mut r)? },
-                0x03 => Instr { op: Op::StructGetS, imm: read_gc_field(&mut r)? },
-                0x04 => Instr { op: Op::StructGetU, imm: read_gc_field(&mut r)? },
-                0x05 => Instr { op: Op::StructSet, imm: read_gc_field(&mut r)? },
-                0x06 => Instr { op: Op::ArrayNew, imm: Imm::GcType(r.read_var_u32()?) },
-                0x07 => Instr { op: Op::ArrayNewDefault, imm: Imm::GcType(r.read_var_u32()?) },
+                0x00 => Instr { offset: 0, op: Op::StructNew, imm: Imm::GcType(r.read_var_u32()?) },
+                0x01 => Instr { offset: 0, op: Op::StructNewDefault, imm: Imm::GcType(r.read_var_u32()?) },
+                0x02 => Instr { offset: 0, op: Op::StructGet, imm: read_gc_field(&mut r)? },
+                0x03 => Instr { offset: 0, op: Op::StructGetS, imm: read_gc_field(&mut r)? },
+                0x04 => Instr { offset: 0, op: Op::StructGetU, imm: read_gc_field(&mut r)? },
+                0x05 => Instr { offset: 0, op: Op::StructSet, imm: read_gc_field(&mut r)? },
+                0x06 => Instr { offset: 0, op: Op::ArrayNew, imm: Imm::GcType(r.read_var_u32()?) },
+                0x07 => Instr { offset: 0, op: Op::ArrayNewDefault, imm: Imm::GcType(r.read_var_u32()?) },
                 0x08 => Instr {
+                    offset: 0,
                     op: Op::ArrayNewFixed,
                     imm: Imm::GcTypeN { type_index: r.read_var_u32()?, n: r.read_var_u32()? },
                 },
-                0x0b => Instr { op: Op::ArrayGet, imm: Imm::GcType(r.read_var_u32()?) },
-                0x0c => Instr { op: Op::ArrayGetS, imm: Imm::GcType(r.read_var_u32()?) },
-                0x0d => Instr { op: Op::ArrayGetU, imm: Imm::GcType(r.read_var_u32()?) },
-                0x0e => Instr { op: Op::ArraySet, imm: Imm::GcType(r.read_var_u32()?) },
-                0x0f => Instr { op: Op::ArrayLen, imm: Imm::None },
+                0x0b => Instr { offset: 0, op: Op::ArrayGet, imm: Imm::GcType(r.read_var_u32()?) },
+                0x0c => Instr { offset: 0, op: Op::ArrayGetS, imm: Imm::GcType(r.read_var_u32()?) },
+                0x0d => Instr { offset: 0, op: Op::ArrayGetU, imm: Imm::GcType(r.read_var_u32()?) },
+                0x0e => Instr { offset: 0, op: Op::ArraySet, imm: Imm::GcType(r.read_var_u32()?) },
+                0x0f => Instr { offset: 0, op: Op::ArrayLen, imm: Imm::None },
                 0x14 => Instr {
+                    offset: 0,
                     op: Op::RefTest,
                     imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut r)? }),
                 },
                 0x15 => Instr {
+                    offset: 0,
                     op: Op::RefTest,
                     imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut r)? }),
                 },
                 0x16 => Instr {
+                    offset: 0,
                     op: Op::RefCastOp,
                     imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut r)? }),
                 },
                 0x17 => Instr {
+                    offset: 0,
                     op: Op::RefCastOp,
                     imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut r)? }),
                 },
-                0x18 => Instr { op: Op::BrOnCast, imm: read_br_cast(&mut r)? },
-                0x19 => Instr { op: Op::BrOnCastFail, imm: read_br_cast(&mut r)? },
-                0x1c => Instr { op: Op::RefI31, imm: Imm::None },
-                0x1d => Instr { op: Op::I31GetS, imm: Imm::None },
-                0x1e => Instr { op: Op::I31GetU, imm: Imm::None },
+                0x18 => Instr { offset: 0, op: Op::BrOnCast, imm: read_br_cast(&mut r)? },
+                0x19 => Instr { offset: 0, op: Op::BrOnCastFail, imm: read_br_cast(&mut r)? },
+                0x1c => Instr { offset: 0, op: Op::RefI31, imm: Imm::None },
+                0x1d => Instr { offset: 0, op: Op::I31GetS, imm: Imm::None },
+                0x1e => Instr { offset: 0, op: Op::I31GetU, imm: Imm::None },
                 _ => return Err(DecodeError::UnsupportedOpcode),
             };
-            list.push(instr);
+            list.push(Instr { offset: at, ..instr });
             continue;
         }
 
         if b0 == 0xfc {
             // 0xFC-prefixed op: a LEB sub-opcode picks the internal Op tag.
             let instr = match r.read_var_u32()? {
-                0x00 => Instr { op: Op::I32TruncSatF32S, imm: Imm::None },
-                0x01 => Instr { op: Op::I32TruncSatF32U, imm: Imm::None },
-                0x02 => Instr { op: Op::I32TruncSatF64S, imm: Imm::None },
-                0x03 => Instr { op: Op::I32TruncSatF64U, imm: Imm::None },
-                0x04 => Instr { op: Op::I64TruncSatF32S, imm: Imm::None },
-                0x05 => Instr { op: Op::I64TruncSatF32U, imm: Imm::None },
-                0x06 => Instr { op: Op::I64TruncSatF64S, imm: Imm::None },
-                0x07 => Instr { op: Op::I64TruncSatF64U, imm: Imm::None },
+                0x00 => Instr { offset: 0, op: Op::I32TruncSatF32S, imm: Imm::None },
+                0x01 => Instr { offset: 0, op: Op::I32TruncSatF32U, imm: Imm::None },
+                0x02 => Instr { offset: 0, op: Op::I32TruncSatF64S, imm: Imm::None },
+                0x03 => Instr { offset: 0, op: Op::I32TruncSatF64U, imm: Imm::None },
+                0x04 => Instr { offset: 0, op: Op::I64TruncSatF32S, imm: Imm::None },
+                0x05 => Instr { offset: 0, op: Op::I64TruncSatF32U, imm: Imm::None },
+                0x06 => Instr { offset: 0, op: Op::I64TruncSatF64S, imm: Imm::None },
+                0x07 => Instr { offset: 0, op: Op::I64TruncSatF64U, imm: Imm::None },
                 0x08 => {
                     let data = r.read_var_u32()?;
                     let mem = r.read_var_u32()?;
-                    Instr { op: Op::MemoryInit, imm: Imm::MemInit { data, mem } }
+                    Instr { offset: 0, op: Op::MemoryInit, imm: Imm::MemInit { data, mem } }
                 }
-                0x09 => Instr { op: Op::DataDrop, imm: Imm::Data(r.read_var_u32()?) },
+                0x09 => Instr { offset: 0, op: Op::DataDrop, imm: Imm::Data(r.read_var_u32()?) },
                 0x0a => {
                     let dst = r.read_var_u32()?;
                     let src = r.read_var_u32()?;
-                    Instr { op: Op::MemoryCopy, imm: Imm::MemCopy { dst, src } }
+                    Instr { offset: 0, op: Op::MemoryCopy, imm: Imm::MemCopy { dst, src } }
                 }
-                0x0b => Instr { op: Op::MemoryFill, imm: Imm::MemIndex(r.read_var_u32()?) },
+                0x0b => Instr { offset: 0, op: Op::MemoryFill, imm: Imm::MemIndex(r.read_var_u32()?) },
                 0x0c => {
                     let elem = r.read_var_u32()?;
                     let table = r.read_var_u32()?;
-                    Instr { op: Op::TableInit, imm: Imm::TableInit { elem, table } }
+                    Instr { offset: 0, op: Op::TableInit, imm: Imm::TableInit { elem, table } }
                 }
-                0x0d => Instr { op: Op::ElemDrop, imm: Imm::Elem(r.read_var_u32()?) },
+                0x0d => Instr { offset: 0, op: Op::ElemDrop, imm: Imm::Elem(r.read_var_u32()?) },
                 0x0e => {
                     let dst = r.read_var_u32()?;
                     let src = r.read_var_u32()?;
-                    Instr { op: Op::TableCopy, imm: Imm::TableCopy { dst, src } }
+                    Instr { offset: 0, op: Op::TableCopy, imm: Imm::TableCopy { dst, src } }
                 }
-                0x0f => Instr { op: Op::TableGrow, imm: Imm::Table(r.read_var_u32()?) },
-                0x10 => Instr { op: Op::TableSize, imm: Imm::Table(r.read_var_u32()?) },
-                0x11 => Instr { op: Op::TableFill, imm: Imm::Table(r.read_var_u32()?) },
+                0x0f => Instr { offset: 0, op: Op::TableGrow, imm: Imm::Table(r.read_var_u32()?) },
+                0x10 => Instr { offset: 0, op: Op::TableSize, imm: Imm::Table(r.read_var_u32()?) },
+                0x11 => Instr { offset: 0, op: Op::TableFill, imm: Imm::Table(r.read_var_u32()?) },
                 _ => return Err(DecodeError::UnsupportedOpcode),
             };
-            list.push(instr);
+            list.push(Instr { offset: at, ..instr });
             continue;
         }
 
         if b0 == 0xfd {
             let sub = r.read_var_u32()?;
-            list.push(decode_simd(&mut r, sub)?);
+            list.push(Instr { offset: at, ..decode_simd(&mut r, sub)? });
             continue;
         }
 
         if b0 == 0xfe {
             let sub = r.read_var_u32()?;
-            list.push(decode_atomic(&mut r, sub)?);
+            list.push(Instr { offset: at, ..decode_atomic(&mut r, sub)? });
             continue;
         }
 
@@ -1036,7 +1058,7 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
         };
 
         let op = Op::from_u8(b0).ok_or(DecodeError::UnsupportedOpcode)?;
-        list.push(Instr { op, imm });
+        list.push(Instr { op, offset: at, imm });
     }
 
     // An `expr` is terminated by its matching `end` (§5.4.9), so the last instruction must be one.
@@ -1067,9 +1089,9 @@ mod tests {
         let body = [0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b];
         let instrs = decode_body(&body).unwrap();
         assert_eq!(instrs.len(), 4);
-        assert_eq!(instrs[0], Instr { op: Op::LocalGet, imm: Imm::Local(0) });
-        assert_eq!(instrs[1], Instr { op: Op::LocalGet, imm: Imm::Local(1) });
-        assert_eq!(instrs[2], Instr { op: Op::I32Add, imm: Imm::None });
+        assert_eq!(instrs[0], Instr { offset: 0, op: Op::LocalGet, imm: Imm::Local(0) });
+        assert_eq!(instrs[1], Instr { offset: 2, op: Op::LocalGet, imm: Imm::Local(1) });
+        assert_eq!(instrs[2], Instr { offset: 4, op: Op::I32Add, imm: Imm::None });
         assert_eq!(instrs[3].op, Op::End);
     }
 
@@ -1143,7 +1165,36 @@ mod tests {
         let instrs = decode_body(&[0xfc, 0x0a, 0x00, 0x00, 0x0b]).unwrap();
         assert_eq!(
             instrs[0],
-            Instr { op: Op::MemoryCopy, imm: Imm::MemCopy { dst: 0, src: 0 } }
+            Instr { offset: 0, op: Op::MemoryCopy, imm: Imm::MemCopy { dst: 0, src: 0 } }
+        );
+    }
+
+    /// **The assumption the backtrace design rests on: `Instr::offset` is free.** `Imm` is 64 bytes at
+    /// 16-byte alignment, so `Instr` was already 80 with 15 bytes of padding after the one-byte
+    /// opcode, and the `u32` lands in that padding.
+    ///
+    /// Pinned because it stops being true the moment `Imm` shrinks — at which point the offset starts
+    /// costing 16 bytes per instruction and the trade should be **re-decided**, not silently paid.
+    /// An optimization pass that shrinks `Imm` (a live T11 candidate) will fail here and be told why.
+    #[test]
+    fn the_instruction_offset_costs_nothing() {
+        assert_eq!(
+            core::mem::size_of::<Instr>(),
+            80,
+            "Instr grew — if Imm shrank, `offset` is no longer free; see the doc on Instr::offset"
+        );
+    }
+
+    /// The offset points at the instruction's own first byte, not at its immediates, and not at the
+    /// following instruction — which is what a backtrace consumer expects to map to source.
+    #[test]
+    fn offsets_point_at_the_start_of_each_instruction() {
+        // i32.const 1 (2 bytes) ; i32.const 300 (3 bytes: 0x41 + 2-byte LEB) ; drop ; end
+        let body = [0x41, 0x01, 0x41, 0xac, 0x02, 0x1a, 0x0b];
+        let instrs = decode_body(&body).unwrap();
+        assert_eq!(
+            instrs.iter().map(|i| i.offset).collect::<Vec<_>>(),
+            vec![0, 2, 5, 6]
         );
     }
 

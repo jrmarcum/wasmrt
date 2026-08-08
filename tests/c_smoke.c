@@ -268,10 +268,42 @@ int main(void)
         const char *m = wasmrt_trap_message(trap);
         CHECK(m != NULL && strlen(m) > 0, "a trap must carry a message");
         printf("  trap message: %s\n", m ? m : "(null)");
-        /* The frame API exists but is honest about having nothing yet. */
-        CHECK(wasmrt_trap_frame_count(trap) == 0, "frames are not implemented yet");
+
+        /* ---- backtrace ---------------------------------------------------------------- */
+        size_t nframes = wasmrt_trap_frame_count(trap);
+        CHECK(nframes >= 1, "a guest trap must report at least the frame it trapped in");
+
+        uint32_t fidx = 0xffffffffu, off = 0xffffffffu;
+        const char *fname = (const char *)1; /* not NULL, so we can see it get written */
+        CHECK(wasmrt_trap_frame(trap, 0, &fidx, &off, &fname), "frame 0 must be readable");
+        printf("  frame 0: func=%u offset=0x%x name=%s\n", fidx, off,
+               fname ? fname : "(none)");
+        CHECK(fidx != 0xffffffffu, "func_index_out was not written");
+        CHECK(off != 0xffffffffu, "offset_out was not written");
+        /* A module offset must land inside the module, not at 0 and not past its end. */
+        CHECK(off > 0 && off < 4096, "offset 0x%x is not a plausible module offset", off);
+
+        /* Past the end must fail cleanly rather than hand back a stale frame. */
+        CHECK(!wasmrt_trap_frame(trap, nframes, NULL, NULL, NULL),
+              "reading past the last frame must return false");
+        /* Every out-parameter is optional. */
+        CHECK(wasmrt_trap_frame(trap, 0, NULL, NULL, NULL),
+              "NULL out-parameters must be accepted");
+
         wasmrt_trap_delete(trap);
     }
+
+    /* A trap a HOST callback raises has no guest stack, and must say so rather than
+     * inherit whatever the engine last recorded. */
+    {
+        wasmrt_trap_t *ht = wasmrt_trap_new("from the host");
+        CHECK(ht != NULL, "trap_new failed");
+        CHECK(wasmrt_trap_frame_count(ht) == 0, "a host trap must report no wasm frames");
+        CHECK(!wasmrt_trap_frame(ht, 0, NULL, NULL, NULL), "a host trap has no frame 0");
+        wasmrt_trap_delete(ht);
+    }
+    CHECK(wasmrt_trap_frame_count(NULL) == 0, "a NULL trap must report zero frames");
+    CHECK(!wasmrt_trap_frame(NULL, 0, NULL, NULL, NULL), "a NULL trap must have no frames");
 
     /* ---- handle checking --------------------------------------------------------------- */
     /* A handle from another store must be rejected, not silently aliased. */

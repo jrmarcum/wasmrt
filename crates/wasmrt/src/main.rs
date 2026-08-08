@@ -161,8 +161,37 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wasmrt: {path}: trap: {e}");
+            print_backtrace(&inst);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Print the trap's call stack, innermost first, to **stderr**.
+///
+/// Stderr deliberately, like the trap line itself: `wasmrt wasi prog.wasm > out.txt` must capture
+/// only the guest's output, not our diagnostics — the oracle mixes them into stdout and that is a
+/// divergence we keep.
+///
+/// `+N` is the byte offset from the start of the module, which is what `wasm-objdump` prints.
+fn print_backtrace(inst: &interp::Instance) {
+    let frames = inst.backtrace();
+    if frames.is_empty() {
+        return;
+    }
+    let mut unnamed = false;
+    for (i, f) in frames.iter().enumerate() {
+        let lead = if i == 0 { "at" } else { "by" };
+        match inst.frame_name(f).and_then(|n| core::str::from_utf8(n).ok()) {
+            Some(name) => eprintln!("  {lead} {name} (fn[{}]) +{:#x}", f.func_index, f.offset),
+            None => {
+                unnamed = true;
+                eprintln!("  {lead} fn[{}] +{:#x}", f.func_index, f.offset);
+            }
+        }
+    }
+    if unnamed {
+        eprintln!("  (no name section: rebuild the guest unstripped for symbols)");
     }
 }
 
@@ -381,6 +410,7 @@ fn run_export(rest: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("wasmrt: trap: {e}");
+            print_backtrace(&inst);
             ExitCode::FAILURE
         }
     }

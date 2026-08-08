@@ -775,11 +775,9 @@ cannot be lifted by accident.
 
 ## 🔧 Open — noted at T8 (2026-08-06)
 
-- **Trap backtraces are still empty, and the C ABI now says so out loud.** `wasmrt_trap_frame_count`
-  ships its final shape but always returns **0** — per-instruction byte offsets (the `decode_body_tracked`
-  work deferred at T2) are not recorded, and an approximate frame is worse than none. Fixing the API
-  shape now means no breaking change when real frames land at **T9**. This is defect 4 below, unchanged
-  in substance; what changed is that the shape is committed.
+- ~~**Trap backtraces are still empty, and the C ABI now says so out loud.**~~ ✅ **RESOLVED at T9a#7
+  (2026-08-08).** The T8 bet — freeze the frame API's shape now, fill it in later — paid off: real
+  frames landed with **no ABI change at all**. See defect 4 below.
 - **`wasmrt_caller_get_memory` returns `false` always.** A durable memory handle must be tagged against
   a live `wasmrt_store_t`, and during a host callback the store is mid-borrow — there is nothing to tag
   against. Callbacks use `wasmrt_caller_read`/`_write`/`_memory_size` instead, which is the shape that
@@ -878,28 +876,39 @@ Two files (same defect). We reject at validation; the oracle assembles *and exec
 `3 / 0 / 7`. That the oracle gets a result means this is our type-checker being wrong, not the input.
 `wasi/wasm_wasi/`.
 
-### 4. Trap diagnostics are one line — no backtrace
+### 4. Trap diagnostics are one line — no backtrace ✅ FIXED 2026-08-08 (T9a#7)
 
-Both runtimes trap identically, but the **reports differ in quality**:
+Both runtimes now report the same shape:
 
 ```
-wasmrt  stderr: wasmrt: <path>: trap: uncaught exception
-wazmrt  stdout: trap: UncaughtException
-                  at fn[13] +57
-                  by fn[14] +77
+wasmrt  stderr: wasmrt: trap: unreachable executed
+                  at fn[0] +0x22
+                  by fn[1] +0x26
+                  by fn[2] +0x2b
                   (no name section: rebuild the guest unstripped for symbols)
 ```
 
-The missing piece is the **`decode_body_tracked` byte-offset work deferred at T2** — without per-instruction
-offsets there is no frame to report. *(Keep writing diagnostics to **stderr** — that is a
-deliberate divergence, not a bug: `wasmrt wasi prog.wasm > out.txt` then captures only guest output,
-whereas the oracle would mix its trap report into that file.)*
+The missing piece had been the **byte-offset work deferred at T2**. `Instr` now carries an
+`offset: u32` that is **free** — it lands in padding that `Imm`'s 16-byte alignment already forced, so
+`Instr` is still 80 bytes, and a `size_of` test pins that so a future `Imm` shrink fails the build
+rather than silently starting to pay 16 bytes per instruction. Offsets are reported **absolute from
+the start of the module**, the form `wasm-objdump` prints, so nothing needs rebasing.
 
-**Status after T8 (2026-08-06): still open, but the ABI cost is now bounded.** The C ABI ships the frame
-API in its **final shape** — `wasmrt_trap_frame_count` / `wasmrt_trap_frame` — and that shape **always
-reports 0 frames**, deliberately: an approximate frame is worse than none, and committing the signature
-now means real backtraces land at **T9 without a breaking ABI change**. `wasmrt_trap_message` carries the
-reason meanwhile. So the remaining work is the byte offsets themselves, not the surface.
+Frames are built **on the way out** — pushed as the error passes back through `call_function`, not
+maintained as a shadow stack — so the machinery costs nothing until something actually traps. They are
+cleared per invocation and when EH catches, so a caught exception never leaves frames behind for the
+next real trap to inherit.
+
+The C ABI needed **no change**: `wasmrt_trap_frame_count` / `wasmrt_trap_frame` were frozen in their
+final shape at T8 and simply went live — the T8 bet paid off exactly as designed. A `wasmrt_trap_t`
+**copies** its frames, since it outlives the single backtrace the engine keeps.
+
+⚠️ The plumbing was not free by default: threading `pc: &mut usize` through `run` **measured 3.6%
+slower** on the steady-state loop. A one-shot closure recovered it. See `best-practices.md` §1.7.
+
+*(Diagnostics still go to **stderr** — a deliberate divergence, not a bug:
+`wasmrt wasi prog.wasm > out.txt` then captures only guest output, whereas the oracle would mix its
+trap report into that file.)*
 
 ### 5. An unconditional `data_count` section wastes 3 bytes — against the "small" axis ✅ FIXED 2026-08-07
 

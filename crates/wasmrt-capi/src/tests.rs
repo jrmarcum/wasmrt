@@ -238,21 +238,82 @@ fn a_guest_trap_is_reported_through_trap_out_not_as_an_error() {
 }
 
 #[test]
-fn the_trap_frame_api_reports_zero_frames_rather_than_guessing() {
-    let f = Fixture::new(r#"(module (func (export "boom") (unreachable)))"#);
+fn the_trap_frame_api_reports_the_whole_guest_stack() {
+    let f = Fixture::new(
+        r#"(module
+             (func $bottom (unreachable))
+             (func $middle (call $bottom))
+             (func (export "boom") (call $middle)))"#,
+    );
     let inst = f.instantiate();
     let boom = f.func(inst, "boom");
     let mut trap: *mut wasmrt_trap = core::ptr::null_mut();
     wasmrt_func_call(f.store, boom, core::ptr::null(), 0, core::ptr::null_mut(), 0, &raw mut trap);
-    assert_eq!(wasmrt_trap_frame_count(trap), 0);
+    assert_eq!(wasmrt_trap_frame_count(trap), 3);
+
+    // Innermost first, and each frame's offset must be its own — a constant would pass a
+    // count-only check.
+    let mut seen = Vec::new();
+    for i in 0..3 {
+        let (mut idx, mut off) = (u32::MAX, u32::MAX);
+        assert!(wasmrt_trap_frame(trap, i, &raw mut idx, &raw mut off, core::ptr::null_mut()));
+        seen.push((idx, off));
+    }
+    assert_eq!(seen.iter().map(|s| s.0).collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert!(seen[0].1 < seen[1].1 && seen[1].1 < seen[2].1, "offsets: {seen:?}");
+
+    // Past the end is a clean false, not a stale frame.
     assert!(!wasmrt_trap_frame(
         trap,
-        0,
+        3,
         core::ptr::null_mut(),
         core::ptr::null_mut(),
         core::ptr::null_mut()
     ));
     wasmrt_trap_delete(trap);
+}
+
+#[test]
+fn a_trap_outlives_the_store_state_that_produced_it() {
+    let f = Fixture::new(
+        r#"(module
+             (func (export "boom") (unreachable))
+             (func (export "fine") (result i32) (i32.const 1)))"#,
+    );
+    let inst = f.instantiate();
+    let boom = f.func(inst, "boom");
+    let fine = f.func(inst, "fine");
+    let mut trap: *mut wasmrt_trap = core::ptr::null_mut();
+    wasmrt_func_call(f.store, boom, core::ptr::null(), 0, core::ptr::null_mut(), 0, &raw mut trap);
+    let (mut idx, mut off) = (u32::MAX, u32::MAX);
+    assert!(wasmrt_trap_frame(trap, 0, &raw mut idx, &raw mut off, core::ptr::null_mut()));
+
+    // The engine keeps ONE backtrace and this successful call clears it. The trap holds a copy, so
+    // it must still read the same — that is what the snapshot in `engine_trap` buys.
+    let mut out = [i32v(0); 1];
+    let mut trap2: *mut wasmrt_trap = core::ptr::null_mut();
+    wasmrt_func_call(f.store, fine, core::ptr::null(), 0, out.as_mut_ptr(), 1, &raw mut trap2);
+    assert!(trap2.is_null(), "the second call must not trap");
+    assert_eq!(wasmrt_trap_frame_count(trap), 1);
+    let (mut idx2, mut off2) = (u32::MAX, u32::MAX);
+    assert!(wasmrt_trap_frame(trap, 0, &raw mut idx2, &raw mut off2, core::ptr::null_mut()));
+    assert_eq!((idx, off), (idx2, off2));
+    wasmrt_trap_delete(trap);
+}
+
+/// A host-raised trap has no guest stack and must not borrow one from the engine.
+#[test]
+fn a_host_trap_reports_no_frames() {
+    let t = wasmrt_trap_new(c"from the host".as_ptr());
+    assert_eq!(wasmrt_trap_frame_count(t), 0);
+    assert!(!wasmrt_trap_frame(
+        t,
+        0,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        core::ptr::null_mut()
+    ));
+    wasmrt_trap_delete(t);
 }
 
 // ---- host callbacks ------------------------------------------------------------------

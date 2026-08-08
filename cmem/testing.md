@@ -18,16 +18,32 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, T9a#5 GC const-exprs) — **99.3%**
+## Spec-suite conformance — current (2026-08-08, T9a#7 + the start function) — **99.3%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | **T9a#5 GC consts (08-08)** |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | **61,975** |
-| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | **453** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | **2,247** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | **99.3%** of 62,428 |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | **T9a#7 + start (08-08)** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | **61,987** |
+| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | **441** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | **2,247** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | **99.3%** of 62,428 |
+
+### The eleventh 08-08 column: T9a#7 trap backtraces — and the start function, which never ran
+
+**+12 passes, −12 failures, nothing regressed** — and **all 12 came from the second item**. T9a#7 was
+predicted to be worth 0 suite assertions and was: it is diagnostics. What it *did* produce was the
+question "where does an **instantiation** trap get its frames?", which led to asking who runs
+`Module::start`. Nobody did — §4.5.5 step 11 was simply absent, though the field was decoded,
+validated, and printed by the CLI.
+
+`start.wast` **8/7 → 15/0** · `start0.wast` 5/3 → **8/0** · `linking3.wast` 11/1 → **12/0** ·
+`linking.wast` +1. **426 tests** (398 core + 28 capi), Miri **28/28**, C-ABI gate 74/74 + `c_smoke`
+(now asserting real frames, not the stub), clippy clean, all four surfaces build.
+
+⚠️ **10 of those 12 assertions had been failing in files named `start.wast` and `start0.wast` for five
+releases.** They were never diagnosed because their messages said nothing useful, and triage read
+messages. See `best-practices.md` §3.1a.
 
 ### The tenth 08-08 column: T9a#5, GC constant expressions. **Logged cost 6, real value 88**
 
@@ -278,10 +294,14 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-08, type-use well-formedness)
+## Current test state (2026-08-08, T9a#7 + the start function)
 
-**411 workspace tests, all green** (385 core + 26 capi), clippy clean on all four build surfaces; the
-C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
+**426 workspace tests, all green** (398 core + 28 capi), clippy clean on all four build surfaces; the
+C-ABI gate (74/74 + `c_smoke`) and Miri (28/28) pass. This pass added 15: six pinning the backtrace
+(three frames innermost-first, offsets that advance within a body, a caught exception leaving none
+behind), five pinning the start function (it runs, it runs AFTER the segments, a trap in it fails the
+instantiation, once per instance), three in the C ABI, and one pinning `size_of::<Instr>() == 80` so
+the claim that the byte offset is free fails the build the day it stops being true. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —
 keyed on emptiness it would also excuse an *active* segment with a missing offset, and that is the
@@ -336,7 +356,7 @@ tests, 7 regressions for the table-initializer defects, and 26 C-ABI tests.
 - **`tests/c_smoke.c` — behaviour, from real C.** Compiled by a C compiler against the shipped header,
   so it proves two things no Rust test can: that `wasmrt.h` is valid C, and that its declarations match
   the exported symbols.
-- **Miri (`scripts/miri-gate.sh`) — 26/26 including `lifecycle_fuzz`**, which drives randomized
+- **Miri (`scripts/miri-gate.sh`) — 28/28 including `lifecycle_fuzz`**, which drives randomized
   creation/use/destruction orders (including the ones the header discourages) and touches handles whose
   store is already gone. **A normal allocator cannot tell a use-after-free from a pass** — it hands back
   freed memory that still looks right. The fuzz is seeded and reproducible on purpose: one that finds a

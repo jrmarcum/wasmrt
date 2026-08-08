@@ -347,6 +347,28 @@ struct Pools {
     /// putting it after `limits` measured ~7% slower on the steady-state loop, which touches no types
     /// at all. Field order in a hot struct is not cosmetic.
     types: TypeRegistry,
+    /// The call stack of the trap that is currently unwinding, innermost frame first.
+    ///
+    /// Built **on the way out**, one entry per frame as the error passes through it, rather than
+    /// maintained as a shadow stack during execution: a shadow stack costs a push and a pop on every
+    /// call whether or not anything ever traps, and calls are hot. This costs nothing until something
+    /// actually goes wrong. Also placed last, for the reason above.
+    backtrace: Vec<TrapFrame>,
+}
+
+/// One frame of a trap's call stack — what [`Store::backtrace`] hands back and what the C ABI's
+/// `wasmrt_trap_frame` reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrapFrame {
+    /// Which instance in this store the frame was running in.
+    pub instance: usize,
+    /// Index in the instance's **function index space** (imports included), so it lines up with
+    /// the name section and with `ref.func`.
+    pub func_index: u32,
+    /// Byte offset of the trapping instruction **from the start of the module** — the form
+    /// `wasm-objdump` prints and every wasm tool resolves, rather than a body-relative offset the
+    /// consumer would have to add a base to. `Code::body_offset` exists to make this cheap.
+    pub offset: u32,
 }
 
 /// A runtime trap or an execution-setup error.
@@ -505,6 +527,9 @@ struct FuncBody {
     /// For each legacy `try` index: its inline catch handlers + optional `delegate` label;
     /// `None` elsewhere (EH, legacy encoding).
     try_info: Vec<Option<LegacyTry>>,
+    /// Absolute module offset of this body's first instruction, so a trap frame can report a
+    /// module offset rather than a body-relative one the consumer would have to rebase.
+    body_offset: u32,
 }
 
 /// What a host function can reach while it runs: the calling instance's linear memories, so
@@ -1016,6 +1041,18 @@ struct Ctx<'a> {
 }
 
 impl Instance {
+    /// The call stack of the most recent trap, innermost first — see [`Store::backtrace`].
+    #[must_use]
+    pub fn backtrace(&self) -> &[TrapFrame] {
+        self.store.backtrace()
+    }
+
+    /// The function name for a frame, from the name section — see [`Store::frame_name`].
+    #[must_use]
+    pub fn frame_name(&self, frame: &TrapFrame) -> Option<&[u8]> {
+        self.store.frame_name(frame)
+    }
+
     /// Instantiate a decoded module with no imports.
     ///
     /// # Errors
@@ -1526,6 +1563,7 @@ impl Store {
                 end_of: cf.end_of,
                 else_of: cf.else_of,
                 try_info: cf.try_info,
+                body_offset: code.body_offset,
             });
         }
 
@@ -1588,6 +1626,7 @@ impl Store {
             store: self.id,
             index: self.code.len(),
         };
+        let start = module.start;
         self.code.push(InstanceData {
             module,
             type_ids,
@@ -1595,6 +1634,19 @@ impl Store {
             maps,
             imports: targets,
         });
+
+        // §4.5.5 step 11: the start function runs as the LAST step of instantiation, after every
+        // element and data segment is in place — it is allowed to observe and modify them.
+        //
+        // A trap here fails the instantiation, and the half-built instance stays in `self.code`.
+        // That matches the spec's "the module is not instantiated" only in what the caller gets
+        // back: it never receives the `InstanceId`, so it can neither call into the instance nor
+        // name it as an import. The slot itself is not reclaimed, for the same reason the pool
+        // slots above are not — index stability is what makes every other `InstanceId` in this
+        // store keep meaning what it meant.
+        if let Some(func_index) = start {
+            self.invoke_index(id, func_index, &[])?;
+        }
         Ok(id)
     }
 
@@ -1633,6 +1685,9 @@ impl Store {
         // be visible to this one, and the exnrefs it boxed are unreachable once it returns.
         self.pools.pending_exn = None;
         self.pools.exn_store.clear();
+        // Likewise per-invocation: a stale backtrace read after a *successful* call would describe
+        // the previous failure, which is worse than describing nothing.
+        self.pools.backtrace.clear();
         // Borrow the code immutably and the pools mutably — disjoint fields, which is what
         // lets a nested cross-instance call take another `&code[…]` without conflict.
         let Store {
@@ -1647,6 +1702,31 @@ impl Store {
             pools.pending_exn = None;
         }
         r
+    }
+
+    /// The call stack of the most recent trap, **innermost frame first**.
+    ///
+    /// Empty after a successful call, and empty for a failure that never entered wasm (a bad
+    /// argument count, an unknown export): those have no wasm frames to report, and inventing one
+    /// would be worse than saying nothing.
+    ///
+    /// Valid until the next [`Store::invoke_index`]; a trap object that must outlive that should
+    /// copy what it needs.
+    #[must_use]
+    pub fn backtrace(&self) -> &[TrapFrame] {
+        &self.pools.backtrace
+    }
+
+    /// Resolve a frame's function to its name from the module's name section. `None` when the
+    /// module carries no name for it — a stripped module gets the index and nothing else, which is
+    /// honest. Raw bytes, not `str`: the name section is only required to be UTF-8 by convention,
+    /// and this must not fail on a module that breaks that.
+    #[must_use]
+    pub fn frame_name(&self, frame: &TrapFrame) -> Option<&[u8]> {
+        self.code
+            .get(frame.instance)?
+            .module
+            .func_name(frame.func_index)
     }
 }
 
@@ -1988,7 +2068,13 @@ impl Frame<'_> {
             return Err(e);
         };
         match self.throw_exception(store, &exn)? {
-            Some(target) => Ok(target),
+            Some(target) => {
+                // Caught here, so the frames this unwind recorded describe a failure that did not
+                // ultimately happen. Leaving them would make the NEXT trap's backtrace open with
+                // an unrelated call stack.
+                store.backtrace.clear();
+                Ok(target)
+            }
             None => {
                 store.pending_exn = Some(exn); // keep unwinding outward
                 Err(e)
@@ -2079,843 +2165,884 @@ fn call_function(
         host_funcs,
         inst,
     };
-    run(&mut frame, &ctx, store, depth)?;
+    // The frame is recorded HERE, not inside `run`, because this is the level that knows which
+    // function is running: a `FuncBody` has no index of its own. `run` reports only the position.
+    let mut pc = 0usize;
+    if let Err(e) = run(&mut frame, &ctx, store, depth, &mut pc) {
+        // `pc` can sit one past the end if the body ran off its own `end`; clamp rather than
+        // index, so a malformed frame degrades to a missing offset instead of a panic.
+        let offset = body
+            .ir
+            .get(pc)
+            .map_or(body.body_offset, |i| body.body_offset.saturating_add(i.offset));
+        // Bounded: a backtrace cannot outgrow the call stack that produced it, and that is already
+        // capped by `max_call_depth`.
+        store.backtrace.push(TrapFrame {
+            instance: inst,
+            func_index,
+            offset,
+        });
+        return Err(e);
+    }
 
     let n = body.ty.results.len();
     let base = frame.stack_base(n)?;
     Ok(frame.vstack[base..].to_vec())
 }
 
-fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<()> {
-    let body = frame.body;
-    let ir = &body.ir;
+/// Run a frame to completion, reporting through `pc_out` **where** it stopped.
+///
+/// `pc_out` is written on every path, success or failure, and is what lets [`call_function`] name
+/// the trapping instruction. It is only meaningful on the error path; on success it is simply the
+/// end of the body.
+fn run(
+    frame: &mut Frame,
+    ctx: &Ctx,
+    store: &mut Pools,
+    depth: usize,
+    pc_out: &mut usize,
+) -> Result<()> {
     let mut pc = 0usize;
-    while pc < ir.len() {
-        let instr = &ir[pc];
-        match instr.op {
-            Op::Nop => pc += 1,
-            Op::Unreachable => return Err(Trap::Unreachable),
-            Op::Drop => {
-                frame.pop();
-                pc += 1;
-            }
-            Op::Select | Op::SelectT => {
-                let c = frame.pop_i32();
-                let b = frame.pop();
-                let a = frame.pop();
-                frame.push(if c != 0 { a } else { b });
-                pc += 1;
-            }
-
-            // --- Constants ---
-            Op::I32Const => {
-                let Imm::I32(x) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                frame.push_i32(x);
-                pc += 1;
-            }
-            Op::I64Const => {
-                let Imm::I64(x) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                frame.push_i64(x);
-                pc += 1;
-            }
-            Op::F32Const => {
-                let Imm::F32(bits) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                frame.push(Value::from(bits));
-                pc += 1;
-            }
-            Op::F64Const => {
-                let Imm::F64(bits) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                frame.push(Value::from(bits));
-                pc += 1;
-            }
-
-            // --- Variables ---
-            Op::LocalGet => {
-                let i = local_index(instr)?;
-                let v = *frame.locals.get(i).ok_or(Trap::StackUnderflow)?;
-                frame.push(v);
-                pc += 1;
-            }
-            Op::LocalSet => {
-                let i = local_index(instr)?;
-                let v = frame.pop();
-                *frame.locals.get_mut(i).ok_or(Trap::StackUnderflow)? = v;
-                pc += 1;
-            }
-            Op::LocalTee => {
-                let i = local_index(instr)?;
-                let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
-                *frame.locals.get_mut(i).ok_or(Trap::StackUnderflow)? = v;
-                pc += 1;
-            }
-            Op::GlobalGet => {
-                let Imm::Global(gi) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let v = *store.globals.get(ctx.maps.global(gi)).ok_or(Trap::UndefinedGlobal)?;
-                frame.push(v);
-                pc += 1;
-            }
-            Op::GlobalSet => {
-                let Imm::Global(gi) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let v = frame.pop();
-                *store.globals.get_mut(ctx.maps.global(gi)).ok_or(Trap::UndefinedGlobal)? = v;
-                pc += 1;
-            }
-
-            // --- Structured control flow ---
-            Op::Block => {
-                let bt = block_type(instr)?;
-                let params = block_arity(ctx, bt, true);
-                let arity = block_arity(ctx, bt, false);
-                let stack_base = frame.stack_base(params as usize)?;
-                frame
-                    .labels
-                    .push(plain_label(false, arity, body.end_of[pc] + 1, stack_base));
-                pc += 1;
-            }
-            Op::Loop => {
-                let bt = block_type(instr)?;
-                let params = block_arity(ctx, bt, true);
-                let stack_base = frame.stack_base(params as usize)?;
-                frame
-                    .labels
-                    .push(plain_label(true, params, pc + 1, stack_base));
-                pc += 1;
-            }
-            Op::If => {
-                let c = frame.pop_i32();
-                let bt = block_type(instr)?;
-                let params = block_arity(ctx, bt, true);
-                let arity = block_arity(ctx, bt, false);
-                let stack_base = frame.stack_base(params as usize)?;
-                frame
-                    .labels
-                    .push(plain_label(false, arity, body.end_of[pc] + 1, stack_base));
-                if c != 0 {
+    // The loop is a closure, called once, purely so `pc` can stay a plain local while still being
+    // readable after *any* exit — there are 51 `return Err` sites plus a long tail of `?`, and
+    // recording the position at each is both churn and a standing invitation to add the 52nd
+    // without it. The obvious spelling — `pc: &mut usize` threaded through the loop — was tried and
+    // MEASURED: it cost 3.6% on the steady-state benchmark (2160 ms vs 2083 ms, A/B/A), because the
+    // deref does not survive the opaque calls in the loop body. Inlined, this form keeps `pc` in a
+    // register and the same benchmark does not move.
+    let mut body_loop = || -> Result<()> {
+        let body = frame.body;
+        let ir = &body.ir;
+        while pc < ir.len() {
+            let instr = &ir[pc];
+            match instr.op {
+                Op::Nop => pc += 1,
+                Op::Unreachable => return Err(Trap::Unreachable),
+                Op::Drop => {
+                    frame.pop();
                     pc += 1;
-                } else {
-                    let else_idx = body.else_of[pc];
-                    pc = if else_idx != ir.len() {
-                        else_idx + 1
+                }
+                Op::Select | Op::SelectT => {
+                    let c = frame.pop_i32();
+                    let b = frame.pop();
+                    let a = frame.pop();
+                    frame.push(if c != 0 { a } else { b });
+                    pc += 1;
+                }
+
+                // --- Constants ---
+                Op::I32Const => {
+                    let Imm::I32(x) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    frame.push_i32(x);
+                    pc += 1;
+                }
+                Op::I64Const => {
+                    let Imm::I64(x) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    frame.push_i64(x);
+                    pc += 1;
+                }
+                Op::F32Const => {
+                    let Imm::F32(bits) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    frame.push(Value::from(bits));
+                    pc += 1;
+                }
+                Op::F64Const => {
+                    let Imm::F64(bits) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    frame.push(Value::from(bits));
+                    pc += 1;
+                }
+
+                // --- Variables ---
+                Op::LocalGet => {
+                    let i = local_index(instr)?;
+                    let v = *frame.locals.get(i).ok_or(Trap::StackUnderflow)?;
+                    frame.push(v);
+                    pc += 1;
+                }
+                Op::LocalSet => {
+                    let i = local_index(instr)?;
+                    let v = frame.pop();
+                    *frame.locals.get_mut(i).ok_or(Trap::StackUnderflow)? = v;
+                    pc += 1;
+                }
+                Op::LocalTee => {
+                    let i = local_index(instr)?;
+                    let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
+                    *frame.locals.get_mut(i).ok_or(Trap::StackUnderflow)? = v;
+                    pc += 1;
+                }
+                Op::GlobalGet => {
+                    let Imm::Global(gi) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let v = *store.globals.get(ctx.maps.global(gi)).ok_or(Trap::UndefinedGlobal)?;
+                    frame.push(v);
+                    pc += 1;
+                }
+                Op::GlobalSet => {
+                    let Imm::Global(gi) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let v = frame.pop();
+                    *store.globals.get_mut(ctx.maps.global(gi)).ok_or(Trap::UndefinedGlobal)? = v;
+                    pc += 1;
+                }
+
+                // --- Structured control flow ---
+                Op::Block => {
+                    let bt = block_type(instr)?;
+                    let params = block_arity(ctx, bt, true);
+                    let arity = block_arity(ctx, bt, false);
+                    let stack_base = frame.stack_base(params as usize)?;
+                    frame
+                        .labels
+                        .push(plain_label(false, arity, body.end_of[pc] + 1, stack_base));
+                    pc += 1;
+                }
+                Op::Loop => {
+                    let bt = block_type(instr)?;
+                    let params = block_arity(ctx, bt, true);
+                    let stack_base = frame.stack_base(params as usize)?;
+                    frame
+                        .labels
+                        .push(plain_label(true, params, pc + 1, stack_base));
+                    pc += 1;
+                }
+                Op::If => {
+                    let c = frame.pop_i32();
+                    let bt = block_type(instr)?;
+                    let params = block_arity(ctx, bt, true);
+                    let arity = block_arity(ctx, bt, false);
+                    let stack_base = frame.stack_base(params as usize)?;
+                    frame
+                        .labels
+                        .push(plain_label(false, arity, body.end_of[pc] + 1, stack_base));
+                    if c != 0 {
+                        pc += 1;
                     } else {
-                        body.end_of[pc]
+                        let else_idx = body.else_of[pc];
+                        pc = if else_idx != ir.len() {
+                            else_idx + 1
+                        } else {
+                            body.end_of[pc]
+                        };
+                    }
+                }
+                Op::Else => pc = body.end_of[pc], // end of then-branch: skip to matching end
+                Op::End => {
+                    frame.labels.pop();
+                    pc += 1;
+                }
+
+                // --- Exception handling: try_table (exnref encoding) ---
+                Op::TryTable => {
+                    let Imm::TryTable(tt) = &instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let params = block_arity(ctx, tt.block_type, true);
+                    let arity = block_arity(ctx, tt.block_type, false);
+                    let stack_base = frame.stack_base(params as usize)?;
+                    frame.labels.push(Label {
+                        is_loop: false,
+                        arity,
+                        target: body.end_of[pc] + 1,
+                        stack_base,
+                        try_table_pc: Some(pc),
+                        legacy_pc: None,
+                        caught: None,
+                    });
+                    pc += 1;
+                }
+                Op::Throw => {
+                    let tag = tag_imm(instr)?;
+                    let ft = ctx.module.tag_type(tag).ok_or(Trap::UndefinedTag)?;
+                    let base = frame.stack_base(ft.params.len())?;
+                    let values = frame.vstack[base..].to_vec();
+                    frame.vstack.truncate(base);
+                    pc = frame.raise(store, Exception { tag, values })?;
+                }
+                Op::ThrowRef => {
+                    let r = frame.pop();
+                    if r == NULL_REF {
+                        return Err(Trap::NullReference);
+                    }
+                    let ei = usize::try_from(r).map_err(|_| Trap::NullReference)?;
+                    // An out-of-range exnref is only reachable from an unvalidated module.
+                    let exn = store
+                        .exn_store
+                        .get(ei)
+                        .ok_or(Trap::NullReference)?
+                        .clone();
+                    pc = frame.raise(store, exn)?;
+                }
+
+                // --- Exception handling: the legacy try/catch encoding ---
+                Op::TryLegacy => {
+                    let bt = block_type(instr)?;
+                    let params = block_arity(ctx, bt, true);
+                    let arity = block_arity(ctx, bt, false);
+                    let stack_base = frame.stack_base(params as usize)?;
+                    frame.labels.push(Label {
+                        is_loop: false,
+                        arity,
+                        target: body.end_of[pc] + 1,
+                        stack_base,
+                        try_table_pc: None,
+                        legacy_pc: Some(pc),
+                        caught: None,
+                    });
+                    pc += 1;
+                }
+                // Reached only by normal control flow (the body, or a prior handler, completed):
+                // skip the remaining handlers to the `end`.
+                Op::CatchLegacy | Op::CatchAll => pc = body.end_of[pc],
+                // `delegate` reached by normal flow just ends its try, like `end`.
+                Op::Delegate => {
+                    frame.labels.pop();
+                    pc += 1;
+                }
+                Op::Rethrow => {
+                    // Re-raise the exception caught by the try `n` levels out, propagating from
+                    // OUTSIDE that try — it already had its turn at this exception.
+                    let n = label_imm(instr)? as usize;
+                    if n >= frame.labels.len() {
+                        return Err(Trap::UndefinedLabel);
+                    }
+                    let idx = frame.labels.len() - 1 - n;
+                    let exn = frame.labels[idx]
+                        .caught
+                        .clone()
+                        .ok_or(Trap::UncaughtException)?;
+                    let base = frame.labels[idx].stack_base;
+                    frame.labels.truncate(idx);
+                    if base > frame.vstack.len() {
+                        return Err(Trap::StackUnderflow);
+                    }
+                    frame.vstack.truncate(base);
+                    pc = frame.raise(store, exn)?;
+                }
+                Op::Br => pc = frame.branch(label_imm(instr)?)?,
+                Op::BrIf => {
+                    if frame.pop_i32() != 0 {
+                        pc = frame.branch(label_imm(instr)?)?;
+                    } else {
+                        pc += 1;
+                    }
+                }
+                Op::BrTable => {
+                    let Imm::BrTable(bt) = &instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let i = frame.pop_i32();
+                    let idx = if i >= 0 && (i as usize) < bt.labels.len() {
+                        bt.labels[i as usize]
+                    } else {
+                        bt.default
+                    };
+                    pc = frame.branch(idx)?;
+                }
+                Op::Return => pc = ir.len(),
+
+                Op::Call => {
+                    let Imm::Func(f) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let ft = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
+                    let np = ft.params.len();
+                    let base = frame.stack_base(np)?;
+                    let args = frame.vstack[base..].to_vec();
+                    let results = match call_function(ctx.code, ctx.host_funcs, store, ctx.inst, f, &args, depth + 1) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // An exception unwinding out of the callee may be caught here.
+                            pc = frame.on_call_error(store, e)?;
+                            continue;
+                        }
+                    };
+                    frame.vstack.truncate(base);
+                    frame.vstack.extend_from_slice(&results);
+                    pc += 1;
+                }
+
+                // --- Linear memory (loads/stores, size/grow) ---
+                Op::I32Load
+                | Op::I64Load
+                | Op::F32Load
+                | Op::F64Load
+                | Op::I32Load8S
+                | Op::I32Load8U
+                | Op::I32Load16S
+                | Op::I32Load16U
+                | Op::I64Load8S
+                | Op::I64Load8U
+                | Op::I64Load16S
+                | Op::I64Load16U
+                | Op::I64Load32S
+                | Op::I64Load32U
+                | Op::I32Store
+                | Op::I64Store
+                | Op::F32Store
+                | Op::F64Store
+                | Op::I32Store8
+                | Op::I32Store16
+                | Op::I64Store8
+                | Op::I64Store16
+                | Op::I64Store32
+                | Op::MemorySize
+                | Op::MemoryGrow => {
+                    exec_memory(frame, store, ctx.maps, instr)?;
+                    pc += 1;
+                }
+                Op::MemoryCopy => {
+                    exec_memory_copy(frame, store, ctx.maps, instr)?;
+                    pc += 1;
+                }
+                Op::MemoryFill => {
+                    exec_memory_fill(frame, store, ctx.maps, instr)?;
+                    pc += 1;
+                }
+                Op::MemoryInit => {
+                    exec_memory_init(frame, ctx, store, instr)?;
+                    pc += 1;
+                }
+                Op::DataDrop => {
+                    let Imm::Data(d) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    *store
+                        .data_dropped
+                        .get_mut(ctx.maps.data(d))
+                        .ok_or(Trap::UndefinedData)? = true;
+                    pc += 1;
+                }
+
+                // --- Reference types --- (funcref = function index; NULL_REF = null)
+                Op::RefNull => {
+                    frame.push(NULL_REF);
+                    pc += 1;
+                }
+                Op::RefIsNull => {
+                    let r = frame.pop();
+                    frame.push_i32(i32::from(r == NULL_REF));
+                    pc += 1;
+                }
+                Op::RefFunc => {
+                    let Imm::Func(f) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    // Stamped with the producing instance, so the reference stays callable correctly
+                    // after it is stored into a table another instance also holds.
+                    frame.push(pack_funcref(ctx.inst, f));
+                    pc += 1;
+                }
+                Op::RefAsNonNull => {
+                    let r = frame.pop();
+                    if r == NULL_REF {
+                        return Err(Trap::NullReference);
+                    }
+                    frame.push(r);
+                    pc += 1;
+                }
+                Op::BrOnNull => {
+                    let r = frame.pop();
+                    if r == NULL_REF {
+                        pc = frame.branch(label_imm(instr)?)?; // null → branch (ref dropped)
+                    } else {
+                        frame.push(r); // non-null → keep the ref, fall through
+                        pc += 1;
+                    }
+                }
+                Op::BrOnNonNull => {
+                    let r = frame.pop();
+                    if r == NULL_REF {
+                        pc += 1; // null → ref consumed, fall through
+                    } else {
+                        frame.push(r); // non-null → keep the ref for the label
+                        pc = frame.branch(label_imm(instr)?)?;
+                    }
+                }
+                Op::CallRef | Op::ReturnCallRef => {
+                    let f_ref = frame.pop();
+                    if f_ref == NULL_REF {
+                        return Err(Trap::NullReference);
+                    }
+                    // Resolved against the funcref's OWN instance, not the caller's. For a reference
+                    // produced in this instance the two are the same; for one that arrived through a
+                    // shared table they are not, and using the caller's would be the wrong function.
+                    let owner = funcref_instance(f_ref);
+                    let f = funcref_index(f_ref);
+                    let ft = ctx
+                        .code
+                        .get(owner)
+                        .and_then(|d| d.module.func_type(f))
+                        .ok_or(Trap::UndefinedFunc)?;
+                    let base = frame.stack_base(ft.params.len())?;
+                    let args = frame.vstack[base..].to_vec();
+                    let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            pc = frame.on_call_error(store, e)?;
+                            continue;
+                        }
+                    };
+                    frame.vstack.truncate(base);
+                    frame.vstack.extend_from_slice(&results);
+                    pc = if instr.op == Op::ReturnCallRef {
+                        ir.len()
+                    } else {
+                        pc + 1
                     };
                 }
-            }
-            Op::Else => pc = body.end_of[pc], // end of then-branch: skip to matching end
-            Op::End => {
-                frame.labels.pop();
-                pc += 1;
-            }
 
-            // --- Exception handling: try_table (exnref encoding) ---
-            Op::TryTable => {
-                let Imm::TryTable(tt) = &instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let params = block_arity(ctx, tt.block_type, true);
-                let arity = block_arity(ctx, tt.block_type, false);
-                let stack_base = frame.stack_base(params as usize)?;
-                frame.labels.push(Label {
-                    is_loop: false,
-                    arity,
-                    target: body.end_of[pc] + 1,
-                    stack_base,
-                    try_table_pc: Some(pc),
-                    legacy_pc: None,
-                    caught: None,
-                });
-                pc += 1;
-            }
-            Op::Throw => {
-                let tag = tag_imm(instr)?;
-                let ft = ctx.module.tag_type(tag).ok_or(Trap::UndefinedTag)?;
-                let base = frame.stack_base(ft.params.len())?;
-                let values = frame.vstack[base..].to_vec();
-                frame.vstack.truncate(base);
-                pc = frame.raise(store, Exception { tag, values })?;
-            }
-            Op::ThrowRef => {
-                let r = frame.pop();
-                if r == NULL_REF {
-                    return Err(Trap::NullReference);
-                }
-                let ei = usize::try_from(r).map_err(|_| Trap::NullReference)?;
-                // An out-of-range exnref is only reachable from an unvalidated module.
-                let exn = store
-                    .exn_store
-                    .get(ei)
-                    .ok_or(Trap::NullReference)?
-                    .clone();
-                pc = frame.raise(store, exn)?;
-            }
-
-            // --- Exception handling: the legacy try/catch encoding ---
-            Op::TryLegacy => {
-                let bt = block_type(instr)?;
-                let params = block_arity(ctx, bt, true);
-                let arity = block_arity(ctx, bt, false);
-                let stack_base = frame.stack_base(params as usize)?;
-                frame.labels.push(Label {
-                    is_loop: false,
-                    arity,
-                    target: body.end_of[pc] + 1,
-                    stack_base,
-                    try_table_pc: None,
-                    legacy_pc: Some(pc),
-                    caught: None,
-                });
-                pc += 1;
-            }
-            // Reached only by normal control flow (the body, or a prior handler, completed):
-            // skip the remaining handlers to the `end`.
-            Op::CatchLegacy | Op::CatchAll => pc = body.end_of[pc],
-            // `delegate` reached by normal flow just ends its try, like `end`.
-            Op::Delegate => {
-                frame.labels.pop();
-                pc += 1;
-            }
-            Op::Rethrow => {
-                // Re-raise the exception caught by the try `n` levels out, propagating from
-                // OUTSIDE that try — it already had its turn at this exception.
-                let n = label_imm(instr)? as usize;
-                if n >= frame.labels.len() {
-                    return Err(Trap::UndefinedLabel);
-                }
-                let idx = frame.labels.len() - 1 - n;
-                let exn = frame.labels[idx]
-                    .caught
-                    .clone()
-                    .ok_or(Trap::UncaughtException)?;
-                let base = frame.labels[idx].stack_base;
-                frame.labels.truncate(idx);
-                if base > frame.vstack.len() {
-                    return Err(Trap::StackUnderflow);
-                }
-                frame.vstack.truncate(base);
-                pc = frame.raise(store, exn)?;
-            }
-            Op::Br => pc = frame.branch(label_imm(instr)?)?,
-            Op::BrIf => {
-                if frame.pop_i32() != 0 {
-                    pc = frame.branch(label_imm(instr)?)?;
-                } else {
-                    pc += 1;
-                }
-            }
-            Op::BrTable => {
-                let Imm::BrTable(bt) = &instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let i = frame.pop_i32();
-                let idx = if i >= 0 && (i as usize) < bt.labels.len() {
-                    bt.labels[i as usize]
-                } else {
-                    bt.default
-                };
-                pc = frame.branch(idx)?;
-            }
-            Op::Return => pc = ir.len(),
-
-            Op::Call => {
-                let Imm::Func(f) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let ft = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
-                let np = ft.params.len();
-                let base = frame.stack_base(np)?;
-                let args = frame.vstack[base..].to_vec();
-                let results = match call_function(ctx.code, ctx.host_funcs, store, ctx.inst, f, &args, depth + 1) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        // An exception unwinding out of the callee may be caught here.
-                        pc = frame.on_call_error(store, e)?;
-                        continue;
-                    }
-                };
-                frame.vstack.truncate(base);
-                frame.vstack.extend_from_slice(&results);
-                pc += 1;
-            }
-
-            // --- Linear memory (loads/stores, size/grow) ---
-            Op::I32Load
-            | Op::I64Load
-            | Op::F32Load
-            | Op::F64Load
-            | Op::I32Load8S
-            | Op::I32Load8U
-            | Op::I32Load16S
-            | Op::I32Load16U
-            | Op::I64Load8S
-            | Op::I64Load8U
-            | Op::I64Load16S
-            | Op::I64Load16U
-            | Op::I64Load32S
-            | Op::I64Load32U
-            | Op::I32Store
-            | Op::I64Store
-            | Op::F32Store
-            | Op::F64Store
-            | Op::I32Store8
-            | Op::I32Store16
-            | Op::I64Store8
-            | Op::I64Store16
-            | Op::I64Store32
-            | Op::MemorySize
-            | Op::MemoryGrow => {
-                exec_memory(frame, store, ctx.maps, instr)?;
-                pc += 1;
-            }
-            Op::MemoryCopy => {
-                exec_memory_copy(frame, store, ctx.maps, instr)?;
-                pc += 1;
-            }
-            Op::MemoryFill => {
-                exec_memory_fill(frame, store, ctx.maps, instr)?;
-                pc += 1;
-            }
-            Op::MemoryInit => {
-                exec_memory_init(frame, ctx, store, instr)?;
-                pc += 1;
-            }
-            Op::DataDrop => {
-                let Imm::Data(d) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                *store
-                    .data_dropped
-                    .get_mut(ctx.maps.data(d))
-                    .ok_or(Trap::UndefinedData)? = true;
-                pc += 1;
-            }
-
-            // --- Reference types --- (funcref = function index; NULL_REF = null)
-            Op::RefNull => {
-                frame.push(NULL_REF);
-                pc += 1;
-            }
-            Op::RefIsNull => {
-                let r = frame.pop();
-                frame.push_i32(i32::from(r == NULL_REF));
-                pc += 1;
-            }
-            Op::RefFunc => {
-                let Imm::Func(f) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                // Stamped with the producing instance, so the reference stays callable correctly
-                // after it is stored into a table another instance also holds.
-                frame.push(pack_funcref(ctx.inst, f));
-                pc += 1;
-            }
-            Op::RefAsNonNull => {
-                let r = frame.pop();
-                if r == NULL_REF {
-                    return Err(Trap::NullReference);
-                }
-                frame.push(r);
-                pc += 1;
-            }
-            Op::BrOnNull => {
-                let r = frame.pop();
-                if r == NULL_REF {
-                    pc = frame.branch(label_imm(instr)?)?; // null → branch (ref dropped)
-                } else {
-                    frame.push(r); // non-null → keep the ref, fall through
-                    pc += 1;
-                }
-            }
-            Op::BrOnNonNull => {
-                let r = frame.pop();
-                if r == NULL_REF {
-                    pc += 1; // null → ref consumed, fall through
-                } else {
-                    frame.push(r); // non-null → keep the ref for the label
-                    pc = frame.branch(label_imm(instr)?)?;
-                }
-            }
-            Op::CallRef | Op::ReturnCallRef => {
-                let f_ref = frame.pop();
-                if f_ref == NULL_REF {
-                    return Err(Trap::NullReference);
-                }
-                // Resolved against the funcref's OWN instance, not the caller's. For a reference
-                // produced in this instance the two are the same; for one that arrived through a
-                // shared table they are not, and using the caller's would be the wrong function.
-                let owner = funcref_instance(f_ref);
-                let f = funcref_index(f_ref);
-                let ft = ctx
-                    .code
-                    .get(owner)
-                    .and_then(|d| d.module.func_type(f))
-                    .ok_or(Trap::UndefinedFunc)?;
-                let base = frame.stack_base(ft.params.len())?;
-                let args = frame.vstack[base..].to_vec();
-                let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        pc = frame.on_call_error(store, e)?;
-                        continue;
-                    }
-                };
-                frame.vstack.truncate(base);
-                frame.vstack.extend_from_slice(&results);
-                pc = if instr.op == Op::ReturnCallRef {
-                    ir.len()
-                } else {
-                    pc + 1
-                };
-            }
-
-            // --- call_indirect: table lookup + runtime type check ---
-            Op::CallIndirect => {
-                let Imm::CallIndirect(ci) = &instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let slot = frame.pop_i32() as u32 as usize;
-                let entry = *store
-                    .tables
-                    .get(ctx.maps.table(ci.table))
-                    .ok_or(Trap::NoTable)?
-                    .entries
-                    .get(slot)
-                    .ok_or(Trap::TableOutOfBounds)?;
-                if entry == NULL_REF {
-                    return Err(Trap::UninitializedElement);
-                }
-                // Unpacked, so a reference that arrived through a table another instance also holds
-                // dispatches to ITS function — the whole reason a funcref carries its owner. Before
-                // this, `entry as u32` resolved against the *calling* instance: a silent wrong call.
-                let owner = funcref_instance(entry);
-                let f = funcref_index(entry);
-                let want = ctx.module.func_sig(ci.type_index).ok_or(Trap::UndefinedType)?;
-                let owner_data = ctx.code.get(owner).ok_or(Trap::UndefinedFunc)?;
-                let got = owner_data.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
-                // Matched on **type identity with subtyping**, by index — not by comparing the two
-                // signatures' shapes. Same lesson as import matching, and the third site to need it:
-                // two functions can both be `(func)` and still be different types, because rec-group
-                // membership is part of identity and only the index carries it. §4.4.8 wants the
-                // callee's type to be a *subtype* of the declared one, which is also why equality was
-                // wrong in the permissive direction (`assert_trap` cases returning a result).
-                //
-                // When the callee belongs to ANOTHER instance the two type indices are in different
-                // modules, so they are compared through the store-wide registry — the same mechanism
-                // import matching uses. Same-instance stays on the cheaper module-local path.
-                let matched = if owner == ctx.inst {
-                    match ctx.module.func_type_index(f) {
-                        Some(got_ti) => ctx.module.is_subtype(got_ti, ci.type_index),
-                        // An *imported* function has no defining type index in this module. Fall back
-                        // to the structural comparison, which `func_types_equal` decides canonically.
-                        None => ctx.module.func_types_equal(&want, &got),
-                    }
-                } else {
-                    match (
-                        ctx.code[ctx.inst]
-                            .type_ids
-                            .get(ci.type_index as usize)
-                            .copied(),
-                        owner_data
-                            .module
-                            .func_type_index(f)
-                            .and_then(|ti| owner_data.type_ids.get(ti as usize).copied()),
-                    ) {
-                        (Some(want_id), Some(got_id)) => store.types.is_subtype(got_id, want_id),
-                        // No store-wide id on one side (a re-exported import has no defining type
-                        // index): fall back to the structural comparison rather than refusing.
-                        _ => ctx.module.func_types_equal(&want, &got),
-                    }
-                };
-                if !matched {
-                    return Err(Trap::IndirectTypeMismatch);
-                }
-                let base = frame.stack_base(got.params.len())?;
-                let args = frame.vstack[base..].to_vec();
-                // Into the funcref's OWN instance, so the callee runs against its own memory,
-                // globals and tables. `ctx.inst` here was the silent-wrong-call.
-                let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        pc = frame.on_call_error(store, e)?;
-                        continue;
-                    }
-                };
-                frame.vstack.truncate(base);
-                frame.vstack.extend_from_slice(&results);
-                pc += 1;
-            }
-
-            // --- Table access ---
-            Op::TableGet => {
-                let ti = ctx.maps.table(table_imm(instr)?);
-                let i = frame.pop_i32() as u32 as usize;
-                let v = *store
-                    .tables
-                    .get(ti)
-                    .ok_or(Trap::NoTable)?
-                    .entries
-                    .get(i)
-                    .ok_or(Trap::TableOutOfBounds)?;
-                frame.push(v);
-                pc += 1;
-            }
-            Op::TableSet => {
-                let ti = ctx.maps.table(table_imm(instr)?);
-                let v = frame.pop();
-                let i = frame.pop_i32() as u32 as usize;
-                let slot = store
-                    .tables
-                    .get_mut(ti)
-                    .ok_or(Trap::NoTable)?
-                    .entries
-                    .get_mut(i)
-                    .ok_or(Trap::TableOutOfBounds)?;
-                *slot = v;
-                pc += 1;
-            }
-            Op::TableSize => {
-                let ti = ctx.maps.table(table_imm(instr)?);
-                let len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
-                frame.push_i32(len as i32);
-                pc += 1;
-            }
-            Op::TableGrow => {
-                let ti = ctx.maps.table(table_imm(instr)?);
-                let delta = frame.pop_i32() as u32 as usize;
-                let init = frame.pop();
-                // Read the ceiling before borrowing the table: `limits` and `tables` are
-                // sibling fields, so taking `&mut` on one would block reading the other.
-                let ceiling = store.limits.max_table_elems;
-                let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
-                let old = table.entries.len();
-                let limit = table.max.map_or(ceiling, |m| m as usize).min(ceiling);
-                match old.checked_add(delta).filter(|&n| n <= limit) {
-                    Some(new_len) => {
-                        table.entries.resize(new_len, init);
-                        frame.push_i32(old as i32);
-                    }
-                    None => frame.push_i32(-1), // growth refused
-                }
-                pc += 1;
-            }
-            Op::TableFill => {
-                let ti = ctx.maps.table(table_imm(instr)?);
-                let n = frame.pop_i32() as u32 as usize;
-                let val = frame.pop();
-                let dst = frame.pop_i32() as u32 as usize;
-                let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
-                let end = dst.checked_add(n).filter(|&e| e <= table.entries.len());
-                let end = end.ok_or(Trap::TableOutOfBounds)?;
-                table.entries[dst..end].fill(val);
-                pc += 1;
-            }
-            Op::TableInit => {
-                let Imm::TableInit { elem, table } = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let (ei, ti) = (ctx.maps.elem(elem), ctx.maps.table(table));
-                let dropped = *store.elem_dropped.get(ei).ok_or(Trap::UndefinedElement)?;
-                let n = frame.pop_i32() as u32 as usize;
-                let src = frame.pop_i32() as u32 as usize;
-                let dst = frame.pop_i32() as u32 as usize;
-                let seg_len = if dropped { 0 } else { store.elem_values[ei].len() };
-                let tbl_len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
-                if src.checked_add(n).is_none_or(|e| e > seg_len)
-                    || dst.checked_add(n).is_none_or(|e| e > tbl_len)
-                {
-                    return Err(Trap::TableOutOfBounds);
-                }
-                for k in 0..n {
-                    let v = if dropped {
-                        NULL_REF
-                    } else {
-                        store.elem_values[ei][src + k]
+                // --- call_indirect: table lookup + runtime type check ---
+                Op::CallIndirect => {
+                    let Imm::CallIndirect(ci) = &instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
                     };
-                    store.tables[ti].entries[dst + k] = v;
+                    let slot = frame.pop_i32() as u32 as usize;
+                    let entry = *store
+                        .tables
+                        .get(ctx.maps.table(ci.table))
+                        .ok_or(Trap::NoTable)?
+                        .entries
+                        .get(slot)
+                        .ok_or(Trap::TableOutOfBounds)?;
+                    if entry == NULL_REF {
+                        return Err(Trap::UninitializedElement);
+                    }
+                    // Unpacked, so a reference that arrived through a table another instance also holds
+                    // dispatches to ITS function — the whole reason a funcref carries its owner. Before
+                    // this, `entry as u32` resolved against the *calling* instance: a silent wrong call.
+                    let owner = funcref_instance(entry);
+                    let f = funcref_index(entry);
+                    let want = ctx.module.func_sig(ci.type_index).ok_or(Trap::UndefinedType)?;
+                    let owner_data = ctx.code.get(owner).ok_or(Trap::UndefinedFunc)?;
+                    let got = owner_data.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
+                    // Matched on **type identity with subtyping**, by index — not by comparing the two
+                    // signatures' shapes. Same lesson as import matching, and the third site to need it:
+                    // two functions can both be `(func)` and still be different types, because rec-group
+                    // membership is part of identity and only the index carries it. §4.4.8 wants the
+                    // callee's type to be a *subtype* of the declared one, which is also why equality was
+                    // wrong in the permissive direction (`assert_trap` cases returning a result).
+                    //
+                    // When the callee belongs to ANOTHER instance the two type indices are in different
+                    // modules, so they are compared through the store-wide registry — the same mechanism
+                    // import matching uses. Same-instance stays on the cheaper module-local path.
+                    let matched = if owner == ctx.inst {
+                        match ctx.module.func_type_index(f) {
+                            Some(got_ti) => ctx.module.is_subtype(got_ti, ci.type_index),
+                            // An *imported* function has no defining type index in this module. Fall back
+                            // to the structural comparison, which `func_types_equal` decides canonically.
+                            None => ctx.module.func_types_equal(&want, &got),
+                        }
+                    } else {
+                        match (
+                            ctx.code[ctx.inst]
+                                .type_ids
+                                .get(ci.type_index as usize)
+                                .copied(),
+                            owner_data
+                                .module
+                                .func_type_index(f)
+                                .and_then(|ti| owner_data.type_ids.get(ti as usize).copied()),
+                        ) {
+                            (Some(want_id), Some(got_id)) => store.types.is_subtype(got_id, want_id),
+                            // No store-wide id on one side (a re-exported import has no defining type
+                            // index): fall back to the structural comparison rather than refusing.
+                            _ => ctx.module.func_types_equal(&want, &got),
+                        }
+                    };
+                    if !matched {
+                        return Err(Trap::IndirectTypeMismatch);
+                    }
+                    let base = frame.stack_base(got.params.len())?;
+                    let args = frame.vstack[base..].to_vec();
+                    // Into the funcref's OWN instance, so the callee runs against its own memory,
+                    // globals and tables. `ctx.inst` here was the silent-wrong-call.
+                    let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            pc = frame.on_call_error(store, e)?;
+                            continue;
+                        }
+                    };
+                    frame.vstack.truncate(base);
+                    frame.vstack.extend_from_slice(&results);
+                    pc += 1;
                 }
-                pc += 1;
-            }
-            Op::ElemDrop => {
-                let Imm::Elem(e) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                *store
-                    .elem_dropped
-                    .get_mut(ctx.maps.elem(e))
-                    .ok_or(Trap::UndefinedElement)? = true;
-                pc += 1;
-            }
-            Op::TableCopy => {
-                let Imm::TableCopy { dst, src } = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let (di, si) = (ctx.maps.table(dst), ctx.maps.table(src));
-                let n = frame.pop_i32() as u32 as usize;
-                let s = frame.pop_i32() as u32 as usize;
-                let d = frame.pop_i32() as u32 as usize;
-                let src_len = store.tables.get(si).ok_or(Trap::NoTable)?.entries.len();
-                let dst_len = store.tables.get(di).ok_or(Trap::NoTable)?.entries.len();
-                if s.checked_add(n).is_none_or(|e| e > src_len)
-                    || d.checked_add(n).is_none_or(|e| e > dst_len)
-                {
-                    return Err(Trap::TableOutOfBounds);
+
+                // --- Table access ---
+                Op::TableGet => {
+                    let ti = ctx.maps.table(table_imm(instr)?);
+                    let i = frame.pop_i32() as u32 as usize;
+                    let v = *store
+                        .tables
+                        .get(ti)
+                        .ok_or(Trap::NoTable)?
+                        .entries
+                        .get(i)
+                        .ok_or(Trap::TableOutOfBounds)?;
+                    frame.push(v);
+                    pc += 1;
                 }
-                if di == si {
-                    store.tables[di].entries.copy_within(s..s + n, d);
-                } else {
-                    let tmp = store.tables[si].entries[s..s + n].to_vec();
-                    store.tables[di].entries[d..d + n].copy_from_slice(&tmp);
+                Op::TableSet => {
+                    let ti = ctx.maps.table(table_imm(instr)?);
+                    let v = frame.pop();
+                    let i = frame.pop_i32() as u32 as usize;
+                    let slot = store
+                        .tables
+                        .get_mut(ti)
+                        .ok_or(Trap::NoTable)?
+                        .entries
+                        .get_mut(i)
+                        .ok_or(Trap::TableOutOfBounds)?;
+                    *slot = v;
+                    pc += 1;
                 }
-                pc += 1;
-            }
-
-            // --- WasmGC: i31 (unboxed; i31_tag checked AFTER null_ref) ---
-            Op::RefI31 => {
-                let x = frame.pop_i32() as u32;
-                frame.push(I31_TAG | Value::from(x & 0x7fff_ffff)); // wrap to 31 bits, non-null
-                pc += 1;
-            }
-            Op::I31GetS => {
-                let r = frame.pop();
-                if r == NULL_REF {
-                    return Err(Trap::NullReference);
+                Op::TableSize => {
+                    let ti = ctx.maps.table(table_imm(instr)?);
+                    let len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
+                    frame.push_i32(len as i32);
+                    pc += 1;
                 }
-                let n = r as u32;
-                frame.push_i32(((n << 1) as i32) >> 1); // sign-extend the 31-bit payload
-                pc += 1;
-            }
-            Op::I31GetU => {
-                let r = frame.pop();
-                if r == NULL_REF {
-                    return Err(Trap::NullReference);
+                Op::TableGrow => {
+                    let ti = ctx.maps.table(table_imm(instr)?);
+                    let delta = frame.pop_i32() as u32 as usize;
+                    let init = frame.pop();
+                    // Read the ceiling before borrowing the table: `limits` and `tables` are
+                    // sibling fields, so taking `&mut` on one would block reading the other.
+                    let ceiling = store.limits.max_table_elems;
+                    let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
+                    let old = table.entries.len();
+                    let limit = table.max.map_or(ceiling, |m| m as usize).min(ceiling);
+                    match old.checked_add(delta).filter(|&n| n <= limit) {
+                        Some(new_len) => {
+                            table.entries.resize(new_len, init);
+                            frame.push_i32(old as i32);
+                        }
+                        None => frame.push_i32(-1), // growth refused
+                    }
+                    pc += 1;
                 }
-                frame.push_i32((r as u32 & 0x7fff_ffff) as i32);
-                pc += 1;
-            }
-            Op::RefEq => {
-                let b = frame.pop();
-                let a = frame.pop();
-                frame.push_i32(i32::from(a == b));
-                pc += 1;
-            }
-
-            // --- WasmGC: struct objects ---
-            Op::StructNew => {
-                let Imm::GcType(ti) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
-                let base = frame.stack_base(sf.len())?;
-                let obj: Vec<Value> = sf
-                    .iter()
-                    .enumerate()
-                    .map(|(k, f)| pack_field(f.storage, frame.vstack[base + k]))
-                    .collect();
-                frame.vstack.truncate(base);
-                let r = alloc_object(store, ti, obj)?;
-                frame.push(r);
-                pc += 1;
-            }
-            Op::StructNewDefault => {
-                let Imm::GcType(ti) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
-                let obj: Vec<Value> = sf.iter().map(|f| default_field(f.storage)).collect();
-                let r = alloc_object(store, ti, obj)?;
-                frame.push(r);
-                pc += 1;
-            }
-            Op::StructGet | Op::StructGetS | Op::StructGetU => {
-                let Imm::GcField { type_index, field } = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let idx = gc_object_index(store, frame.pop())?;
-                let storage = ctx
-                    .module
-                    .struct_fields(type_index)
-                    .ok_or(Trap::UndefinedType)?
-                    .get(field as usize)
-                    .ok_or(Trap::GcOutOfBounds)?
-                    .storage;
-                let v = *store.gc_heap[idx]
-                    .fields
-                    .get(field as usize)
-                    .ok_or(Trap::GcOutOfBounds)?;
-                frame.push(unpack_field(storage, v, instr.op == Op::StructGetS));
-                pc += 1;
-            }
-            Op::StructSet => {
-                let Imm::GcField { type_index, field } = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let v = frame.pop();
-                let idx = gc_object_index(store, frame.pop())?;
-                let storage = ctx
-                    .module
-                    .struct_fields(type_index)
-                    .ok_or(Trap::UndefinedType)?
-                    .get(field as usize)
-                    .ok_or(Trap::GcOutOfBounds)?
-                    .storage;
-                let slot = store.gc_heap[idx]
-                    .fields
-                    .get_mut(field as usize)
-                    .ok_or(Trap::GcOutOfBounds)?;
-                *slot = pack_field(storage, v);
-                pc += 1;
-            }
-
-            // --- WasmGC: array objects ---
-            Op::ArrayNew => {
-                let Imm::GcType(ti) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                let len = frame.pop_i32() as u32 as usize;
-                let init = pack_field(f.storage, frame.pop());
-                let r = alloc_object(store, ti, vec![init; len])?;
-                frame.push(r);
-                pc += 1;
-            }
-            Op::ArrayNewDefault => {
-                let Imm::GcType(ti) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                let len = frame.pop_i32() as u32 as usize;
-                let r = alloc_object(store, ti, vec![default_field(f.storage); len])?;
-                frame.push(r);
-                pc += 1;
-            }
-            Op::ArrayNewFixed => {
-                let Imm::GcTypeN { type_index, n } = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let f = ctx.module.array_field(type_index).ok_or(Trap::UndefinedType)?;
-                let base = frame.stack_base(n as usize)?;
-                let obj: Vec<Value> = (0..n as usize)
-                    .map(|k| pack_field(f.storage, frame.vstack[base + k]))
-                    .collect();
-                frame.vstack.truncate(base);
-                let r = alloc_object(store, type_index, obj)?;
-                frame.push(r);
-                pc += 1;
-            }
-            Op::ArrayGet | Op::ArrayGetS | Op::ArrayGetU => {
-                let Imm::GcType(ti) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                let index = frame.pop_i32() as u32 as usize;
-                let idx = gc_object_index(store, frame.pop())?;
-                let v = *store.gc_heap[idx]
-                    .fields
-                    .get(index)
-                    .ok_or(Trap::GcOutOfBounds)?;
-                frame.push(unpack_field(f.storage, v, instr.op == Op::ArrayGetS));
-                pc += 1;
-            }
-            Op::ArraySet => {
-                let Imm::GcType(ti) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
-                let v = frame.pop();
-                let index = frame.pop_i32() as u32 as usize;
-                let idx = gc_object_index(store, frame.pop())?;
-                let slot = store.gc_heap[idx]
-                    .fields
-                    .get_mut(index)
-                    .ok_or(Trap::GcOutOfBounds)?;
-                *slot = pack_field(f.storage, v);
-                pc += 1;
-            }
-            Op::ArrayLen => {
-                let idx = gc_object_index(store, frame.pop())?;
-                frame.push_i32(store.gc_heap[idx].fields.len() as i32);
-                pc += 1;
-            }
-
-            // --- WasmGC: casts ---
-            Op::RefTest => {
-                let Imm::RefCast(rt) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let v = frame.pop();
-                frame.push_i32(i32::from(ref_matches(ctx.module, ctx.code, store, v, rt)));
-                pc += 1;
-            }
-            Op::RefCastOp => {
-                let Imm::RefCast(rt) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?; // peek — value stays
-                if !ref_matches(ctx.module, ctx.code, store, v, rt) {
-                    return Err(Trap::CastFailure);
+                Op::TableFill => {
+                    let ti = ctx.maps.table(table_imm(instr)?);
+                    let n = frame.pop_i32() as u32 as usize;
+                    let val = frame.pop();
+                    let dst = frame.pop_i32() as u32 as usize;
+                    let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
+                    let end = dst.checked_add(n).filter(|&e| e <= table.entries.len());
+                    let end = end.ok_or(Trap::TableOutOfBounds)?;
+                    table.entries[dst..end].fill(val);
+                    pc += 1;
                 }
-                pc += 1;
-            }
-            Op::BrOnCast => {
-                let Imm::BrCast { label, dst, .. } = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
-                pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
-                    frame.branch(label)?
-                } else {
-                    pc + 1
-                };
-            }
-            Op::BrOnCastFail => {
-                let Imm::BrCast { label, dst, .. } = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
-                pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
-                    pc + 1
-                } else {
-                    frame.branch(label)?
-                };
-            }
+                Op::TableInit => {
+                    let Imm::TableInit { elem, table } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let (ei, ti) = (ctx.maps.elem(elem), ctx.maps.table(table));
+                    let dropped = *store.elem_dropped.get(ei).ok_or(Trap::UndefinedElement)?;
+                    let n = frame.pop_i32() as u32 as usize;
+                    let src = frame.pop_i32() as u32 as usize;
+                    let dst = frame.pop_i32() as u32 as usize;
+                    let seg_len = if dropped { 0 } else { store.elem_values[ei].len() };
+                    let tbl_len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
+                    if src.checked_add(n).is_none_or(|e| e > seg_len)
+                        || dst.checked_add(n).is_none_or(|e| e > tbl_len)
+                    {
+                        return Err(Trap::TableOutOfBounds);
+                    }
+                    for k in 0..n {
+                        let v = if dropped {
+                            NULL_REF
+                        } else {
+                            store.elem_values[ei][src + k]
+                        };
+                        store.tables[ti].entries[dst + k] = v;
+                    }
+                    pc += 1;
+                }
+                Op::ElemDrop => {
+                    let Imm::Elem(e) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    *store
+                        .elem_dropped
+                        .get_mut(ctx.maps.elem(e))
+                        .ok_or(Trap::UndefinedElement)? = true;
+                    pc += 1;
+                }
+                Op::TableCopy => {
+                    let Imm::TableCopy { dst, src } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let (di, si) = (ctx.maps.table(dst), ctx.maps.table(src));
+                    let n = frame.pop_i32() as u32 as usize;
+                    let s = frame.pop_i32() as u32 as usize;
+                    let d = frame.pop_i32() as u32 as usize;
+                    let src_len = store.tables.get(si).ok_or(Trap::NoTable)?.entries.len();
+                    let dst_len = store.tables.get(di).ok_or(Trap::NoTable)?.entries.len();
+                    if s.checked_add(n).is_none_or(|e| e > src_len)
+                        || d.checked_add(n).is_none_or(|e| e > dst_len)
+                    {
+                        return Err(Trap::TableOutOfBounds);
+                    }
+                    if di == si {
+                        store.tables[di].entries.copy_within(s..s + n, d);
+                    } else {
+                        let tmp = store.tables[si].entries[s..s + n].to_vec();
+                        store.tables[di].entries[d..d + n].copy_from_slice(&tmp);
+                    }
+                    pc += 1;
+                }
 
-            // --- SIMD (v128, 0xFD family) ---
-            Op::Simd => {
-                let Imm::Simd(s) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                exec_simd(frame, store, ctx.maps, s)?;
-                pc += 1;
-            }
+                // --- WasmGC: i31 (unboxed; i31_tag checked AFTER null_ref) ---
+                Op::RefI31 => {
+                    let x = frame.pop_i32() as u32;
+                    frame.push(I31_TAG | Value::from(x & 0x7fff_ffff)); // wrap to 31 bits, non-null
+                    pc += 1;
+                }
+                Op::I31GetS => {
+                    let r = frame.pop();
+                    if r == NULL_REF {
+                        return Err(Trap::NullReference);
+                    }
+                    let n = r as u32;
+                    frame.push_i32(((n << 1) as i32) >> 1); // sign-extend the 31-bit payload
+                    pc += 1;
+                }
+                Op::I31GetU => {
+                    let r = frame.pop();
+                    if r == NULL_REF {
+                        return Err(Trap::NullReference);
+                    }
+                    frame.push_i32((r as u32 & 0x7fff_ffff) as i32);
+                    pc += 1;
+                }
+                Op::RefEq => {
+                    let b = frame.pop();
+                    let a = frame.pop();
+                    frame.push_i32(i32::from(a == b));
+                    pc += 1;
+                }
 
-            // --- Threads / atomics (0xFE family) ---
-            Op::Atomic => {
-                let Imm::Atomic(at) = instr.imm else {
-                    return Err(Trap::UnsupportedInstruction);
-                };
-                exec_atomic(frame, store, ctx.maps, at)?;
-                pc += 1;
-            }
+                // --- WasmGC: struct objects ---
+                Op::StructNew => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                    let base = frame.stack_base(sf.len())?;
+                    let obj: Vec<Value> = sf
+                        .iter()
+                        .enumerate()
+                        .map(|(k, f)| pack_field(f.storage, frame.vstack[base + k]))
+                        .collect();
+                    frame.vstack.truncate(base);
+                    let r = alloc_object(store, ti, obj)?;
+                    frame.push(r);
+                    pc += 1;
+                }
+                Op::StructNewDefault => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                    let obj: Vec<Value> = sf.iter().map(|f| default_field(f.storage)).collect();
+                    let r = alloc_object(store, ti, obj)?;
+                    frame.push(r);
+                    pc += 1;
+                }
+                Op::StructGet | Op::StructGetS | Op::StructGetU => {
+                    let Imm::GcField { type_index, field } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let idx = gc_object_index(store, frame.pop())?;
+                    let storage = ctx
+                        .module
+                        .struct_fields(type_index)
+                        .ok_or(Trap::UndefinedType)?
+                        .get(field as usize)
+                        .ok_or(Trap::GcOutOfBounds)?
+                        .storage;
+                    let v = *store.gc_heap[idx]
+                        .fields
+                        .get(field as usize)
+                        .ok_or(Trap::GcOutOfBounds)?;
+                    frame.push(unpack_field(storage, v, instr.op == Op::StructGetS));
+                    pc += 1;
+                }
+                Op::StructSet => {
+                    let Imm::GcField { type_index, field } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let v = frame.pop();
+                    let idx = gc_object_index(store, frame.pop())?;
+                    let storage = ctx
+                        .module
+                        .struct_fields(type_index)
+                        .ok_or(Trap::UndefinedType)?
+                        .get(field as usize)
+                        .ok_or(Trap::GcOutOfBounds)?
+                        .storage;
+                    let slot = store.gc_heap[idx]
+                        .fields
+                        .get_mut(field as usize)
+                        .ok_or(Trap::GcOutOfBounds)?;
+                    *slot = pack_field(storage, v);
+                    pc += 1;
+                }
 
-            // Integer arithmetic / comparison / bitwise / conversion.
-            _ => {
-                exec_numeric(frame, instr.op)?;
-                pc += 1;
+                // --- WasmGC: array objects ---
+                Op::ArrayNew => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                    let len = frame.pop_i32() as u32 as usize;
+                    let init = pack_field(f.storage, frame.pop());
+                    let r = alloc_object(store, ti, vec![init; len])?;
+                    frame.push(r);
+                    pc += 1;
+                }
+                Op::ArrayNewDefault => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                    let len = frame.pop_i32() as u32 as usize;
+                    let r = alloc_object(store, ti, vec![default_field(f.storage); len])?;
+                    frame.push(r);
+                    pc += 1;
+                }
+                Op::ArrayNewFixed => {
+                    let Imm::GcTypeN { type_index, n } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let f = ctx.module.array_field(type_index).ok_or(Trap::UndefinedType)?;
+                    let base = frame.stack_base(n as usize)?;
+                    let obj: Vec<Value> = (0..n as usize)
+                        .map(|k| pack_field(f.storage, frame.vstack[base + k]))
+                        .collect();
+                    frame.vstack.truncate(base);
+                    let r = alloc_object(store, type_index, obj)?;
+                    frame.push(r);
+                    pc += 1;
+                }
+                Op::ArrayGet | Op::ArrayGetS | Op::ArrayGetU => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                    let index = frame.pop_i32() as u32 as usize;
+                    let idx = gc_object_index(store, frame.pop())?;
+                    let v = *store.gc_heap[idx]
+                        .fields
+                        .get(index)
+                        .ok_or(Trap::GcOutOfBounds)?;
+                    frame.push(unpack_field(f.storage, v, instr.op == Op::ArrayGetS));
+                    pc += 1;
+                }
+                Op::ArraySet => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                    let v = frame.pop();
+                    let index = frame.pop_i32() as u32 as usize;
+                    let idx = gc_object_index(store, frame.pop())?;
+                    let slot = store.gc_heap[idx]
+                        .fields
+                        .get_mut(index)
+                        .ok_or(Trap::GcOutOfBounds)?;
+                    *slot = pack_field(f.storage, v);
+                    pc += 1;
+                }
+                Op::ArrayLen => {
+                    let idx = gc_object_index(store, frame.pop())?;
+                    frame.push_i32(store.gc_heap[idx].fields.len() as i32);
+                    pc += 1;
+                }
+
+                // --- WasmGC: casts ---
+                Op::RefTest => {
+                    let Imm::RefCast(rt) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let v = frame.pop();
+                    frame.push_i32(i32::from(ref_matches(ctx.module, ctx.code, store, v, rt)));
+                    pc += 1;
+                }
+                Op::RefCastOp => {
+                    let Imm::RefCast(rt) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?; // peek — value stays
+                    if !ref_matches(ctx.module, ctx.code, store, v, rt) {
+                        return Err(Trap::CastFailure);
+                    }
+                    pc += 1;
+                }
+                Op::BrOnCast => {
+                    let Imm::BrCast { label, dst, .. } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
+                    pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
+                        frame.branch(label)?
+                    } else {
+                        pc + 1
+                    };
+                }
+                Op::BrOnCastFail => {
+                    let Imm::BrCast { label, dst, .. } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
+                    pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
+                        pc + 1
+                    } else {
+                        frame.branch(label)?
+                    };
+                }
+
+                // --- SIMD (v128, 0xFD family) ---
+                Op::Simd => {
+                    let Imm::Simd(s) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    exec_simd(frame, store, ctx.maps, s)?;
+                    pc += 1;
+                }
+
+                // --- Threads / atomics (0xFE family) ---
+                Op::Atomic => {
+                    let Imm::Atomic(at) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    exec_atomic(frame, store, ctx.maps, at)?;
+                    pc += 1;
+                }
+
+                // Integer arithmetic / comparison / bitwise / conversion.
+                _ => {
+                    exec_numeric(frame, instr.op)?;
+                    pc += 1;
+                }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    };
+    let r = body_loop();
+    *pc_out = pc;
+    r
 }
 
 fn local_index(instr: &Instr) -> Result<usize> {
@@ -7280,5 +7407,228 @@ mod tests {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod backtrace_tests {
+    use super::*;
+    use crate::module::decode;
+
+    fn store_with(src: &[u8]) -> (Store, InstanceId) {
+        let bytes = crate::wat::assemble(src).unwrap();
+        let md = decode(&bytes).unwrap();
+        let mut store = Store::new();
+        let id = store.instantiate(md, Imports::default()).unwrap();
+        (store, id)
+    }
+
+    fn func_index(store: &Store, id: InstanceId, name: &str) -> u32 {
+        store.export_func(id, name).unwrap()
+    }
+
+    /// The whole point of the feature: a trap three calls deep names all three, innermost first.
+    /// A single-frame test would pass even if the recursion never recorded anything.
+    #[test]
+    fn a_trap_reports_every_frame_innermost_first() {
+        let (mut store, id) = store_with(
+            br#"(module
+                  (func $bottom (unreachable))
+                  (func $middle (call $bottom))
+                  (func $top (export "top") (call $middle)))"#,
+        );
+        let top = func_index(&store, id, "top");
+        assert_eq!(store.invoke_index(id, top, &[]), Err(Trap::Unreachable));
+
+        let frames: Vec<u32> = store.backtrace().iter().map(|f| f.func_index).collect();
+        assert_eq!(frames, vec![0, 1, 2], "innermost ($bottom = 0) must come first");
+        assert!(store.backtrace().iter().all(|f| f.instance == 0));
+    }
+
+    /// The offsets must be *distinct and increasing within the module*, and must actually point at
+    /// the trapping instruction. A constant or a zero would satisfy a count-only assertion.
+    #[test]
+    fn offsets_point_at_the_trapping_instruction() {
+        let (mut store, id) = store_with(
+            br#"(module
+                  (func $bottom (unreachable))
+                  (func $top (export "top") (call $bottom)))"#,
+        );
+        let top = func_index(&store, id, "top");
+        let _ = store.invoke_index(id, top, &[]);
+        let bt = store.backtrace().to_vec();
+        assert_eq!(bt.len(), 2);
+
+        // Frame 0 is `unreachable`, the first instruction of $bottom's body; frame 1 is the `call`,
+        // the first instruction of $top's body. Both therefore sit exactly at their body's start,
+        // and $top's body comes later in the module than $bottom's.
+        let slot = store.slot(id).unwrap();
+        let code = &store.code[slot].module.code;
+        assert_eq!(bt[0].offset, code[0].body_offset);
+        assert_eq!(bt[1].offset, code[1].body_offset);
+        assert!(bt[1].offset > bt[0].offset);
+    }
+
+    /// A non-first instruction: the offset must advance past the ones before it, which is what
+    /// distinguishes a real pc from "the body start".
+    #[test]
+    fn the_offset_advances_within_a_body() {
+        let (mut store, id) = store_with(
+            br#"(module
+                  (func (export "t") (result i32)
+                    (i32.const 1) (drop)
+                    (i32.const 1) (i32.const 0) (i32.div_s)))"#,
+        );
+        let t = func_index(&store, id, "t");
+        assert_eq!(store.invoke_index(id, t, &[]), Err(Trap::DivByZero));
+        let bt = store.backtrace();
+        let slot = store.slot(id).unwrap();
+        let base = store.code[slot].module.code[0].body_offset;
+        // i32.const 1 (2) + drop (1) + i32.const 1 (2) + i32.const 0 (2) = 7 bytes before div_s.
+        assert_eq!(bt[0].offset - base, 7);
+    }
+
+    /// A successful call must leave no backtrace behind. Without the per-invocation clear, an
+    /// embedder that checks the backtrace unconditionally would report the *previous* failure.
+    #[test]
+    fn success_clears_a_previous_backtrace() {
+        let (mut store, id) = store_with(
+            br#"(module
+                  (func (export "bad") (unreachable))
+                  (func (export "good") (result i32) (i32.const 7)))"#,
+        );
+        let bad = func_index(&store, id, "bad");
+        let good = func_index(&store, id, "good");
+        let _ = store.invoke_index(id, bad, &[]);
+        assert!(!store.backtrace().is_empty());
+        assert_eq!(store.invoke_index(id, good, &[]), Ok(vec![7]));
+        assert!(store.backtrace().is_empty(), "a success must not report the last trap");
+    }
+
+    /// A caught exception is not a trap. The frames its unwind passed through describe a failure
+    /// that did not happen, so a later real trap must not inherit them.
+    #[test]
+    fn a_caught_exception_does_not_leave_frames() {
+        let (mut store, id) = store_with(
+            br#"(module
+                  (tag $e)
+                  (func $thrower (throw $e))
+                  (func (export "t") (result i32)
+                    (block $h
+                      (try_table (catch $e $h) (call $thrower))
+                      (return (i32.const 1)))
+                    (unreachable)))"#,
+        );
+        let t = func_index(&store, id, "t");
+        assert_eq!(store.invoke_index(id, t, &[]), Err(Trap::Unreachable));
+        // Only the `unreachable` after the handler — NOT the two frames the throw unwound through.
+        let frames: Vec<u32> = store.backtrace().iter().map(|f| f.func_index).collect();
+        assert_eq!(frames, vec![1], "the caught throw's frames must have been discarded");
+    }
+
+    /// Names come from the name section when there is one.
+    #[test]
+    fn frames_resolve_to_names_when_the_module_has_them() {
+        let (mut store, id) = store_with(
+            br#"(module (func $boom (export "boom") (unreachable)))"#,
+        );
+        let boom = func_index(&store, id, "boom");
+        let _ = store.invoke_index(id, boom, &[]);
+        let frame = store.backtrace()[0];
+        // The assembler emits no name section, so this must report None rather than guess.
+        assert_eq!(store.frame_name(&frame), None);
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+    use crate::module::decode;
+
+    fn build(src: &[u8]) -> Module {
+        decode(&crate::wat::assemble(src).unwrap()).unwrap()
+    }
+
+    /// §4.5.5 step 11. The start function was decoded, validated and printed by the CLI but never
+    /// *run* — a silent wrong answer rather than a failure, which is why 10 suite assertions sat
+    /// unexplained instead of pointing at it.
+    #[test]
+    fn the_start_function_runs_at_instantiation() {
+        let mut store = Store::new();
+        let id = store
+            .instantiate(
+                build(
+                    br#"(module
+                          (global $g (mut i32) (i32.const 0))
+                          (func $init (global.set $g (i32.const 42)))
+                          (start $init)
+                          (func (export "get") (result i32) (global.get $g)))"#,
+                ),
+                Imports::default(),
+            )
+            .unwrap();
+        assert_eq!(store.invoke(id, "get", &[]), Ok(vec![42]));
+    }
+
+    /// It runs LAST — after data and element segments — so it can observe them. Running it earlier
+    /// would still make the test above pass.
+    #[test]
+    fn the_start_function_sees_the_data_segments() {
+        let mut store = Store::new();
+        let id = store
+            .instantiate(
+                build(
+                    br#"(module
+                          (memory 1)
+                          (data (i32.const 0) "\07")
+                          (global $g (mut i32) (i32.const 0))
+                          (func $init (global.set $g (i32.load8_u (i32.const 0))))
+                          (start $init)
+                          (func (export "get") (result i32) (global.get $g)))"#,
+                ),
+                Imports::default(),
+            )
+            .unwrap();
+        assert_eq!(store.invoke(id, "get", &[]), Ok(vec![7]));
+    }
+
+    /// A trap in the start function fails the instantiation; the caller must never receive an id
+    /// for a module whose initialization did not complete.
+    #[test]
+    fn a_trapping_start_function_fails_instantiation() {
+        let mut store = Store::new();
+        let r = store.instantiate(
+            build(br#"(module (func $boom (unreachable)) (start $boom))"#),
+            Imports::default(),
+        );
+        assert_eq!(r, Err(Trap::Unreachable));
+    }
+
+    /// And it reports where it trapped, like any other call.
+    #[test]
+    fn a_trapping_start_function_still_produces_a_backtrace() {
+        let mut store = Store::new();
+        let _ = store.instantiate(
+            build(br#"(module (func $boom (unreachable)) (start $boom))"#),
+            Imports::default(),
+        );
+        assert_eq!(store.backtrace().len(), 1);
+        assert_eq!(store.backtrace()[0].func_index, 0);
+    }
+
+    /// Only once. A second instantiation of the same module is a second instance with its own
+    /// start run, but instantiating once must not run it twice.
+    #[test]
+    fn the_start_function_runs_exactly_once_per_instance() {
+        let mut store = Store::new();
+        let src = br#"(module
+                        (global $g (mut i32) (i32.const 0))
+                        (func $init (global.set $g (i32.add (global.get $g) (i32.const 1))))
+                        (start $init)
+                        (func (export "get") (result i32) (global.get $g)))"#;
+        let a = store.instantiate(build(src), Imports::default()).unwrap();
+        let b = store.instantiate(build(src), Imports::default()).unwrap();
+        assert_eq!(store.invoke(a, "get", &[]), Ok(vec![1]));
+        assert_eq!(store.invoke(b, "get", &[]), Ok(vec![1]), "each instance has its own global");
     }
 }

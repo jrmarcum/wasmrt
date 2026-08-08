@@ -1486,7 +1486,9 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     // copy of the same loop to have that gap, after block types and `call_indirect`. So
     // `(func (result i32) (param i32) …)` assembled and the *validator* reported it, and
     // `(func (nop) (local i32))` — a declaration after the body has started — assembled too.
-    let (mut seen_param, mut seen_result, mut seen_local, mut seen_body) = (false, false, false, false);
+    // `seen_body` is never set — see the note further down on why that rule had to be withdrawn.
+    // It is kept, and kept read, so the shape of the check survives for whoever can finish it.
+    let (mut seen_param, mut seen_result, mut seen_local, seen_body) = (false, false, false, false);
     let mut k = j;
     while k < items.len() {
         match items[k].keyword() {
@@ -4129,10 +4131,11 @@ mod tests {
         .unwrap();
     }
 
-    /// The four T9a findings that `br_table.wast` turned out to need — each one alone still
-    /// left the file unbuildable, so each is pinned separately. Every case round-trips
-    /// through decode+validate: "assemble returned Ok" is not evidence, as the missing
-    /// label vector above showed.
+    // The four T9a findings that `br_table.wast` turned out to need are pinned above — each one
+    // alone still left the file unbuildable, so each is pinned separately. Every case round-trips
+    // through decode+validate: "assemble returned Ok" is not evidence, as the missing label vector
+    // showed.
+
     // --- type-use well-formedness, §6.4.4 (2026-08-08) ---
 
     /// A **type use** has a fixed clause order: `(type x)?` then `(param …)*` then `(result …)*`.
