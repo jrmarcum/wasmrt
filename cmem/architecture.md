@@ -64,6 +64,17 @@ stage, and it also removed one of the two later decodes of the same bytes.
 range so a bad index **traps rather than aliasing another instance**. `Instance` survives as a thin
 `{ store, id }` wrapper, so the single-instance API is unchanged.
 
+**An `InstanceId` carries its issuing store (2026-08-08), and that is load-bearing.** `InstanceId
+{ store, index }`, with every accessor routed through one private `Store::slot()` that checks the tag
+before the bounds. Without it an id from store X indexed store Y's instance vector, and index 0 is always
+in range — so a guest linked against a foreign store's memory and silently got Y's own. **This is the same
+defence the C ABI applied to its value handles at T8**; core held the weaker guarantee of the two, and that
+asymmetry was the defect. Store ids come from a `static AtomicU64` starting at 1, so a zero-initialized id
+never names a real store. Two properties follow and are pinned by tests: **sharing survives a re-export
+chain** (A → B → C reaches A's bytes, because B's re-exported memory is itself an import and must be
+resolved through B's map), and **the linking graph is a DAG by construction** — an `InstanceId` exists only
+once its instance does, so a cycle is unrepresentable rather than rejected.
+
 **Imported memories (2026-08-08) are what that shape was for.** `Imports` holds a memory backing as
 `(instance, that instance's memory index)` — never a store slot, because an embedder holds `InstanceId`s and
 has no business knowing pool layout — and `instantiate` resolves each to the exporter's existing slot,

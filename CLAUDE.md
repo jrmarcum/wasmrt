@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — two passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — three passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite **99.0%** (61,691 / 599 / 2,469 of 62,290) — **first time
-over 99%** — **386 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+over 99%** — **389 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -34,6 +34,15 @@ the stage that rejects a malformed binary (section order/uniqueness, section siz
 decoded at decode with the IR stored in `Code`, const-expr encodings, the `end` terminator, the 2^32−1
 locals ceiling). ⚠️ **Section order is not id order** (`DataCount` is 12 but precedes `Code`; `Tag` is 13
 but precedes `Global`), and a repeated section had been **silently replacing** the first.
+**The third pass fixed a defect the owner's own constraint surfaced** (*"the memory needs to be shared once
+pulled in; two memory profiles pulling from each other does not work"*): an `InstanceId` was a bare index
+with no record of its issuing store, so an id from store X resolved against store Y and a guest **silently
+shared the wrong memory** — and `code[id]` indexing **panicked** on a foreign id, a process kill under
+`panic = "abort"`. Now `InstanceId { store, index }` with every accessor through one `Store::slot()` — the
+defence the C ABI already applied to its value handles at T8; core held the weaker of the two, and that
+asymmetry *was* the bug. Mutation-verified; conformance unchanged, because it is a misuse path the spec
+suite cannot reach. ⚠️ **A stated constraint is worth PROBING, not agreeing with** — two of the three
+properties it implied held, the third had shipped broken that morning.
 **Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5–#9, #12's **text-parser** remainder
 (`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),

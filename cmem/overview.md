@@ -98,7 +98,7 @@ against the *calling* instance — so a shared table would dispatch to the wrong
 *memories* are safe to build now; imported *tables* need the funcref encoding decided first, which
 touches a recorded invariant. Options in [known-issues.md](known-issues.md).
 
-See the task list in [roadmap.md](roadmap.md). **386 workspace tests** green; clippy clean; native +
+See the task list in [roadmap.md](roadmap.md). **389 workspace tests** green; clippy clean; native +
 `wasm32` no_std all build; C-ABI and Miri gates green.
 
 ## Planned repo / crate layout

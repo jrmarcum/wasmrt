@@ -1527,7 +1527,12 @@ capi! {
         let Some(s) = (unsafe { ffi::opt_ref(sp) }) else { return false };
         let Some((id, gi)) = s.global(h) else { return false };
         let Some(v) = s.inner.global(id, gi) else { return false };
-        let Some(ty) = s.inner.module_of(id).globals.get(gi as usize) else { return false };
+        // `module_of` is fallible now (an `InstanceId` carries its issuing store), and the honest
+        // handling here is the one this function already uses everywhere: report `false` rather than
+        // unwrap. The handle's store was checked above, so `None` is unreachable in practice — but
+        // "unreachable" is exactly the reasoning this crate has been burned by before.
+        let Some(md) = s.inner.module_of(id) else { return false };
+        let Some(ty) = md.globals.get(gi as usize) else { return false };
         let Some(kind) = kind_of(ty.content) else { return false };
         #[allow(unsafe_code, reason = "writing a caller out-parameter")]
         unsafe { ffi::out(out, from_value(kind, v)) }

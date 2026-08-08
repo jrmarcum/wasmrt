@@ -151,7 +151,7 @@ re-run.
 
 ## Current test state (2026-08-08, decoder strictness)
 
-**386 workspace tests, all green** (360 core + 26 capi), clippy clean on all four build surfaces; the
+**389 workspace tests, all green** (363 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —

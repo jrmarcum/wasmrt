@@ -213,6 +213,47 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — an `InstanceId` from another store reached THIS store's instance (silent wrong memory)
+
+**Found by the owner's constraint, not by a test.** Told that *"the memory needs to be shared once pulled
+in; having two memory profiles that are trying to pull from each other does not work"*, I probed the three
+properties that statement implies rather than asserting them. Two held. The third was a live defect in the
+imported-memory work committed hours earlier.
+
+**`InstanceId` was a bare `usize` with no record of which store issued it.** Hand an id from store X to
+store Y and Y indexed *its own* `code` vector: if the index was in range — and index 0 always is — the
+import linked and the guest silently shared **Y's memory** while believing it shared X's. Measured: a
+guest importing store X's memory (holding `0x11`) read `0x99`, store Y's own. Silent wrong memory, the
+class every serious defect in this port has belonged to. It was also a **panic**: `module_of` and
+`export_func` indexed `code[id]` directly, so a foreign id with an out-of-range index aborted the process
+under `panic = "abort"` (T12a's exact concern).
+
+**Fix: `InstanceId { store, index }`, with every accessor routed through one `Store::slot()`** that checks
+the tag before the bounds. This is the defence the **C ABI already applied to its value handles** at T8 —
+each carries the identity of the issuing store so a foreign or stale one is refused rather than followed.
+Core had the weaker guarantee of the two; that asymmetry was the bug. Store identities come from a
+`static AtomicU64` counter starting at **1**, so a zero-initialized id can never name a real store — the
+same reasoning as the C ABI's `+1` packing. Verified to build on freestanding `wasm32` no_std.
+
+`Imports` now keeps the whole tagged id for wasm-backed function and memory imports and lowers it to a
+slot only inside `instantiate`, so `FuncTarget` stays tag-free on the hot path. **`Store::module_of`
+returns `Option` now** (it indexed directly before); the one C-ABI caller reports `false` rather than
+unwrapping. The same hole existed for `with_instance_func` since **T7b** and is closed by the same change.
+
+**Mutation-verified:** deleting `id.store == self.id` from `Store::slot` makes the test link the foreign
+memory instead of refusing it. Conformance **unchanged** at 61,691/599/2,469 — this is a misuse path the
+spec suite cannot reach, which is exactly why it survived three passes of it.
+
+### The two properties that did hold — now pinned instead of assumed
+
+- **Sharing survives a re-export chain.** A defines a memory, B imports and re-exports it, C imports from
+  B: C reaches *A's* bytes. B's exported memory is B's own index 0, which is itself an import, so this only
+  works by following B's map — a naive implementation gives C a fresh slot or a slot B never owned.
+- **A cycle is unrepresentable, not rejected.** An `InstanceId` exists only once its instance does, so B
+  can import from A only after A is built and A can never name B. There is no "make a cycle, expect
+  failure" test because one cannot be written; the test pins the property that makes that so. The owner's
+  *"only when they are not interactive does that work"* is this: the linking graph is a DAG by construction.
+
 ## ✅ Fixed 2026-08-08 — decoder strictness: the decoder is now the stage that rejects a malformed binary
 
 **Suite 61,593 / 697 / 2,469 → 61,691 / 599 / 2,469 — 99.0%, the first time over 99.** +98 passes,

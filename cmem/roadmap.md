@@ -3,13 +3,14 @@
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
 **Current tree (unreleased, ahead of the published v0.9.0):** suite **61,691 / 599 / 2,469 — 99.0%**
-of 62,290 adjudicated (**first time over 99%**), **386 workspace tests**. T9's first pass landed T9a
+of 62,290 adjudicated (**first time over 99%**), **389 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
-**T9d (licensing/docs)**. **2026-08-08 landed two more passes:** T9a#4's **memory half** (owner chose
+**T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
-category, unskipped for the first time, revealed had never existed — and then **T9a#11 + most of #12,
-the decoder-strictness cluster**: seven checks making the *decoder* the stage that rejects a malformed
-binary. Still open: T9a#4's **table** half (🚦 still a decision-gate — a `funcref` carries no instance
+category, unskipped for the first time, revealed had never existed — then **T9a#11 + most of #12, the
+decoder-strictness cluster** (seven checks making the *decoder* the stage that rejects a malformed
+binary), and then a **cross-store `InstanceId`** fix: an id from one store resolved against another and
+a guest silently shared the wrong memory. Still open: T9a#4's **table** half (🚦 still a decision-gate — a `funcref` carries no instance
 identity), #5, #6, #7, #8, #9, the text-parser remainder of #12, **T9e `pin`**, **T9f tail calls**.
 The T8 block below is kept as the v0.9.0 release record.
 
@@ -576,6 +577,33 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   briefly held both the raw bytes *and* the IR — a second copy of every body in every module, measuring
   ~5% slower cold. Removing the redundant `body` field recovered it: same-session A/B/A gives ~4.5 ms vs
   ~4.4 ms at 48 KB, a 2–3% difference inside the recorded spread. Steady-state untouched by construction.
+
+  ### ◐ Progress 2026-08-08 (third) — a cross-store `InstanceId` silently shared the wrong memory
+
+  **Found from a constraint the owner stated, not from a test** — and it was a defect in the
+  imported-memory work committed hours earlier. `InstanceId` was a bare `usize` with **no record of its
+  issuing store**, so an id from store X indexed store Y's own instance vector; index 0 is always in
+  range, so the import linked and the guest silently shared **Y's** memory (measured: `0x99`, its own,
+  instead of X's `0x11`). It was also a **panic** — `module_of` and `export_func` indexed `code[id]`
+  directly, which under `panic = "abort"` is a process kill. T12a's concern, arriving early.
+
+  Fixed by tagging: `InstanceId { store, index }`, every accessor routed through one `Store::slot()` that
+  checks the tag before the bounds. **This is the defence the C ABI already applied to its value handles
+  at T8** — core held the weaker guarantee of the two, and that asymmetry *was* the bug. Store ids come
+  from a `static AtomicU64` starting at 1, so a zero-initialized id can never name a real store (the same
+  reasoning as the C ABI's `+1` packing); verified to build on freestanding `wasm32` no_std.
+  `Store::module_of` returns `Option` now. The same hole existed for `with_instance_func` since **T7b**
+  and closes with it. Mutation-verified; **conformance unchanged** at 61,691/599/2,469, because this is a
+  misuse path the spec suite cannot reach — which is precisely why it survived three passes of it.
+
+  **Two properties the same constraint implied DID hold, and are now pinned rather than assumed:** sharing
+  survives a **re-export chain** (A → B → C reaches A's bytes, which only works by following B's map, not
+  by allocating for B or reading a slot B never owned), and the linking graph is a **DAG by
+  construction** — an `InstanceId` exists only once its instance does, so a cycle is *unrepresentable*
+  rather than rejected. That is what the owner's *"only when they are not interactive does that work"* is.
+
+  ⚠️ **A stated constraint is worth probing, not agreeing with.** Two of three properties held; the third
+  had shipped broken that morning, and no spec-suite assertion could have found it.
 
   ### T9a — Correctness defects (real bugs) `[◐]`
 

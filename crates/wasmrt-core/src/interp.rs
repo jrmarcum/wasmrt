@@ -554,17 +554,23 @@ impl fmt::Debug for Imports {
 }
 
 /// One function import's backing.
+///
+/// The wasm case keeps the whole [`InstanceId`], **store tag included**, rather than the bare index
+/// [`FuncTarget`] runs on: instantiation is where the tag is checked and the id lowered to a slot, so
+/// a backing naming another store's instance is refused instead of quietly becoming a valid-looking
+/// index into this one.
 enum ImportedFunc {
     Host(HostFunc),
-    Wasm(FuncTarget),
+    Wasm { instance: InstanceId, func: u32 },
 }
 
 /// One memory import's backing: **another instance's** memory, named by that instance and its
 /// own memory index. Deliberately not a store slot — an embedder holds [`InstanceId`]s and has
-/// no business knowing pool layout, and resolving here keeps the mapping in one place.
+/// no business knowing pool layout, and resolving here keeps the mapping in one place (and is
+/// where the issuing store is verified).
 #[derive(Clone, Copy)]
 struct MemoryImport {
-    instance: usize,
+    instance: InstanceId,
     index: u32,
 }
 
@@ -604,10 +610,7 @@ impl Imports {
     /// globals — which is what makes `(register …)` linking behave correctly.
     #[must_use]
     pub fn with_instance_func(mut self, instance: InstanceId, func: u32) -> Imports {
-        self.funcs.push(ImportedFunc::Wasm(FuncTarget::Wasm {
-            instance: instance.0,
-            func,
-        }));
+        self.funcs.push(ImportedFunc::Wasm { instance, func });
         self
     }
 
@@ -619,10 +622,7 @@ impl Imports {
     /// whole point of an imported memory, and it is why nothing is copied.
     #[must_use]
     pub fn with_instance_memory(mut self, instance: InstanceId, index: u32) -> Imports {
-        self.memories.push(MemoryImport {
-            instance: instance.0,
-            index,
-        });
+        self.memories.push(MemoryImport { instance, index });
         self
     }
 }
@@ -671,16 +671,49 @@ struct InstanceData {
 /// Modelled on wasmtime: the store owns every memory, table and global exactly once, and
 /// instances reference them by index. Two instances that share a memory hold the same slot
 /// in their maps, so a write through one is visible through the other by construction.
-#[derive(Default)]
 pub struct Store {
+    /// This store's identity, stamped into every [`InstanceId`] it issues.
+    id: u64,
     code: Vec<InstanceData>,
     host_funcs: Vec<HostFunc>,
     pools: Pools,
 }
 
-/// Identifies an instance inside a [`Store`].
+impl Default for Store {
+    fn default() -> Store {
+        Store {
+            // Relaxed is enough: the value is only ever compared for equality, and no other memory
+            // ordering depends on it.
+            id: NEXT_STORE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+            code: Vec::new(),
+            host_funcs: Vec::new(),
+            pools: Pools::default(),
+        }
+    }
+}
+
+/// Monotonic source of store identities. Only ever compared for equality, and starts at 1 so a
+/// zero-initialized [`InstanceId`] can never name a real store — the same reason the C ABI's value
+/// handles pack a `+1`.
+static NEXT_STORE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Identifies an instance inside a [`Store`] — **and identifies which store issued it**.
+///
+/// The store tag is not bookkeeping. Without it, an id obtained from store X and passed to store Y
+/// indexes *Y's* instance vector, and if the index happens to be in range the caller silently gets an
+/// unrelated instance's memory or function: measured, before this existed, as a guest linking against
+/// a foreign store's memory and reading its own instead. It also removes a panic — several accessors
+/// index `code[id]` directly, so an out-of-range foreign id aborted the process under
+/// `panic = "abort"`.
+///
+/// This is the same defence the C ABI already applies to its value handles (each carries the identity
+/// of the store that issued it, so a foreign or stale one is refused rather than followed). Core had
+/// the weaker guarantee of the two; now it does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InstanceId(usize);
+pub struct InstanceId {
+    store: u64,
+    index: usize,
+}
 
 /// An instantiated module ready to run — a [`Store`] holding exactly one instance.
 ///
@@ -745,9 +778,14 @@ impl Instance {
     }
 
     /// The wrapped module.
+    ///
+    /// Infallible here, unlike [`Store::module_of`]: an `Instance` owns its store and its own id, so
+    /// the two cannot belong to different stores by construction.
     #[must_use]
     pub fn module(&self) -> &Module {
-        self.store.module_of(self.id)
+        self.store
+            .module_of(self.id)
+            .expect("an Instance always holds an id its own store issued")
     }
 
     /// Invoke an exported function by name.
@@ -790,16 +828,27 @@ impl Store {
         self.pools.limits
     }
 
-    /// The module behind an instance.
+    /// Resolve an [`InstanceId`] to a slot in **this** store, or `None` if the id was issued by a
+    /// different store or names an instance this one does not have.
+    ///
+    /// Every accessor goes through here. The alternative — each one indexing `code[id.index]` — is
+    /// what let a foreign id silently reach an unrelated instance, and panicked when its index was
+    /// out of range.
+    #[inline]
+    fn slot(&self, id: InstanceId) -> Option<usize> {
+        (id.store == self.id && id.index < self.code.len()).then_some(id.index)
+    }
+
+    /// The module behind an instance, or `None` if the id belongs to another store.
     #[must_use]
-    pub fn module_of(&self, id: InstanceId) -> &Module {
-        &self.code[id.0].module
+    pub fn module_of(&self, id: InstanceId) -> Option<&Module> {
+        Some(&self.code[self.slot(id)?].module)
     }
 
     /// Find an exported function's index in an instance, for linking against it.
     #[must_use]
     pub fn export_func(&self, id: InstanceId, name: &str) -> Option<u32> {
-        self.code[id.0].module.exports.iter().find_map(|e| {
+        self.code.get(self.slot(id)?)?.module.exports.iter().find_map(|e| {
             (e.name == name && e.ty.kind() == crate::types::ExternKind::Func).then_some(e.index)
         })
     }
@@ -813,7 +862,7 @@ impl Store {
     /// and it is why this returns `Value` rather than a handle.
     #[must_use]
     pub fn export_global(&self, id: InstanceId, name: &str) -> Option<Value> {
-        let data = self.code.get(id.0)?;
+        let data = self.code.get(self.slot(id)?)?;
         let index = data.module.exports.iter().find_map(|e| {
             (e.name == name && e.ty.kind() == crate::types::ExternKind::Global).then_some(e.index)
         })?;
@@ -831,7 +880,7 @@ impl Store {
         id: InstanceId,
         name: &str,
     ) -> Option<crate::module::GlobalType> {
-        let data = self.code.get(id.0)?;
+        let data = self.code.get(self.slot(id)?)?;
         let index = data.module.exports.iter().find_map(|e| {
             (e.name == name && e.ty.kind() == crate::types::ExternKind::Global).then_some(e.index)
         })?;
@@ -853,7 +902,7 @@ impl Store {
         name: &str,
         kind: crate::types::ExternKind,
     ) -> Option<u32> {
-        self.code.get(id.0)?.module.exports.iter().find_map(|e| {
+        self.code.get(self.slot(id)?)?.module.exports.iter().find_map(|e| {
             (e.name == name && e.ty.kind() == kind).then_some(e.index)
         })
     }
@@ -864,14 +913,14 @@ impl Store {
     /// exporter's storage — the caller sees the same bytes the guest does.
     #[must_use]
     pub fn memory(&self, id: InstanceId, index: u32) -> Option<&Memory> {
-        let data = self.code.get(id.0)?;
+        let data = self.code.get(self.slot(id)?)?;
         self.pools.memories.get(data.maps.mem(index))
     }
 
     /// Mutable access to one of an instance's memories. See [`Store::memory`].
     #[must_use]
     pub fn memory_mut(&mut self, id: InstanceId, index: u32) -> Option<&mut Memory> {
-        let slot = self.code.get(id.0)?.maps.mem(index);
+        let slot = self.code.get(self.slot(id)?)?.maps.mem(index);
         self.pools.memories.get_mut(slot)
     }
 
@@ -879,21 +928,21 @@ impl Store {
     /// see [`Store::export_global`].
     #[must_use]
     pub fn global(&self, id: InstanceId, index: u32) -> Option<Value> {
-        let data = self.code.get(id.0)?;
+        let data = self.code.get(self.slot(id)?)?;
         self.pools.globals.get(data.maps.global(index)).copied()
     }
 
     /// The signature of a function in an instance's function index space.
     #[must_use]
     pub fn func_type(&self, id: InstanceId, func_index: u32) -> Option<crate::module::FuncType> {
-        self.code.get(id.0)?.module.func_type(func_index)
+        self.code.get(self.slot(id)?)?.module.func_type(func_index)
     }
 
     /// Whether an instance exports `name` with the given kind — the link-time existence
     /// check, without reading the value.
     #[must_use]
     pub fn has_export(&self, id: InstanceId, name: &str, kind: crate::types::ExternKind) -> bool {
-        self.code.get(id.0).is_some_and(|d| {
+        self.slot(id).and_then(|s| self.code.get(s)).is_some_and(|d| {
             d.module
                 .exports
                 .iter()
@@ -957,11 +1006,10 @@ impl Store {
         });
         for backing in &imports.funcs {
             let declared = declared_funcs.next().ok_or(Trap::MissingImport)?;
-            if let ImportedFunc::Wasm(FuncTarget::Wasm { instance, func }) = backing {
+            if let ImportedFunc::Wasm { instance, func } = backing {
                 let actual = self
-                    .code
-                    .get(*instance)
-                    .and_then(|d| d.module.func_type(*func))
+                    .slot(*instance)
+                    .and_then(|s| self.code[s].module.func_type(*func))
                     .ok_or(Trap::MissingImport)?;
                 // Structural equality, not subtyping — deliberately, and the choice was measured
                 // rather than assumed.
@@ -1001,10 +1049,11 @@ impl Store {
         // a bogus backing cannot alias some other instance's memory.
         let mut imported_mems: Vec<usize> = Vec::with_capacity(n_mems);
         for (i, im) in imports.memories.iter().enumerate() {
+            // `slot()` is what refuses an id from another store. Before it existed, a foreign id's
+            // index resolved against THIS store and the guest silently shared the wrong memory.
             let slot = self
-                .code
-                .get(im.instance)
-                .map_or(usize::MAX, |d| d.maps.mem(im.index));
+                .slot(im.instance)
+                .map_or(usize::MAX, |s| self.code[s].maps.mem(im.index));
             let actual = self.pools.memories.get(slot).ok_or(Trap::MissingImport)?;
             // `module.memories` is the whole index space, imports first, so index `i` is this
             // import's declared type.
@@ -1171,11 +1220,21 @@ impl Store {
                     self.host_funcs.push(h);
                     FuncTarget::Host(self.host_funcs.len() - 1)
                 }
-                ImportedFunc::Wasm(t) => t,
+                // This is where a store-tagged id becomes a bare slot for the hot path — so it is
+                // also the last point at which a foreign one can be refused. The type check above
+                // already resolved it once; resolving again here keeps `FuncTarget` free of the tag
+                // rather than paying for it on every cross-instance call.
+                ImportedFunc::Wasm { instance, func } => FuncTarget::Wasm {
+                    instance: self.slot(instance).ok_or(Trap::MissingImport)?,
+                    func,
+                },
             });
         }
 
-        let id = InstanceId(self.code.len());
+        let id = InstanceId {
+            store: self.id,
+            index: self.code.len(),
+        };
         self.code.push(InstanceData {
             module,
             func_bodies,
@@ -1198,15 +1257,18 @@ impl Store {
     /// Invoke a function by its index in an instance's function index space.
     ///
     /// # Errors
-    /// [`Trap::UndefinedFunc`] for a bad index, [`Trap::BadArgCount`] on arity mismatch, or
-    /// whatever the guest traps with.
+    /// [`Trap::UndefinedFunc`] for a bad index **or an id issued by another store**,
+    /// [`Trap::BadArgCount`] on arity mismatch, or whatever the guest traps with.
     pub fn invoke_index(
         &mut self,
         id: InstanceId,
         func_index: u32,
         args: &[Value],
     ) -> Result<Vec<Value>> {
-        let ft = self.code[id.0]
+        // Resolved before anything else: without the store check this indexed `code` directly, so a
+        // foreign id either called an unrelated instance's function or panicked.
+        let inst = self.slot(id).ok_or(Trap::UndefinedFunc)?;
+        let ft = self.code[inst]
             .module
             .func_type(func_index)
             .ok_or(Trap::UndefinedFunc)?;
@@ -1223,8 +1285,9 @@ impl Store {
             code,
             host_funcs,
             pools,
+            ..
         } = self;
-        let r = call_function(code, host_funcs, pools, id.0, func_index, args, 1);
+        let r = call_function(code, host_funcs, pools, inst, func_index, args, 1);
         // Drop an escaping exception's payload rather than pinning it until the next invoke.
         if r.is_err() {
             pools.pending_exn = None;
@@ -6092,6 +6155,123 @@ mod tests {
             )
             .unwrap();
         assert_eq!(as_i32(store.invoke(provider, "peek", &[]).unwrap()[0]), 0x77);
+    }
+
+    /// **Sharing survives a re-export chain.** A defines the memory, B imports and re-exports it,
+    /// C imports from B — C must reach *A's* bytes. This is where a naive implementation breaks:
+    /// B's exported memory is B's own index 0, which is itself an import, so resolving it means
+    /// following B's map rather than allocating for B or reading a slot B never owned.
+    #[test]
+    fn an_imported_memory_survives_a_reexport_chain() {
+        let mut s = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let a = s
+            .instantiate(
+                mk(br#"(module (memory (export "m") 1) (data (i32.const 0) "\aa\00\00\00"))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        let ai = s
+            .export_index(a, "m", crate::types::ExternKind::Memory)
+            .unwrap();
+        let b = s
+            .instantiate(
+                mk(br#"(module (import "x" "m" (memory 1)) (export "m2" (memory 0)))"#),
+                Imports::new().with_instance_memory(a, ai),
+            )
+            .unwrap();
+        let bi = s
+            .export_index(b, "m2", crate::types::ExternKind::Memory)
+            .unwrap();
+        let c = s
+            .instantiate(
+                mk(br#"(module (import "y" "m" (memory 1))
+                        (func (export "r") (result i32) (i32.load (i32.const 0))))"#),
+                Imports::new().with_instance_memory(b, bi),
+            )
+            .unwrap();
+        assert_eq!(as_i32(s.invoke(c, "r", &[]).unwrap()[0]), 0xaa);
+    }
+
+    /// **Two stores cannot pull from each other.** An [`InstanceId`] issued by store X, handed to
+    /// store Y, must be refused — not resolved against Y's own instance vector.
+    ///
+    /// This was a real defect: the index alone was in range in Y, so Y linked the import and the
+    /// guest read **Y's own memory** while believing it shared X's. Silent wrong memory, the class
+    /// every serious defect in this port has belonged to. Mutation check: drop the
+    /// `id.store == self.id` test in [`Store::slot`] and the first assertion reads `0x99` rather
+    /// than failing to link.
+    #[test]
+    fn an_instance_id_from_another_store_is_refused_not_followed() {
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let mut x = Store::new();
+        let ax = x
+            .instantiate(
+                mk(br#"(module (memory (export "m") 1) (data (i32.const 0) "\11\00\00\00"))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        let mut y = Store::new();
+        // Y has an instance at the same INDEX holding different bytes — which is what made the old
+        // behaviour silent rather than a crash.
+        let _decoy = y
+            .instantiate(
+                mk(br#"(module (memory (export "m") 1) (data (i32.const 0) "\99\00\00\00"))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            y.instantiate(
+                mk(br#"(module (import "x" "m" (memory 1)))"#),
+                Imports::new().with_instance_memory(ax, 0),
+            )
+            .err(),
+            Some(Trap::MissingImport)
+        );
+        // The same applies to a foreign FUNCTION backing (pre-existing since T7b, same root cause).
+        assert_eq!(
+            y.instantiate(
+                mk(br#"(module (import "x" "f" (func)))"#),
+                Imports::new().with_instance_func(ax, 0),
+            )
+            .err(),
+            Some(Trap::MissingImport)
+        );
+        // And a foreign id no longer panics the accessors — it reports absence. Under
+        // `panic = "abort"` the old `code[id]` indexing was a process kill, not an error.
+        //
+        // The two invoke paths refuse with different traps, because each fails at its own first
+        // lookup: by name the export search comes up empty (`UndefinedExport`), by index the slot
+        // resolution does (`UndefinedFunc`). Neither is a *diagnosis* of "wrong store" — that would
+        // want its own variant — but both refuse, which is the property that matters.
+        assert_eq!(
+            y.invoke(ax, "anything", &[]).err(),
+            Some(Trap::UndefinedExport)
+        );
+        assert_eq!(y.invoke_index(ax, 0, &[]).err(), Some(Trap::UndefinedFunc));
+        assert!(y.module_of(ax).is_none());
+        assert!(y.memory(ax, 0).is_none());
+        assert!(y.export_func(ax, "m").is_none());
+        assert!(y.global(ax, 0).is_none());
+        assert!(!y.has_export(ax, "m", crate::types::ExternKind::Memory));
+    }
+
+    /// A cycle is **unrepresentable**, not rejected: an `InstanceId` exists only once its instance
+    /// does, so B can import from A only after A is built, and A can never name B. There is no test
+    /// that builds a cycle and expects failure because one cannot be written — this pins the
+    /// property that makes that true.
+    #[test]
+    fn an_import_can_only_name_an_already_built_instance() {
+        let mut s = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let a = s
+            .instantiate(mk(br#"(module (memory (export "m") 1))"#), Imports::new())
+            .unwrap();
+        assert!(s.slot(a).is_some());
+        assert_eq!(a.index, 0);
+        assert_eq!(s.instance_count(), 1);
+        // The id the *next* instance will get does not exist yet and cannot be constructed:
+        // `InstanceId`'s fields are private and only `instantiate` issues one.
     }
 
     /// §4.5.9 limits matching. Importing `(memory 2)` from a memory declared `(memory 1)` must
