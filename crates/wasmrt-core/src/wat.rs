@@ -923,6 +923,14 @@ struct ModuleBuild {
     types: Vec<TypeDef>,
     /// Declared supertype of each type, index-aligned with `types`.
     supers: Vec<Option<u32>>,
+    /// Whether each type is **final**, index-aligned with `types`. Final is the default: only a
+    /// bare `(sub …)` — without `final` — opens a type to being extended.
+    ///
+    /// Tracked because the emitter must choose between `0x50` (open), `0x4f` (`sub final`) and the
+    /// bare-composite shorthand. Before this it emitted a wrapper only when a supertype was present,
+    /// so `(sub (struct …))` with no supertype assembled as **final** — silently turning a valid
+    /// hierarchy into an invalid one, the same class as element-segment form 4 rewriting a type.
+    type_finals: Vec<bool>,
     /// Field names of each struct type, index-aligned with `types` (empty for non-structs),
     /// so `struct.get $T $field` can resolve a field by name — the form binaryen and
     /// hand-written GC .wat actually emit.
@@ -1027,7 +1035,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
     }
     // Pre-pass B: the bodies, now that every type name resolves.
     for form in &type_forms {
-        parse_type_body(form, &b.type_names, &mut b.types, &mut b.supers, &mut b.field_names)?;
+        parse_type_body(form, &b.type_names, &mut b.types, &mut b.supers, &mut b.type_finals, &mut b.field_names)?;
     }
 
     // Pass 1: the remaining definitions, in source order.
@@ -1192,6 +1200,7 @@ fn parse_type_body(
     type_names: &[Option<String>],
     types: &mut Vec<TypeDef>,
     supers: &mut Vec<Option<u32>>,
+    finals: &mut Vec<bool>,
     field_names: &mut Vec<Vec<Option<String>>>,
 ) -> Result<()> {
     let mut j = 1;
@@ -1202,9 +1211,13 @@ fn parse_type_body(
     let mut super_ref = None;
 
     // `(sub final? $super? <comptype>)` — the supertype list, then the real definition.
+    // A type with no `(sub …)` wrapper at all is final; `(sub …)` opens it; `(sub final …)` closes
+    // it again while still allowing a supertype.
+    let mut is_final = true;
     if want_atom(nth(l, 0)?)? == "sub" {
         let mut k = 1;
-        if l.get(k).is_some_and(|s| eq_atom(s, "final")) {
+        is_final = l.get(k).is_some_and(|s| eq_atom(s, "final"));
+        if is_final {
             k += 1;
         }
         while let Some(s) = l.get(k) {
@@ -1237,6 +1250,7 @@ fn parse_type_body(
     };
     types.push(def);
     supers.push(super_ref);
+    finals.push(is_final);
     field_names.push(names);
     Ok(())
 }
@@ -1972,12 +1986,22 @@ fn emit_module(
         let mut c = Vec::new();
         uleb(&mut c, b.types.len() as u64);
         for (i, t) in b.types.iter().enumerate() {
-            // A declared supertype wraps the composite in `(sub …)`: 0x50 open, then a
-            // one-entry supertype vector.
-            if let Some(Some(sup)) = b.supers.get(i) {
-                c.push(0x50);
-                uleb(&mut c, 1);
-                uleb(&mut c, u64::from(*sup));
+            // Choose the wrapper from BOTH facts, because they are independent: `0x50` is `sub`
+            // (open), `0x4f` is `sub final`, and a bare composite type is the shorthand for
+            // "final, no supertype". Keying only on the supertype — as this did — emitted a bare
+            // composite for `(sub (struct …))` and thereby marked an *open* type final.
+            let sup = b.supers.get(i).copied().flatten();
+            let is_final = b.type_finals.get(i).copied().unwrap_or(true);
+            if !is_final || sup.is_some() {
+                c.push(if is_final { 0x4f } else { 0x50 });
+                match sup {
+                    Some(s) => {
+                        uleb(&mut c, 1);
+                        uleb(&mut c, u64::from(s));
+                    }
+                    // Open with no supertype: an empty supertype vector, not an absent wrapper.
+                    None => uleb(&mut c, 0),
+                }
             }
             match t {
                 TypeDef::Func(s) => {

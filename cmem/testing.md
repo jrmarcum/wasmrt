@@ -18,16 +18,32 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, decoder strictness) — **99.0%, first time over 99**
+## Spec-suite conformance — current (2026-08-08, declared subtyping) — **99.1%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a/b (08-07) | T9a#4 (08-08) | **decoder (08-08)** |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,247 | 61,593 | **61,691** |
-| failed | 871 | 1,521 | 751 | 738 | 655 | 697 | **599** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,932 | 2,469 | **2,469** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | 98.9% | **99.0%** of 62,290 |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a/b (08-07) | T9a#4 (08-08) | decoder (08-08) | **subtyping (08-08)** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,247 | 61,593 | 61,691 | **61,712** |
+| failed | 871 | 1,521 | 751 | 738 | 655 | 697 | 599 | **578** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,932 | 2,469 | 2,469 | **2,469** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | 98.9% | 99.0% | **99.1%** of 62,290 |
+
+### The fourth 08-08 column: declared subtyping. +21 passes, −21 failures, skips unchanged
+
+`type-subtyping.wast` **36/44/0 → 57/23/0**, and nothing else in the suite moved — a validation rule
+being added, with no accounting effects at all.
+
+⚠️ **The third time a logged cause turned out to be wrong.** T9a#6 read "GC subtyping depth not modelled
+by the validator". The measured top item was **21 invalid modules being accepted**, because there was no
+declared-subtype validation of any kind. Different defect, different fix, same file.
+
+**A strict version of the check was measured and rejected.** Written to refuse every undecidable pair it
+turned away **6 valid modules** whose fields compare `(ref $f1)` against `(ref $f2)` from two
+structurally identical rec groups. Accepting the undecidable case is right *here* — it preserves existing
+behaviour where refusing would break valid input — and is the opposite of the call made for cross-store
+import matching one pass earlier, where accepting would mean a wrong call. **The direction to err in is a
+property of the consequence, not a house style.**
 
 ### The second 08-08 column: decoder strictness. +98 passes, −98 failures, skips **unchanged**
 
@@ -104,9 +120,15 @@ runner also distinguishes **"nothing defines this import"** (a real unlinkable v
 cannot back this kind"** (a gap → skip); collapsing the two, as `BuildErr::Unresolved` did, is precisely
 what made `assert_unlinkable` unimplementable.
 
-Worst remaining files (2026-08-08, after the decoder pass): `annotations` 51 (a proposal wasmrt does not
-target), `type-subtyping` 44, `func` 21, `custom-page-sizes-invalid` 20, `memory64-imports` 26.
-**All 284 files parse (0 unparseable).** The ranked punch list is in `known-issues.md`.
+Worst remaining files (2026-08-08, after the subtyping pass): `annotations` 51 (a proposal wasmrt does not
+target), `memory64-imports` 26 (out of scope), `type-subtyping` 23, `func` 21,
+`custom-page-sizes-invalid` 20. **All 284 files parse (0 unparseable).**
+
+**The largest IN-SCOPE cluster left is type canonicalisation** — ~40 assertions across `type-subtyping`,
+`type-rec` and `type-equivalence`, every one the same cause: wasmrt compares concrete types by **index**,
+the spec compares them by **structure**, so two structurally identical rec groups are treated as two
+types. It shows up as false rejections, undecidable import matching, and wrong `ref.test` results at once.
+See `known-issues.md`; the ranked punch list is there too.
 
 **The remaining `func.wast` 21 are the TEXT parser, not the decoder** — "unexpected token" 9, "inline
 function type" 3, "duplicate local" 3, "duplicate func" 1, plus 2 wrong results and 2 malformed imports
@@ -149,9 +171,9 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-08, decoder strictness)
+## Current test state (2026-08-08, declared subtyping)
 
-**389 workspace tests, all green** (363 core + 26 capi), clippy clean on all four build surfaces; the
+**395 workspace tests, all green** (369 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —

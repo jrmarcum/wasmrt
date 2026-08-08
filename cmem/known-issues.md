@@ -213,6 +213,71 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — declared subtyping was never validated (21 invalid modules accepted)
+
+**Suite 61,691 / 599 / 2,469 → 61,712 / 578 / 2,469 — 99.1%.** `type-subtyping.wast` **36/44/0 →
+57/23/0**: +21 passes, −21 failures, nothing else moved and no file lost a pass. 395 workspace tests.
+
+**T9a#6's logged cause was wrong, and re-measuring is what caught it — again.** The roadmap said "GC
+subtyping depth not modelled by the validator, `type-subtyping.wast` 36". The measured top item was
+**21 × "Invalid: module was accepted (should be rejected: sub type)"** — not a missing depth model but
+**no declared-subtype validation at all**. `module.supertypes` was filled in at decode and then only ever
+*walked* by `Module::is_subtype`, which trusts it, so a module could declare any type as any other's
+supertype and the whole reference-subtyping story rested on that claim.
+
+Two independent rules, both now enforced in `check_declared_subtyping` (`validate.rs`):
+
+1. **Finality.** A type is final *by default*: only the `0x50` (`sub`) wrapper opens one. `0x4f` is
+   `sub final`, and a bare composite type is shorthand for `sub final ϵ`. The decoder had been reading
+   `0x50` and `0x4f` **identically and discarding the distinction**, so `Module` now carries
+   `type_finals`, and a final type cannot be extended.
+2. **Structural matching (§3.4.5).** Same composite kind; functions **contravariant in parameters,
+   covariant in results**; structs may only *append* fields; each shared field must match, with
+   mutability equal and deciding the variance (immutable covariant, mutable invariant); a packed field
+   matches only the identical packing.
+
+### 🆕 The assembler was silently turning open types into final ones
+
+Caught only because the finality check started reading the flag. The emitter chose the `sub` wrapper
+**from the presence of a supertype alone**, so `(sub (struct …))` — open, no supertype — assembled to a
+*bare* composite type, i.e. **final**. The module the assembler produced was not the module the text
+described, and a valid hierarchy became an invalid one. Same class as element-segment form 4 rewriting a
+segment's type at T8: a silent semantic change in the output rather than a rejection. The emitter now
+chooses from both facts independently — `0x50` open, `0x4f` final-with-supertype, bare composite for
+final-with-none.
+
+### The limit of the check, and why it accepts rather than refuses
+
+**wasmrt compares concrete types by INDEX; the spec compares them by STRUCTURE**, so two structurally
+identical rec groups are one type with two indices. Written strictly, the check refused **6 valid**
+`type-subtyping.wast` modules whose fields are `(ref $f1)` against `(ref $f2)` where both rec groups
+spell out the same `(func)`. So `decl_subtype_of` treats a genuinely undecidable pair as **matching** —
+the opposite of the choice made for cross-store function-import matching, and deliberately so: there,
+accepting binds a call to a mismatched signature (silent wrong call); here, accepting only preserves
+behaviour that already existed, while refusing turns valid modules away.
+
+"Undecidable" is kept as narrow as the information allows: both sides concrete, **same family head**,
+nullability still respected, and — the refinement a first attempt got wrong — **not** related by a
+declared chain in the *opposite* direction, since that is an answer rather than an unknown. Without that
+last clause a contravariance breach slipped through; a test now pins it.
+
+### 🔧 The next item this measurement identifies: **no type canonicalisation**
+
+Every remaining failure in `type-subtyping` (23), `type-rec` (11) and `type-equivalence` (10) traces to
+this one cause — roughly **40 assertions**, which makes it the largest in-scope item left:
+
+- **15 false rejections** (`TypeMismatch` at build): structurally equal types treated as distinct.
+- **7 "Unlinkable: module linked"** + **4 "an import does not match"**: cross-module matching cannot
+  decide, so it guesses, and both directions of guess are wrong somewhere. ⚠️ This **supersedes the
+  earlier "residual: 1 assertion"** note — that was written before this file's failures were classified.
+  **40 is the measured figure.**
+- **~11 runtime results** (`assert_trap` got a result, `ref.test` mismatches): `is_subtype` at run time,
+  the same index-vs-structure gap.
+- **5 remaining over-acceptances** in `type-rec` ("type mismatch", "unknown type").
+
+The fix is canonical rec-group identity with recursive structural equality up to rolling. That is a
+feature, not a patch, and should be scoped on its own.
+
 ## ✅ Fixed 2026-08-08 — an `InstanceId` from another store reached THIS store's instance (silent wrong memory)
 
 **Found by the owner's constraint, not by a test.** Told that *"the memory needs to be shared once pulled

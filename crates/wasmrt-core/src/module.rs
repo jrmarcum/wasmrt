@@ -248,6 +248,13 @@ pub struct Module {
     /// Declared supertype of each type index (GC sub types), or `None`. Read by
     /// [`Module::is_subtype`].
     pub supertypes: Vec<Option<u32>>,
+    /// Whether each type is **final** — closed to further subtyping. Parallel to `comp_types`.
+    ///
+    /// Final is the *default*: only the `0x50` (`sub`) wrapper opens a type. `0x4f` is `sub final`
+    /// and a bare composite type is shorthand for `sub final ϵ`. Kept as its own vector rather than
+    /// folded into `supertypes` because the two are independent — a type can be open with no
+    /// supertype, or final with one.
+    pub type_finals: Vec<bool>,
     /// Type index of each *defined* function, in order.
     pub functions: Vec<u32>,
     /// Type index of each *defined* exception tag (§5.5.14, EH).
@@ -441,6 +448,7 @@ impl Module {
 struct Decoder {
     comp_types: Vec<CompType>,
     supertypes: Vec<Option<u32>>,
+    type_finals: Vec<bool>,
     /// Composite kind of each type index, pre-scanned before bodies are decoded so a
     /// `(ref $t)` value type can collapse to the right family even for a forward reference.
     type_kinds: Vec<CompKind>,
@@ -581,6 +589,7 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
         sections,
         comp_types: d.comp_types,
         supertypes: d.supertypes,
+        type_finals: d.type_finals,
         functions,
         tags,
         imports,
@@ -840,6 +849,7 @@ fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
 
     let mut comp: Vec<CompType> = Vec::new();
     let mut supers: Vec<Option<u32>> = Vec::new();
+    let mut finals: Vec<bool> = Vec::new();
     let mut nrec = r.read_var_u32()?;
     while nrec > 0 {
         nrec -= 1;
@@ -848,14 +858,15 @@ fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
             let mut k = r.read_var_u32()?;
             while k > 0 {
                 k -= 1;
-                decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers)?;
+                decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers, &mut finals)?;
             }
         } else {
-            decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers)?;
+            decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers, &mut finals)?;
         }
     }
     d.comp_types = comp;
     d.supertypes = supers;
+    d.type_finals = finals;
     Ok(())
 }
 
@@ -866,9 +877,15 @@ fn decode_sub_type(
     r: &mut Reader,
     comp: &mut Vec<CompType>,
     supers: &mut Vec<Option<u32>>,
+    finals: &mut Vec<bool>,
 ) -> DecodeResult<()> {
     let mut super_idx: Option<u32> = None;
     let tag = r.peek_byte()?;
+    // Only `0x50` (`sub`) declares a type OPEN for extension. `0x4f` is `sub final`, and a bare
+    // composite type is shorthand for `sub final ϵ` — so **final is the default**, and the two
+    // wrapper bytes are not interchangeable. Decoding both as "has a supertype list" and dropping
+    // the distinction is what let a module declare a final type as its supertype.
+    let is_final = tag != 0x50;
     if tag == 0x50 || tag == 0x4f {
         r.read_byte()?;
         let ns = r.read_var_u32()?;
@@ -888,6 +905,7 @@ fn decode_sub_type(
     }
     comp.push(decode_comp_type(kinds, r)?);
     supers.push(super_idx);
+    finals.push(is_final);
     Ok(())
 }
 

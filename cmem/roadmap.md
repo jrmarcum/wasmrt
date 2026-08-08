@@ -2,8 +2,8 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,691 / 599 / 2,469 — 99.0%**
-of 62,290 adjudicated (**first time over 99%**), **389 workspace tests**. T9's first pass landed T9a
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,712 / 578 / 2,469 — 99.1%**
+of 62,290 adjudicated (**first time over 99%**), **395 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
@@ -546,7 +546,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   concrete GC types costs 3 correct refusals to recover 1 false one, so equality stays. Residual: 1
   assertion, logged.
 
-  ### ◐ Progress 2026-08-08 (second) — decoder strictness. **61,593/697 → 61,691 / 599 / 2,469 = 99.0%**
+  ### ◐ Progress 2026-08-08 (second) — decoder strictness. **61,593/697 → 61,691 / 599 / 2,469 = 99.1%**
 
   **+98 passes, −98 failures, skips UNCHANGED** — the cleanest column in `testing.md`'s table, because
   nothing changed about what gets adjudicated; 98 assertions simply started passing. `binary.wast`
@@ -578,6 +578,48 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   ~5% slower cold. Removing the redundant `body` field recovered it: same-session A/B/A gives ~4.5 ms vs
   ~4.4 ms at 48 KB, a 2–3% difference inside the recorded spread. Steady-state untouched by construction.
 
+  ### ◐ Progress 2026-08-08 (fourth) — declared subtyping was never validated. **99.0% → 99.1%**
+
+  **61,691/599 → 61,712 / 578 / 2,469.** `type-subtyping.wast` **36/44/0 → 57/23/0** (+21 passes,
+  −21 failures); nothing else in the suite moved and no file lost a pass. 395 workspace tests.
+
+  ⚠️ **T9a#6's logged cause was wrong — the third time re-measuring has caught one.** It read "GC
+  subtyping depth not modelled by the validator, 36". The measured top item was **21 × "Invalid: module
+  was accepted (should be rejected: sub type)"**: there was **no declared-subtype validation of any
+  kind**. `module.supertypes` was populated at decode and thereafter only *walked* by
+  `Module::is_subtype`, which trusts it — so the entire reference-subtyping story rested on an unchecked
+  claim. Now enforced in `check_declared_subtyping`:
+
+  - **Finality.** A type is final *by default*; only `0x50` (`sub`) opens one, `0x4f` is `sub final`, and
+    a bare composite type is shorthand for `sub final ϵ`. **The decoder had been reading `0x50` and
+    `0x4f` identically and discarding the distinction**, so `Module` now carries `type_finals`.
+  - **Structural matching (§3.4.5).** Same kind; functions contravariant in parameters and covariant in
+    results; structs append-only; each shared field matching with mutability equal and deciding the
+    variance; packed fields matching only identical packing.
+
+  🆕 **The assembler was silently turning open types into final ones.** It chose the `sub` wrapper from
+  the presence of a supertype alone, so `(sub (struct …))` with no supertype emitted a **bare** composite
+  type — which *means* final. The module produced was not the module the text described, and a valid
+  hierarchy became invalid: the same class as element-segment form 4 rewriting a type at T8. Found only
+  because the finality check started reading the flag.
+
+  **A strict check was measured and rejected.** Refusing every pair it could not decide turned away **6
+  valid** modules whose fields compare `(ref $f1)` against `(ref $f2)` from two structurally identical
+  rec groups. So `decl_subtype_of` accepts the undecidable case — the **opposite** of the call made for
+  cross-store import matching one pass earlier. ⚠️ **The direction to err in is a property of the
+  consequence, not a house style:** there, accepting binds a call to a mismatched signature; here, it only
+  preserves behaviour that already existed, while refusing breaks valid input.
+
+  **🔧 And this measurement names the next item: there is no type canonicalisation.** wasmrt compares
+  concrete types by **index**; the spec compares them by **structure**, so two structurally identical rec
+  groups are one type with two indices. Every remaining failure in `type-subtyping` (23), `type-rec` (11)
+  and `type-equivalence` (10) traces to it — **~40 assertions**, which makes it the largest in-scope
+  cluster left and **supersedes the "residual: 1 assertion"** note from the previous pass (written before
+  those files were classified). It shows up four ways at once: 15 false rejections, 11 undecidable import
+  matches, ~11 wrong runtime `ref.test`/trap results, and 5 remaining over-acceptances. The fix is
+  canonical rec-group identity with recursive structural equality up to rolling — **a feature, not a
+  patch**, and it should be scoped on its own.
+
   ### ◐ Progress 2026-08-08 (third) — a cross-store `InstanceId` silently shared the wrong memory
 
   **Found from a constraint the owner stated, not from a test** — and it was a defect in the
@@ -593,7 +635,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   from a `static AtomicU64` starting at 1, so a zero-initialized id can never name a real store (the same
   reasoning as the C ABI's `+1` packing); verified to build on freestanding `wasm32` no_std.
   `Store::module_of` returns `Option` now. The same hole existed for `with_instance_func` since **T7b**
-  and closes with it. Mutation-verified; **conformance unchanged** at 61,691/599/2,469, because this is a
+  and closes with it. Mutation-verified; **conformance unchanged** at 61,712/578/2,469, because this is a
   misuse path the spec suite cannot reach — which is precisely why it survived three passes of it.
 
   **Two properties the same constraint implied DID hold, and are now pinned rather than assumed:** sharing
@@ -608,7 +650,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   ### T9a — Correctness defects (real bugs) `[◐]`
 
   **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
-  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5–#9 open · **#11 ✅** · **#12 ◐ (binary half done;
+  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5, #7, #8, #9 open · **#6 ✅** · **#11 ✅** · **#12 ◐ (binary half done;
   the text-parser remainder moved to `wat.rs`)** · #10 not a defect.
   Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
   `store1` 4 → 0 · `ref_is_null` 1 → 0 · `i31` 31 → 6 · `load1` 15 → 5 · `type-subtyping` 20 skips → 8 ·
@@ -621,7 +663,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 3 | 🆕 **The `.wast` runner redirects a failed module's assertions to an unrelated earlier module.** When a build fails, `current = None` — and `target(None)` then falls back to `self.named.last()`. So assertions belonging to the module that failed silently run against a *different* instance and are reported as **value mismatches**. The fallback itself is wanted (a file naming every module must still run bare actions); it must simply not apply after a *failed* build. | `wast.rs` ~290 | Inflates **failures**, never passes — so 98.8% is if anything understated. The real damage is diagnostic: `load1.wast` reports "got 0x0, expected 1", which sends you hunting a load bug that does not exist. Fix by tracking "the last build failed" distinctly from "there is no unnamed current module". |
   | 4 | ◐ **Memories ✅ DONE 2026-08-08** (`Linker::define_memory` + resolution through a registered instance; shared, never copied; §4.5.9 limits matching). **Tables still refused** (`LinkError::UnsupportedImportKind`) — a `funcref` carries no instance identity, so a shared table would dispatch to the wrong function. 🚦 Owner decision required before the table half; two tests pin the refusal. | `linker.rs`, `interp.rs` | Was: `imports.wast` 108 skips, `linking.wast` 80 skips + 16 failures. **Now `imports.wast` 196/13/95 and `linking.wast` 107/11/28.** Remaining skips there are the table imports. |
   | 5 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. Consistent, so no disagreement — an honest missing feature. | `validate.rs`, `interp.rs` | `i31.wast` **31 failures** + part of `type-subtyping`. |
-  | 6 | **GC subtyping depth not modelled** by the validator. | `validate.rs` | `type-subtyping.wast` **36 failures**. |
+  | 6 | ✅ **DONE 2026-08-08 — and the logged cause was WRONG.** Not a missing depth model: there was **no declared-subtype validation at all**. Finality (the decoder read `0x50`/`0x4f` identically) + §3.4.5 structural matching now enforced; it also caught the **assembler silently emitting open types as final**. | `validate.rs`, `module.rs`, `wat.rs` | Was `type-subtyping.wast` 36/44 → **57/23**. The residual is **type canonicalisation**, ~40 assertions across three files. |
   | 7 | **No trap backtrace** — the `decode_body_tracked` byte offsets deferred at **T2**. The C ABI already ships the frame API in its **final shape**, reporting 0 frames deliberately, so this lands **without a breaking ABI change**. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only, but an embedder feels it most. |
   | 8 | **`reference-types.wat` → `UndefinedType`**, oracle says valid. Undiagnosed. | ? | 1 wasmtk file. Re-verified still failing 2026-08-06. |
   | 9 | **`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`**, oracle assembles **and runs** them — so this is our type-checker being wrong, not the input. | `validate.rs` | 2 wasmtk files. Re-verified still failing 2026-08-06. |

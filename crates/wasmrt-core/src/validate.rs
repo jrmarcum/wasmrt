@@ -97,6 +97,13 @@ pub enum ValidateError {
     ///    never carry (`let Imm::BrTable(..) = … else`). Unreachable through
     ///    [`decode_body`], and refused rather than assumed away.
     UnsupportedValidation,
+    /// A type declares a supertype it does not actually subtype (§3.4.5): a different composite
+    /// kind, an incompatible field or signature, or a supertype that is **final**.
+    ///
+    /// Its own variant rather than `TypeMismatch` because the two are found at different stages and
+    /// mean different things to whoever reads the error — this one is a malformed type *hierarchy*,
+    /// not an ill-typed instruction.
+    SubType,
     /// The module uses a proposal this engine was configured to reject
     /// ([`crate::features::Features`]). Carries the proposal so an embedder can say which.
     FeatureDisabled(Feature),
@@ -146,6 +153,7 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
     }
 
     check_module_features(module, features)?;
+    check_declared_subtyping(module)?;
 
     // C.refs (§3.4.10, "undeclared function reference"): a `ref.func x` inside a function
     // body is well-typed only if `x` also occurs outside the code section. Populate from
@@ -324,6 +332,145 @@ fn gate(f: Option<Feature>, features: &Features) -> ValidateResult<()> {
 /// Declarations are checked separately from instructions on purpose: a disabled proposal
 /// must not be reachable through a *type* while all its opcodes are refused. A module
 /// could otherwise declare a `v128` global, or an `(array …)` type, with SIMD or GC off.
+/// Every declared supertype must actually be one (§3.4.5) — and must be open to being one.
+///
+/// wasmrt had **no** check here: `module.supertypes` was populated at decode and then only ever
+/// walked by `Module::is_subtype`, which trusts it. So a module could declare any type as the
+/// supertype of any other and the whole reference-subtyping story would rest on a lie —
+/// `type-subtyping.wast` measured **21 invalid modules accepted** on exactly this. Two independent
+/// rules, and a module can break either:
+///
+/// 1. **Finality.** A type is final unless declared `(sub …)` (`0x50`); `0x4f` is `sub final` and a
+///    bare composite type is shorthand for `sub final ϵ`. A final type cannot be extended.
+/// 2. **Structural matching.** The subtype's composite type must match the supertype's: same kind,
+///    functions contravariant in parameters and covariant in results, structs extending by appending
+///    fields, and each shared field matching per [`field_matches`].
+fn check_declared_subtyping(module: &Module) -> ValidateResult<()> {
+    for (i, sup) in module.supertypes.iter().enumerate() {
+        let Some(s) = *sup else { continue };
+        let s = s as usize;
+        // The decoder already refuses a forward or self supertype, so `s < i` holds and this cannot
+        // walk in a circle — but read it out of the module rather than assuming, because
+        // `Module`'s fields are public and `validate` may be handed one nobody decoded.
+        let (Some(sub_ct), Some(sup_ct)) = (module.comp_types.get(i), module.comp_types.get(s))
+        else {
+            return Err(ValidateError::UndefinedType);
+        };
+        // `type_finals` defaults to final for anything not recorded: a missing entry means "we do
+        // not know it is open", and the safe reading of that is to refuse the extension.
+        if module.type_finals.get(s).copied().unwrap_or(true) {
+            return Err(ValidateError::SubType);
+        }
+        if !comp_type_matches(module, sub_ct, sup_ct) {
+            return Err(ValidateError::SubType);
+        }
+    }
+    Ok(())
+}
+
+/// Reference subtyping **as the declared-supertype check may use it**: like [`subtype_of`], but it
+/// treats a pair it cannot decide as matching rather than as a mismatch.
+///
+/// wasmrt compares concrete types **by index**; the spec compares them **by structure**, so two
+/// structurally identical rec groups are one type with two indices. Without that canonicalisation
+/// (logged in `known-issues.md`) `subtype_of` reports "unrelated" for pairs that are in fact equal —
+/// `type-subtyping.wast` has several valid modules whose fields are `(ref $f1)` against `(ref $f2)`
+/// where both rec groups spell out the same `(func)`.
+///
+/// So this check errs toward **accepting** an undecidable pair, which is the opposite of the choice
+/// made for cross-store function-import matching — deliberately, because the consequences differ.
+/// There, accepting binds a call to a mismatched signature (silent wrong call); here, accepting
+/// merely preserves the behaviour that already existed, while refusing would turn valid modules
+/// away. Measured: refusing costs 6 valid `type-subtyping.wast` modules and buys nothing.
+///
+/// "Undecidable" is kept as narrow as the information allows — both sides concrete, the **same
+/// family head**, and nullability still respected — so kind mismatches, arity, mutability and every
+/// abstract-type comparison are all still decided.
+fn decl_subtype_of(module: &Module, sub: V, sup: V) -> bool {
+    if subtype_of(module, sub, sup) {
+        return true;
+    }
+    if !(sub.is_concrete() && sup.is_concrete()) {
+        return false;
+    }
+    if sub.ref_heap() != sup.ref_heap() {
+        return false;
+    }
+    if sup.is_non_null_ref() && !sub.is_non_null_ref() {
+        return false;
+    }
+    // Decidable in the NEGATIVE: if the supposed supertype is itself a declared subtype of the
+    // other, the two are genuinely related the wrong way round — that is an answer, not an unknown,
+    // and treating it as undecidable would accept a real variance violation (measured: it let a
+    // contravariance breach through). Only a pair with no declared relationship in either direction
+    // is a candidate for being two spellings of one canonical type.
+    !module.is_subtype(sup.concrete_index(), sub.concrete_index())
+}
+
+/// Does composite type `sub` match `sup` (§3.4.5)? The variance is the whole content of this
+/// function, and getting a direction backwards is silent: it would accept a hierarchy that lets a
+/// caller pass the wrong type to a `call_ref`.
+fn comp_type_matches(module: &Module, sub: &CompType, sup: &CompType) -> bool {
+    match (sub, sup) {
+        (CompType::Func(a), CompType::Func(b)) => {
+            a.params.len() == b.params.len()
+                && a.results.len() == b.results.len()
+                // Parameters are CONTRAVARIANT: the subtype must accept everything the supertype
+                // accepts, so the supertype's parameter must be a subtype of the subtype's.
+                && b.params
+                    .iter()
+                    .zip(&a.params)
+                    .all(|(&bp, &ap)| decl_subtype_of(module, bp, ap))
+                // Results are COVARIANT: the subtype may promise something more specific.
+                && a.results
+                    .iter()
+                    .zip(&b.results)
+                    .all(|(&ar, &br)| decl_subtype_of(module, ar, br))
+        }
+        // A struct subtype may APPEND fields, never remove or reorder them: the prefix must match
+        // so that any code holding the supertype reads the same fields at the same indices.
+        (CompType::Struct(a), CompType::Struct(b)) => {
+            a.len() >= b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(af, bf)| field_matches(module, af, bf))
+        }
+        (CompType::Array(a), CompType::Array(b)) => field_matches(module, a, b),
+        // Different kinds never match — `(sub $an_array (struct))` is the case the suite tests.
+        _ => false,
+    }
+}
+
+/// Does field type `sub` match `sup`? Mutability must be **equal**, and it decides the variance:
+/// an immutable field is covariant (read-only, so narrowing is safe), a mutable one is invariant
+/// (it is also written through, so narrowing would let a write of the wider type land in it).
+fn field_matches(
+    module: &Module,
+    sub: &crate::module::FieldType,
+    sup: &crate::module::FieldType,
+) -> bool {
+    use crate::module::StorageType;
+    if sub.mutable != sup.mutable {
+        return false;
+    }
+    match (sub.storage, sup.storage) {
+        // A packed field matches only the identical packing: `i8` and `i16` are distinct storage,
+        // and neither is a value type.
+        (StorageType::I8, StorageType::I8) | (StorageType::I16, StorageType::I16) => true,
+        (StorageType::Val(a), StorageType::Val(b)) => {
+            if sup.mutable {
+                // A mutable field is INVARIANT — written through as well as read — so the two must
+                // be the same type. `==` is the same index-vs-structure approximation as
+                // `decl_subtype_of` and errs the same way, accepting what it cannot separate.
+                a == b || (a.is_concrete() && b.is_concrete() && a.ref_heap() == b.ref_heap())
+            } else {
+                decl_subtype_of(module, a, b)
+            }
+        }
+        _ => false,
+    }
+}
+
 fn check_module_features(module: &Module, features: &Features) -> ValidateResult<()> {
     if *features == Features::all() {
         return Ok(()); // the default: nothing to gate, and no walk to pay for
@@ -2107,6 +2254,166 @@ mod tests {
         ]);
         let md = decode(&bytes).unwrap();
         assert_eq!(validate(&md), Err(ValidateError::TypeMismatch));
+    }
+
+    // --- declared subtyping, §3.4.5 (2026-08-08) ---
+
+    /// Assemble, decode and validate `src`, returning the verdict.
+    fn v(src: &str) -> ValidateResult<()> {
+        let bytes = crate::wat::assemble(src.as_bytes()).expect("assemble");
+        validate(&decode(&bytes).expect("decode"))
+    }
+
+    /// **Finality.** A type is final unless declared `(sub …)`, and a final type cannot be extended.
+    /// Nothing enforced this, so any type could be named as any other's supertype.
+    #[test]
+    fn a_final_type_cannot_be_a_supertype() {
+        // Bare `(func)` / `(struct)` are shorthand for `sub final ϵ`.
+        assert_eq!(
+            v("(module (type $t (func)) (type $s (sub $t (func))))"),
+            Err(ValidateError::SubType)
+        );
+        assert_eq!(
+            v("(module (type $t (struct)) (type $s (sub $t (struct))))"),
+            Err(ValidateError::SubType)
+        );
+        // Explicit `sub final`.
+        assert_eq!(
+            v("(module (type $t (sub final (func))) (type $s (sub $t (func))))"),
+            Err(ValidateError::SubType)
+        );
+        // A type may be open, extended, and the extension made final — after which it closes.
+        assert_eq!(
+            v("(module (type $t (sub (func))) (type $s (sub final $t (func)))
+                 (type $u (sub $s (func))))"),
+            Err(ValidateError::SubType)
+        );
+        // And the same hierarchy without the `final` is valid — so the check is not simply refusing
+        // every declared supertype.
+        assert_eq!(
+            v("(module (type $t (sub (func))) (type $s (sub $t (func)))
+                 (type $u (sub $s (func))))"),
+            Ok(())
+        );
+    }
+
+    /// **The assembler was making open types final.** `(sub …)` with no supertype emitted a *bare*
+    /// composite type, which is the shorthand for `sub final ϵ` — so the module it produced was not
+    /// the module the text described, and a valid hierarchy became invalid. Caught only because the
+    /// finality check above started reading the flag.
+    #[test]
+    fn sub_with_no_supertype_assembles_as_open_not_final() {
+        assert_eq!(
+            v("(module (type $b (sub (struct))) (type $d (sub $b (struct))))"),
+            Ok(())
+        );
+        // The distinction is real in the bytes: `(struct)` alone is final and refuses the extension.
+        assert_eq!(
+            v("(module (type $b (struct)) (type $d (sub $b (struct))))"),
+            Err(ValidateError::SubType)
+        );
+    }
+
+    #[test]
+    fn a_declared_supertype_of_a_different_kind_is_refused() {
+        for src in [
+            "(module (type $a (sub (array i32))) (type $s (sub $a (struct))))",
+            "(module (type $s (sub (struct))) (type $a (sub $s (array i32))))",
+            "(module (type $f (sub (func (param i32) (result i32)))) (type $s (sub $f (struct))))",
+        ] {
+            assert_eq!(v(src), Err(ValidateError::SubType), "should refuse: {src}");
+        }
+    }
+
+    /// Struct extension appends; it never drops, reorders, or changes a field's mutability.
+    #[test]
+    fn struct_subtyping_may_only_append_matching_fields() {
+        // Appending is fine, and a shared immutable field may narrow (covariant).
+        assert_eq!(
+            v("(module (type $b (sub (struct (field i32))))
+                 (type $d (sub $b (struct (field i32) (field i64)))))"),
+            Ok(())
+        );
+        // Dropping a field is not.
+        assert_eq!(
+            v("(module (type $b (sub (struct (field i32) (field i64))))
+                 (type $d (sub $b (struct (field i32)))))"),
+            Err(ValidateError::SubType)
+        );
+        // A shared field's type must still match.
+        assert_eq!(
+            v("(module (type $b (sub (struct (field i32))))
+                 (type $d (sub $b (struct (field i64)))))"),
+            Err(ValidateError::SubType)
+        );
+        // Mutability is part of the field type, in both directions.
+        assert_eq!(
+            v("(module (type $b (sub (struct (field i32))))
+                 (type $d (sub $b (struct (field (mut i32))))))"),
+            Err(ValidateError::SubType)
+        );
+        assert_eq!(
+            v("(module (type $b (sub (struct (field (mut i32)))))
+                 (type $d (sub $b (struct (field i32)))))"),
+            Err(ValidateError::SubType)
+        );
+        // A packed field matches only the identical packing.
+        assert_eq!(
+            v("(module (type $b (sub (struct (field i8))))
+                 (type $d (sub $b (struct (field i16)))))"),
+            Err(ValidateError::SubType)
+        );
+        assert_eq!(
+            v("(module (type $b (sub (struct (field i8)))) (type $d (sub $b (struct (field i8)))))"),
+            Ok(())
+        );
+    }
+
+    /// Function subtyping: **parameters contravariant, results covariant**. Getting a direction
+    /// backwards is silent — it would accept a hierarchy that lets `call_ref` pass the wrong type —
+    /// so both directions are asserted, not just the accepting one.
+    #[test]
+    fn func_subtyping_is_contravariant_in_params_and_covariant_in_results() {
+        // `$s <: $t` requires $t's param to be a subtype of $s's (accept more), and $s's result to
+        // be a subtype of $t's (promise more).
+        assert_eq!(
+            v("(module (type $x (sub (struct))) (type $y (sub $x (struct)))
+                 (type $t (sub (func (param (ref $y)) (result anyref))))
+                 (type $s (sub $t (func (param (ref $x)) (result (ref any))))))"),
+            Ok(())
+        );
+        // Narrowing a parameter is the wrong direction.
+        assert_eq!(
+            v("(module (type $x (sub (struct))) (type $y (sub $x (struct)))
+                 (type $t (sub (func (param (ref $x)))))
+                 (type $s (sub $t (func (param (ref $y))))))"),
+            Err(ValidateError::SubType)
+        );
+        // Arity must match on both sides.
+        assert_eq!(
+            v("(module (type $t (sub (func (param i32)))) (type $s (sub $t (func))))"),
+            Err(ValidateError::SubType)
+        );
+        assert_eq!(
+            v("(module (type $t (sub (func (result i32)))) (type $s (sub $t (func))))"),
+            Err(ValidateError::SubType)
+        );
+    }
+
+    /// **The limit of the check, asserted rather than left to be discovered.** wasmrt compares
+    /// concrete types by *index*; the spec compares them by *structure*, so two structurally
+    /// identical rec groups are one type. Without that canonicalisation this pair is undecidable,
+    /// and `decl_subtype_of` accepts rather than refuses — which is what keeps the valid
+    /// `type-subtyping.wast` modules building. Writing it the strict way costs 6 of them.
+    #[test]
+    fn structurally_equal_rec_groups_are_accepted_because_they_cannot_be_told_apart() {
+        assert_eq!(
+            v("(module
+                 (rec (type $f1 (sub (func))) (type $s1 (sub (struct (field (ref $f1))))))
+                 (rec (type $f2 (sub (func))) (type $s2 (sub (struct (field (ref $f2))))))
+                 (type (sub $s2 (struct (field (ref $f1))))))"),
+            Ok(())
+        );
     }
 
     #[test]
