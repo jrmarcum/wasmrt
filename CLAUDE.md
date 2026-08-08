@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — five passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — six passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.1%** (61,724 / 554 / 2,466 of 62,278) — **first time
-over 99%** — **397 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.1%** (61,738 / 536 / 2,466 of 62,274) — **first time
+over 99%** — **401 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -56,17 +56,22 @@ every subtype question in the engine funnels through it, one line carried the fi
 "assembler emits a different module than the text describes" defect in two passes, so the emitter deserves a
 dedicated look at T10. Canonicalisation also let the previous pass's `decl_subtype_of` approximation be
 **deleted**, with byte-identical suite results.
-**Two items were added to the task list 2026-08-08.** **T9h — cross-module type identity via an
-engine-level type registry on `Store`**, approach **APPROVED by the owner**: wasmtime's *shape*, our code
-(~11 assertions). That is the **third** application of the 🔒 *"wasmtime's SHAPE, our code"* rule in
-`design-decisions.md`, not a new policy — the **Component Ledger stays empty**, since the "evaluate a
-reference project" trigger requires an entry for *copying* code and reading an architecture is free.
+**The sixth pass is T9h — DONE: the `Store` type registry**, wasmtime's *shape* and our code (the third
+application of the 🔒 *"wasmtime's SHAPE, our code"* rule in `design-decisions.md`; the **Component Ledger
+stays empty**). Rec groups intern as modules join the store, so cross-module matching is an integer
+comparison at **link** time, never on a hot path. **`type-subtyping.wast` reached 72/0/0** and every
+`Unlinkable: module linked` in the suite is gone. ⚠️ **The finding: comparing SIGNATURES can never answer an
+IDENTITY question** — two functions can both be `(func)` and still be different types, because rec-group
+membership is part of identity and only the type **index** carries it; the decoder had been resolving an
+import's typeidx to a structure and **discarding the index**. Also **§4.5.9 matching is subtyping, not
+equality** (so the registry records supertypes store-wide), and 🆕 **`call_indirect` was a third site with
+the identical defect**, worth 7 runtime assertions.
 **T10a — the EMITTER audit**: three "the assembler emits a different module than the text describes"
 defects in two passes, **all three found by accident** by some other check reading a field the emitter had
 dropped. T10a names the mechanism (the emitter reconstructs a form from a *subset* of the parser's facts)
 and specifies a **round-trip property test** + a **`ModuleBuild` field-coverage sweep** instead of a
 read-through — every existing test asserts the module *runs*, and all three defects produced modules that ran.
-**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), **T9h**, #5, #7, #8, #9, #12's
+**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5, #7, #8, #9, #12's
 **text-parser** remainder (`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.

@@ -213,6 +213,57 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ T9h DONE 2026-08-08 — cross-module type identity via a `Store` type registry
+
+**Suite 61,724 / 554 / 2,466 → 61,738 / 536 / 2,466 — 99.1%.** +14 passes, −18 failures, no file lost a
+pass. **`type-subtyping.wast` is 72/0/0 — a file at 100%**, from 36/44 at the start of the day;
+`type-rec` 7/9 → **11/5**, `type-equivalence` 10/2 → **10/1**. 401 workspace tests. Cold start within
+noise (~4.66 vs ~4.63 ms A/B/A). **Every `Unlinkable: module linked` and `an import does not match` in
+the suite is gone.**
+
+`Store` now holds a `TypeRegistry` that interns rec groups as each module joins. A group's key
+references outside targets by their already-assigned **store-wide** id — available because groups are
+interned in index order and an outside reference is always to an earlier group — so interning is
+content-addressed and two modules spelling out the same group land on the same id. Cross-module matching
+becomes an integer comparison **at link time, never on a hot path**. Per-instance `type_ids` maps
+module-local index → store-wide id. `BTreeMap`, not a scan, for the reason `canonicalize` uses one:
+group counts are attacker-controlled.
+
+### ⚠️ The finding: comparing SIGNATURES can never answer an IDENTITY question
+
+The registry alone moved only **2** of the ~11. The reason is worth keeping:
+
+> Two functions can both be the empty `(func)` and still be **different types**, because rec-group
+> membership is part of identity — and a signature's params/results cannot express that.
+
+`type-subtyping.wast`'s `M10` exports a `(func)` whose declared type sits in a group whose sibling refers
+*outward*; the importer declares a `(func)` from a group whose sibling refers *inward*. Both signatures
+are empty, so any structural comparison links them, and the spec says they must not link. **Only the type
+*index* carries identity.** The decoder had been resolving an import's typeidx to a `FuncType` and
+**throwing the index away**, so `Import` gained `func_type_index`. This is the same shape as the emitter
+defects T10a is about: the information was present and discarded because nothing needed it yet.
+
+Two more consequences:
+
+- **§4.5.9 matching is subtyping, not equality.** `M` exporting `f1: $t1` links against a declared `$t0`
+  when `$t1 <: $t0`; equality refused three valid modules. The registry therefore records each type's
+  supertype **store-wide**, and matching walks that chain. Termination is structural: a supertype is
+  always a lower id (an earlier group member, or a group interned earlier).
+- 🆕 **`call_indirect` was the THIRD site with the identical defect** — it compared the declared and
+  actual *signatures*. Now it compares type identity with subtyping (§4.4.8), by index, module-locally
+  (a funcref is a bare index resolved against the calling instance, and imported tables are refused).
+  Worth 7 runtime assertions: 6 `assert_trap`-got-a-result plus 1 spurious trap.
+
+**Residual, deliberate:** a **re-exported import** has no defining type index in the exporting module, so
+those fall back to the structural comparison rather than being refused — correct whenever no concrete
+reference is involved, and the honest option otherwise. Also: repeated *failed* instantiations of
+distinct type sections grow the registry, since interning happens before the type checks that need it.
+Nothing references the orphans and an identical group reuses them, but it is unbounded; worth a ceiling
+if T12 finds it reachable.
+
+**Still open in these files (6, a different class):** validator over-acceptance — 3 `type mismatch` and
+3 `unknown type` in `type-rec` / `type-equivalence`.
+
 ## ✅ Fixed 2026-08-08 — type canonicalisation: types were compared by index, the spec compares by structure
 
 **Suite 61,712 / 578 / 2,469 → 61,724 / 554 / 2,466 — 99.1%.** +12 passes, −24 failures. **Six files

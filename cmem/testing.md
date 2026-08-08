@@ -18,16 +18,34 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, type canonicalisation) — **99.1%**
+## Spec-suite conformance — current (2026-08-08, T9h type registry) — **99.1%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a#4 (08-08) | decoder (08-08) | subtyping (08-08) | **canon (08-08)** |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | decoder (08-08) | subtyping (08-08) | canon (08-08) | **T9h registry (08-08)** |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,593 | 61,691 | 61,712 | **61,724** |
-| failed | 871 | 1,521 | 751 | 738 | 697 | 599 | 578 | **554** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,469 | 2,469 | 2,469 | **2,466** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | 99.0% | 99.1% | **99.1%** of 62,278 |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,691 | 61,712 | 61,724 | **61,738** |
+| failed | 871 | 1,521 | 751 | 738 | 599 | 578 | 554 | **536** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,469 | 2,469 | 2,466 | **2,466** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.0% | 99.1% | 99.1% | **99.1%** of 62,274 |
+
+### The sixth 08-08 column: T9h, the `Store` type registry. **`type-subtyping.wast` reaches 72/0/0**
+
++14 passes, −18 failures, no file lost a pass. `type-subtyping` **62/13 → 72/0/0 — a file at 100%**, from
+36/44 at the start of the day; `type-rec` 7/9 → **11/5**; `type-equivalence` 10/2 → **10/1**. **Every
+`Unlinkable: module linked` and `an import does not match` in the suite is gone.** Cold start within noise
+(~4.66 vs ~4.63 ms A/B/A).
+
+⚠️ **The finding: comparing SIGNATURES can never answer an IDENTITY question.** The registry alone moved
+only **2** of the ~11, because two functions can both be the empty `(func)` and still be *different types*
+— rec-group membership is part of identity, and params/results cannot express it. Only the type **index**
+carries it, and the decoder had been resolving an import's typeidx to a `FuncType` and **discarding the
+index**. Same shape as the emitter defects T10a is about: the information was present and thrown away
+because nothing needed it yet.
+
+Also: **§4.5.9 matching is subtyping, not equality** (so the registry records supertypes store-wide —
+equality refused three valid modules), and 🆕 **`call_indirect` was the third site with the identical
+defect**, worth 7 runtime assertions.
 
 ### The fifth 08-08 column: type canonicalisation. +12 passes, −24 failures, **six files improved, none regressed**
 
@@ -185,9 +203,9 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-08, type canonicalisation)
+## Current test state (2026-08-08, T9h type registry)
 
-**397 workspace tests, all green** (371 core + 26 capi), clippy clean on all four build surfaces; the
+**401 workspace tests, all green** (375 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —

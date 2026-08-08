@@ -2414,6 +2414,44 @@ mod tests {
         );
     }
 
+    /// `call_indirect`'s runtime check is **type identity with subtyping**, not signature shape — the
+    /// third site to need that. Both functions here are `(func)`, so a param/result comparison lets the
+    /// call through; the types differ because rec-group membership differs, so it must trap.
+    #[test]
+    fn call_indirect_traps_on_a_same_shaped_but_different_type() {
+        let src = r#"(module
+            (rec (type $a1 (sub (func))) (type $a2 (sub $a1 (func))))
+            (rec (type $b1 (sub (func))) (type $b2 (sub $a1 (func))))
+            (func $f (type $b1))
+            (table 1 funcref) (elem (i32.const 0) $f)
+            (func (export "go") (call_indirect (type $a1) (i32.const 0))))"#;
+        let bytes = crate::wat::assemble(src.as_bytes()).expect("assemble");
+        let md = decode(&bytes).expect("decode");
+        assert_eq!(validate(&md), Ok(()), "the module itself is valid");
+        let mut inst = crate::interp::Instance::new(md).expect("instantiate");
+        assert_eq!(
+            inst.invoke("go", &[]).err(),
+            Some(crate::interp::Trap::IndirectTypeMismatch),
+            "$b1 and $a1 are both (func) but are different types"
+        );
+    }
+
+    /// The other direction: a callee whose type is a **subtype** of the declared one must be allowed
+    /// through (§4.4.8), which equality refused.
+    #[test]
+    fn call_indirect_accepts_a_subtype_of_the_declared_type() {
+        let src = r#"(module
+            (type $t0 (sub (func)))
+            (type $t1 (sub $t0 (func)))
+            (func $f (type $t1))
+            (table 1 funcref) (elem (i32.const 0) $f)
+            (func (export "go") (call_indirect (type $t0) (i32.const 0))))"#;
+        let bytes = crate::wat::assemble(src.as_bytes()).expect("assemble");
+        let md = decode(&bytes).expect("decode");
+        let mut inst = crate::interp::Instance::new(md).expect("instantiate");
+        assert!(inst.invoke("go", &[]).is_ok(), "$t1 <: $t0, so the call is legal");
+    }
+
     /// A rec group is the unit of identity, so **group size is part of the type**: a two-member group
     /// of `(func)`s is not the same type as a standalone `(func)`. The assembler was flattening every
     /// `(rec …)` into singletons, which silently changed what its output meant.

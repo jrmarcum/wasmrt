@@ -82,7 +82,7 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
 - **T9 (0.10.0, IN PROGRESS)** — first pass landed **2026-08-07**, unreleased. Six correctness defects
   fixed (**three of which no list had**, all found by asking why `br_table.wast` was still 161 skips
   after the fix that was supposed to clear it), and **the size and performance axes measured for the
-  first time in the project's life**. Suite **61,724 / 554 / 2,466 — 99.1%** (2026-08-08, after T9a#4's memory half, link-time import type checking, and the decoder-strictness pass), no file lost a pass.
+  first time in the project's life**. Suite **61,738 / 536 / 2,466 — 99.1%** (2026-08-08, after T9a#4's memory half, link-time import type checking, and the decoder-strictness pass), no file lost a pass.
   Cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady; CLI **621 KiB**, cdylib **493.5 KiB**,
   freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** with `wasm-opt -Oz`).
   Still open: T9a #4 (a **decision-gate** — see below), #5–#9, #11, #12, `pin`, and **tail calls**.
@@ -98,7 +98,7 @@ against the *calling* instance — so a shared table would dispatch to the wrong
 *memories* are safe to build now; imported *tables* need the funcref encoding decided first, which
 touches a recorded invariant. Options in [known-issues.md](known-issues.md).
 
-See the task list in [roadmap.md](roadmap.md). **397 workspace tests** green; clippy clean; native +
+See the task list in [roadmap.md](roadmap.md). **401 workspace tests** green; clippy clean; native +
 `wasm32` no_std all build; C-ABI and Miri gates green.
 
 ## Planned repo / crate layout

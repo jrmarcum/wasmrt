@@ -2,8 +2,8 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,724 / 554 / 2,466 — 99.1%**
-of 62,290 adjudicated (**first time over 99%**), **397 workspace tests**. T9's first pass landed T9a
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,738 / 536 / 2,466 — 99.1%**
+of 62,290 adjudicated (**first time over 99%**), **401 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
@@ -772,7 +772,29 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   - **Only once they exist may a C-ABI `tail_call` feature flag be added** — and then `abi_version()`
     stays 1 (adding an enum value is additive), but `features.rs` and the header must move together.
 
-  ### T9h — Cross-module type identity: a type registry on the `Store` `[ ]` *(approach APPROVED by the owner 2026-08-08)*
+  ### T9h — Cross-module type identity: a type registry on the `Store` ✅ **DONE 2026-08-08** *(approach approved by the owner the same day)*
+
+  **Suite 61,724/554 → 61,738 / 536 / 2,466. `type-subtyping.wast` reached 72/0/0** (from 36/44 that
+  morning), `type-rec` 7/9 → 11/5, `type-equivalence` 10/2 → 10/1. **Every `Unlinkable: module linked` and
+  `an import does not match` in the suite is gone.** 401 tests; cold start within noise (~4.66 vs ~4.63 ms).
+
+  ⚠️ **The finding, which the plan below did not anticipate: comparing SIGNATURES can never answer an
+  IDENTITY question.** The registry alone moved only **2** of the ~11 — because two functions can both be
+  the empty `(func)` and still be *different types*, rec-group membership being part of identity. Only the
+  type **index** carries that, and the decoder had been resolving an import's typeidx to a `FuncType` and
+  **throwing the index away**; `Import` gained `func_type_index`. Same shape as the emitter defects T10a is
+  about: information present, discarded because nothing needed it yet.
+
+  Two more: **§4.5.9 matching is subtyping, not equality** (equality refused 3 valid modules, so the
+  registry records supertypes store-wide and matching walks the chain — terminating because a supertype is
+  always a lower id), and 🆕 **`call_indirect` was a THIRD site with the identical defect** (it compared
+  signatures; now type identity with subtyping per §4.4.8), worth 7 runtime assertions.
+
+  **Residual, deliberate:** a re-exported *import* has no defining type index, so those fall back to the
+  structural comparison; and repeated **failed** instantiations grow the registry, since interning precedes
+  the checks that need it — unbounded, though nothing references the orphans. Both logged.
+
+  Original scoping:
 
   **The residual of the canonicalisation pass, and the last known in-scope correctness cluster of any
   size: ~11 assertions** — 7 `Unlinkable: module linked` + 4 `an import does not match` across

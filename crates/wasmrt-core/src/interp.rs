@@ -627,6 +627,55 @@ impl Imports {
     }
 }
 
+/// Do two signatures from **different modules** denote the same type?
+///
+/// Each side's concrete references are resolved through its *own* module's store-wide type ids, so the
+/// comparison is between store-wide identities rather than module-local indices. That is the exactness
+/// the type registry buys: without it, this question had no correct answer available at all.
+///
+/// Still equality rather than subtyping. §4.5.9 matching is subtyping, and deciding it across modules
+/// needs the supertype chains resolved store-wide too — a further step, not done here, and logged. The
+/// direction of the residual approximation is unchanged: equality can only **refuse** a link that subtyping
+/// would allow, never accept one it would refuse.
+fn cross_module_func_types_match(
+    a_ids: &[u32],
+    a: &crate::module::FuncType,
+    b_ids: &[u32],
+    b: &crate::module::FuncType,
+) -> bool {
+    a.params.len() == b.params.len()
+        && a.results.len() == b.results.len()
+        && a.params
+            .iter()
+            .zip(&b.params)
+            .all(|(&x, &y)| cross_module_val_types_match(a_ids, x, b_ids, y))
+        && a.results
+            .iter()
+            .zip(&b.results)
+            .all(|(&x, &y)| cross_module_val_types_match(a_ids, x, b_ids, y))
+}
+
+/// One value type, compared across modules. Non-reference and abstract-reference types compare by
+/// their bits (they carry no module-local index); a **concrete** reference compares by nullability plus
+/// the store-wide id of its target.
+fn cross_module_val_types_match(a_ids: &[u32], a: crate::types::ValType, b_ids: &[u32], b: crate::types::ValType) -> bool {
+    if !a.is_concrete() || !b.is_concrete() {
+        return a == b;
+    }
+    if a.is_non_null_ref() != b.is_non_null_ref() {
+        return false;
+    }
+    // Both ids must EXIST and match. An absent id means the module named a type it does not have — an
+    // invalid module the validator refuses; treating absence as a match would let two such modules link.
+    match (
+        a_ids.get(a.concrete_index() as usize),
+        b_ids.get(b.concrete_index() as usize),
+    ) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Does an existing memory satisfy a declared import type? §4.5.9 matching, which compares
 /// **types**: the actual minimum must be at least the declared one, and a declared maximum
 /// requires the actual to have one no larger (an unbounded memory never satisfies a bounded
@@ -660,6 +709,10 @@ enum FuncTarget {
 /// `RefCell`, or `unsafe`.
 struct InstanceData {
     module: Module,
+    /// Store-wide type id of each of this module's types, from the store's [`TypeRegistry`]. Two
+    /// instances' types are the same type iff these ids match — which is what makes cross-module
+    /// import matching an integer comparison rather than a structural walk.
+    type_ids: Vec<u32>,
     func_bodies: Vec<FuncBody>,
     maps: IndexMaps,
     /// One entry per **imported** function, in declaration order.
@@ -675,6 +728,8 @@ pub struct Store {
     /// This store's identity, stamped into every [`InstanceId`] it issues.
     id: u64,
     code: Vec<InstanceData>,
+    /// Store-wide type identity, shared by every instance in this store.
+    types: TypeRegistry,
     host_funcs: Vec<HostFunc>,
     pools: Pools,
 }
@@ -686,9 +741,129 @@ impl Default for Store {
             // ordering depends on it.
             id: NEXT_STORE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
             code: Vec::new(),
+            types: TypeRegistry::default(),
             host_funcs: Vec::new(),
             pools: Pools::default(),
         }
+    }
+}
+
+/// **Store-wide type identity** — the registry that makes types comparable across modules.
+///
+/// `Module::type_canon` decides identity *within* a module: it is the lowest local index structurally
+/// equal to a type. Two modules number their types independently, so those ids say nothing across a
+/// boundary, and the structural *key* cannot be compared either because it embeds them by reference.
+/// Making keys self-contained (inlining each referenced group) would work but blows up exponentially on
+/// chained groups — a denial-of-service surface on exactly the untrusted path.
+///
+/// So groups are **interned** as each module joins the store. A group's key references outside targets
+/// by their already-assigned **store-wide** id, which is available because groups are interned in index
+/// order and an outside reference is always to an earlier group. Interning is content-addressed, so two
+/// modules spelling out the same group land on the same id and cross-module matching becomes an integer
+/// comparison at link time — never on a hot path.
+///
+/// This is wasmtime's *shape*, written here from the architecture rather than its code (the standing
+/// rule in `cmem/design-decisions.md`).
+#[derive(Default)]
+struct TypeRegistry {
+    /// Structural key of each distinct rec group → the store-wide id of its **first** member.
+    /// A `BTreeMap` for the same reason `canonicalize` uses one: group counts are attacker-controlled,
+    /// and a linear scan would be O(groups²).
+    groups: alloc::collections::BTreeMap<Vec<u8>, u32>,
+    /// Declared supertype of each store-wide type id, as a store-wide id. Recorded because import
+    /// matching is **subtyping**, not equality (§4.5.9), so the chain has to be walkable store-wide.
+    supers: Vec<Option<u32>>,
+    /// Next unused store-wide type id. Ids are allocated in blocks of a group's length, so a group's
+    /// members occupy consecutive ids and member *position* is preserved.
+    next: u32,
+}
+
+impl TypeRegistry {
+    /// The store-wide id of the first member of the group with this key, interning it if new.
+    ///
+    /// `member_supers` gives each member's declared supertype as a store-wide id, recorded only on
+    /// first intern — a repeat is the same group by definition, so its chain is already there.
+    fn intern(&mut self, key: Vec<u8>, len: u32, member_supers: &[Option<u32>]) -> u32 {
+        if let Some(&base) = self.groups.get(&key) {
+            return base;
+        }
+        let base = self.next;
+        // Saturating rather than wrapping: on overflow every later group collapses onto one id, which
+        // would make unrelated types compare equal. Saturating keeps them merely un-interned, and a
+        // store holding 2^32 distinct rec groups has other problems.
+        self.next = self.next.saturating_add(len.max(1));
+        self.groups.insert(key, base);
+        let end = base as usize + len as usize;
+        if self.supers.len() < end {
+            self.supers.resize(end, None);
+        }
+        for (i, s) in member_supers.iter().enumerate() {
+            if let Some(slot) = self.supers.get_mut(base as usize + i) {
+                *slot = *s;
+            }
+        }
+        base
+    }
+
+    /// Is store-wide type `sub` a subtype of `sup`, by the declared supertype chain?
+    ///
+    /// Terminates because a supertype is always a lower id: within a group it is an earlier member,
+    /// and outside it is a group interned earlier, whose block starts lower.
+    fn is_subtype(&self, sub: u32, sup: u32) -> bool {
+        let mut cur = Some(sub);
+        while let Some(c) = cur {
+            if c == sup {
+                return true;
+            }
+            cur = self.supers.get(c as usize).copied().flatten();
+        }
+        false
+    }
+
+    /// Assign store-wide ids to every type in `module`, in group order.
+    ///
+    /// Returns one id per type index. A module with no recorded group extents (one built by hand rather
+    /// than decoded) is treated as all singletons, which is what the spec says an ungrouped type is.
+    fn assign(&mut self, module: &Module) -> Vec<u32> {
+        let singletons: Vec<(u32, u32)> = (0..module.comp_types.len() as u32)
+            .map(|i| (i, 1))
+            .collect();
+        let groups = if module.rec_groups.is_empty() {
+            &singletons
+        } else {
+            &module.rec_groups
+        };
+        let mut ids: Vec<u32> = Vec::with_capacity(module.comp_types.len());
+        for &(start, len) in groups {
+            // `ids` is filled in index order, so it holds exactly the earlier groups' store-wide ids —
+            // which is what `rec_group_key_with` needs for references pointing out of this group.
+            let key = crate::module::rec_group_key_with(
+                &module.comp_types,
+                &module.supertypes,
+                &module.type_finals,
+                &ids,
+                start,
+                len,
+            );
+            // Each member's declared supertype as a store-wide id: an earlier member of this group
+            // resolves against the block being allocated, anything else is already assigned.
+            let base_guess = self.groups.get(&key).copied().unwrap_or(self.next);
+            let member_supers: Vec<Option<u32>> = (0..len)
+                .map(|i| {
+                    let s = module.supertypes.get((start + i) as usize).copied().flatten()?;
+                    if s >= start && s < start + len {
+                        Some(base_guess + (s - start))
+                    } else {
+                        ids.get(s as usize).copied()
+                    }
+                })
+                .collect();
+            let base = self.intern(key, len, &member_supers);
+            for i in 0..len {
+                ids.push(base + i);
+            }
+        }
+        ids
     }
 }
 
@@ -991,6 +1166,17 @@ impl Store {
             return Err(Trap::MissingImport);
         }
 
+        // Intern this module's rec groups, giving every one of its types a **store-wide** id. Done
+        // here — after the cheap count checks, before the type checks that need it — because the
+        // import matching below compares types across a module boundary, which module-local canonical
+        // ids cannot do.
+        //
+        // A later failure in this function leaves the interned groups behind. That is benign in a way
+        // orphaned pool slots were not: interning is content-addressed, so nothing references them and
+        // an identical group later reuses the same ids. It does mean repeated *failed* instantiations of
+        // distinct type sections grow the registry, which is noted in `known-issues.md`.
+        let type_ids = self.types.assign(&module);
+
         // Import type matching for functions (§4.5.9). Checked here rather than in the linker
         // because this is the one place every caller passes through — a hand-built `Imports`
         // gets the same check the `Linker` does.
@@ -1000,34 +1186,50 @@ impl Store {
         // taken on trust; a wasm→wasm backing does carry a signature, and binding it to a
         // mismatched declaration is the silent-wrong-call class — the guest would marshal
         // arguments for one shape and the callee read another.
-        let mut declared_funcs = module.imports.iter().filter_map(|i| match &i.ty {
-            crate::module::Extern::Func(ft) => Some(ft),
+        let declared_funcs = module.imports.iter().filter_map(|i| match &i.ty {
+            crate::module::Extern::Func(ft) => Some((ft, i.func_type_index)),
             _ => None,
         });
-        for backing in &imports.funcs {
-            let declared = declared_funcs.next().ok_or(Trap::MissingImport)?;
+        for (decl, backing) in declared_funcs.zip(&imports.funcs) {
+            let (declared, declared_ti) = decl;
             if let ImportedFunc::Wasm { instance, func } = backing {
-                let actual = self
-                    .slot(*instance)
-                    .and_then(|s| self.code[s].module.func_type(*func))
+                let exporter = self.slot(*instance).ok_or(Trap::MissingImport)?;
+                let actual = self.code[exporter]
+                    .module
+                    .func_type(*func)
                     .ok_or(Trap::MissingImport)?;
-                // Structural equality, not subtyping — deliberately, and the choice was measured
-                // rather than assumed.
+                // Matched by **store-wide type IDENTITY, with subtyping** — not by comparing the two
+                // signatures' shapes.
                 //
-                // §4.5.9 matching is subtyping, and a `ValType` naming a *concrete* GC type packs
-                // a **module-local type index**, so deciding it properly needs cross-module type
-                // canonicalisation, which this engine does not do (logged in `known-issues.md`).
-                // Equality is therefore an approximation, and the question is which way it may
-                // err. It errs toward **refusing** a link that subtyping would allow — never
-                // toward accepting one it would refuse. That is the direction the standing rule
-                // wants: a refused link announces itself, a wrongly-bound one dispatches a call
-                // whose arguments and signature disagree and says nothing.
+                // Shape comparison cannot answer this question at all. `M10` exports a `(func)` whose
+                // declared type sits in a rec group whose sibling refers *outward*; the importer
+                // declares a `(func)` from a group whose sibling refers *inward*. Both signatures are
+                // the empty `(func)`, so any param/result comparison links them — and the spec says
+                // they are different types and must not link. Rec-group membership is part of
+                // identity, and only the type *index* carries it.
                 //
-                // Exempting concrete-typed signatures instead was tried and is *worse* on both
-                // counts: it costs 3 correct refusals in `type-subtyping.wast` to recover 1 false
-                // one in `type-equivalence.wast`, trading three silent mis-links for one loud
-                // over-strictness. The residual is that single assertion.
-                if actual != *declared {
+                // And §4.5.9 matching is **subtyping**, not equality: `M` exporting `f1: $t1` links
+                // against a declared `$t0` when `$t1 <: $t0`. Equality refused three valid modules.
+                let matched = match (
+                    declared_ti.and_then(|ti| type_ids.get(ti as usize).copied()),
+                    self.code[exporter]
+                        .module
+                        .func_type_index(*func)
+                        .and_then(|ti| self.code[exporter].type_ids.get(ti as usize).copied()),
+                ) {
+                    (Some(want), Some(got)) => self.types.is_subtype(got, want),
+                    // No index on one side — a re-exported *import* has no defining type index, and a
+                    // hand-built `Module` has no registry ids. Fall back to the structural comparison
+                    // rather than refusing: it is what this check did before, and it is right whenever
+                    // no concrete reference is involved. Logged as the residual.
+                    _ => cross_module_func_types_match(
+                        &type_ids,
+                        declared,
+                        &self.code[exporter].type_ids,
+                        &actual,
+                    ),
+                };
+                if !matched {
                     return Err(Trap::IncompatibleImport);
                 }
             }
@@ -1237,6 +1439,7 @@ impl Store {
         };
         self.code.push(InstanceData {
             module,
+            type_ids,
             func_bodies,
             maps,
             imports: targets,
@@ -2134,11 +2337,23 @@ fn run(frame: &mut Frame, ctx: &Ctx, store: &mut Pools, depth: usize) -> Result<
                 let f = entry as u32;
                 let want = ctx.module.func_sig(ci.type_index).ok_or(Trap::UndefinedType)?;
                 let got = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
-                // Compared canonically: the declared and actual signatures may name the same types
-                // through different indices, and raw slice equality reports those as a mismatch —
-                // measured as spurious `indirect call type mismatch` traps in `type-equivalence.wast`.
-                // `func_types_equal` tries the slice compare first, so the common case is unchanged.
-                if !ctx.module.func_types_equal(&want, &got) {
+                // Matched on **type identity with subtyping**, by index — not by comparing the two
+                // signatures' shapes. Same lesson as import matching, and the third site to need it:
+                // two functions can both be `(func)` and still be different types, because rec-group
+                // membership is part of identity and only the index carries it. §4.4.8 wants the
+                // callee's type to be a *subtype* of the declared one, which is also why equality was
+                // wrong in the permissive direction (`assert_trap` cases returning a result).
+                //
+                // Both indices live in the *calling* module — a funcref is a bare function index
+                // resolved against `ctx.inst`, and imported tables are refused — so the module-local
+                // canonical comparison in `Module::is_subtype` is the right one here.
+                let matched = match ctx.module.func_type_index(f) {
+                    Some(got_ti) => ctx.module.is_subtype(got_ti, ci.type_index),
+                    // An *imported* function has no defining type index in this module. Fall back to
+                    // the structural comparison, which `func_types_equal` decides canonically.
+                    None => ctx.module.func_types_equal(&want, &got),
+                };
+                if !matched {
                     return Err(Trap::IndirectTypeMismatch);
                 }
                 let base = frame.stack_base(got.params.len())?;

@@ -158,6 +158,15 @@ pub struct Import {
     pub module: String,
     pub name: String,
     pub ty: Extern,
+    /// For a **function** import, the type **index** it was declared with; `None` for other kinds.
+    ///
+    /// `ty` resolves that index to a `FuncType` structure, which is what the engine runs on — but a
+    /// structure cannot answer *which type* this is, and for import matching that is the question.
+    /// Two functions can both be `(func)` and still be different types, because rec-group membership
+    /// is part of identity: `type-subtyping.wast` links `M10.f` (declared in a group whose sibling
+    /// refers outward) against a `$f11` (in a group whose sibling refers inward) and must refuse.
+    /// Comparing param/result lists cannot see that; comparing type indices can.
+    pub func_type_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +257,13 @@ pub struct Module {
     /// Declared supertype of each type index (GC sub types), or `None`. Read by
     /// [`Module::is_subtype`].
     pub supertypes: Vec<Option<u32>>,
+    /// `(start, len)` of each rec group, in type-index order. A type written without `(rec …)` is its
+    /// own singleton group, which is what the spec says it is.
+    ///
+    /// Kept because the group — not the individual type — is the unit of identity, so anything that
+    /// re-derives identity later (the store's cross-module type registry) needs the boundaries, and
+    /// they cannot be recovered from `type_canon` alone.
+    pub rec_groups: Vec<(u32, u32)>,
     /// **Canonical type identity**, parallel to `comp_types`: `type_canon[t]` is the *lowest* type
     /// index structurally equal to `t`, so two types are the same type iff their entries match.
     ///
@@ -520,6 +536,7 @@ struct Decoder {
     supertypes: Vec<Option<u32>>,
     type_finals: Vec<bool>,
     type_canon: Vec<u32>,
+    rec_groups: Vec<(u32, u32)>,
     /// Composite kind of each type index, pre-scanned before bodies are decoded so a
     /// `(ref $t)` value type can collapse to the right family even for a forward reference.
     type_kinds: Vec<CompKind>,
@@ -662,6 +679,7 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
         supertypes: d.supertypes,
         type_finals: d.type_finals,
         type_canon: d.type_canon,
+        rec_groups: d.rec_groups,
         functions,
         tags,
         imports,
@@ -942,6 +960,7 @@ fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
         groups.push((start, comp.len() as u32 - start));
     }
     d.type_canon = canonicalize(&comp, &supers, &finals, &groups);
+    d.rec_groups = groups;
     d.comp_types = comp;
     d.supertypes = supers;
     d.type_finals = finals;
@@ -979,6 +998,27 @@ fn canonicalize(
         }
     }
     canon
+}
+
+/// The structural key of one rec group, keyed against **arbitrary already-assigned ids** for types
+/// outside the group.
+///
+/// `outside` maps a type index to whatever identity the caller is keying by. Two callers use this with
+/// different notions of identity and both need the same normalisation:
+///
+/// * [`canonicalize`] passes the module-local canonical ids, giving keys comparable **within** a module.
+/// * [`crate::interp::Store`]'s type registry passes the **store-wide** ids of the module's earlier
+///   groups, giving keys comparable **across** modules — which is the whole point of the registry, and
+///   is why this is parameterised rather than reading `canon` directly.
+pub(crate) fn rec_group_key_with(
+    comp: &[CompType],
+    supers: &[Option<u32>],
+    finals: &[bool],
+    outside: &[u32],
+    start: u32,
+    len: u32,
+) -> Vec<u8> {
+    rec_group_key(comp, supers, finals, outside, start, len)
 }
 
 /// The structural key of one rec group: every member in order, with type references normalised.
@@ -1239,11 +1279,15 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
         let module = read_name(r)?;
         let name = read_name(r)?;
         let kind = ExternKind::from_u8(r.read_byte()?).ok_or(DecodeError::UnknownExternKind)?;
+        let mut func_type_index = None;
         let ty = match kind {
             ExternKind::Func => {
                 let ti = r.read_var_u32()?;
                 let ft = func_type_at(d, ti)?;
                 d.func_space.push(ft.clone());
+                // Kept alongside the resolved signature: identity questions need the index, not
+                // the structure. See `Import::func_type_index`.
+                func_type_index = Some(ti);
                 Extern::Func(ft)
             }
             ExternKind::Table => {
@@ -1276,7 +1320,12 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
                 Extern::Tag(ft)
             }
         };
-        list.push(Import { module, name, ty });
+        list.push(Import {
+            module,
+            name,
+            ty,
+            func_type_index,
+        });
     }
     Ok(list)
 }

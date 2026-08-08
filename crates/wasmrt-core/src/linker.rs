@@ -767,6 +767,97 @@ mod tests {
         );
     }
 
+    /// **Cross-module import matching is decided by type IDENTITY, not by comparing signatures.**
+    ///
+    /// Both functions here are the empty `(func)`, so any param/result comparison links them — and the
+    /// spec says they are different types. Rec-group membership is part of identity: the exporter's
+    /// type sits in a group whose sibling refers *outward*, the importer's in a group whose sibling
+    /// refers *inward*. Only the type *index*, resolved to a store-wide id, carries that.
+    /// Reduced from `type-subtyping.wast`'s `M10` case, which linked until the registry existed.
+    #[test]
+    fn a_cross_module_func_import_is_matched_by_identity_not_by_shape() {
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let provider = l
+            .instantiate(
+                &mut store,
+                md(r#"(module
+                       (rec (type $f11 (sub (func))) (type $f12 (sub $f11 (func))))
+                       (rec (type $f21 (sub (func))) (type $f22 (sub $f11 (func))))
+                       (func (export "f") (type $f21)))"#),
+            )
+            .unwrap()
+            .unwrap();
+        l.define_instance("lib", provider);
+        // The importer's `$f11` is a DIFFERENT type from the exporter's `$f21`, despite both being
+        // `(func)`. Refused.
+        assert_eq!(
+            l.instantiate(
+                &mut store,
+                md(r#"(module
+                       (rec (type $f11 (sub (func))) (type $f12 (sub $f11 (func))))
+                       (func (import "lib" "f") (type $f11)))"#),
+            )
+            .unwrap()
+            .err(),
+            Some(Trap::IncompatibleImport)
+        );
+        // And a declaration naming the SAME type links — the check is not simply refusing everything.
+        assert!(
+            l.instantiate(
+                &mut store,
+                md(r#"(module
+                       (rec (type $f11 (sub (func))) (type $f12 (sub $f11 (func))))
+                       (rec (type $f21 (sub (func))) (type $f22 (sub $f11 (func))))
+                       (func (import "lib" "f") (type $f21)))"#),
+            )
+            .unwrap()
+            .is_ok()
+        );
+    }
+
+    /// §4.5.9 matching is **subtyping**, not equality: a function whose type is a *subtype* of the
+    /// declared import type links; the reverse direction must not. Equality refused three valid
+    /// `type-subtyping.wast` modules before the registry recorded supertypes store-wide.
+    #[test]
+    fn a_cross_module_func_import_accepts_a_subtype_and_only_a_subtype() {
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let types = r#"(type $t0 (sub (func (result (ref null func)))))
+                       (rec (type $t1 (sub $t0 (func (result (ref null $t1))))))"#;
+        let provider = l
+            .instantiate(
+                &mut store,
+                md(&format!(
+                    r#"(module {types}
+                        (func (export "f0") (type $t0) (ref.null func))
+                        (func (export "f1") (type $t1) (ref.null $t1)))"#
+                )),
+            )
+            .unwrap()
+            .unwrap();
+        l.define_instance("lib", provider);
+        // f1 : $t1, declared $t0 — links, because $t1 <: $t0.
+        assert!(
+            l.instantiate(
+                &mut store,
+                md(&format!(r#"(module {types} (func (import "lib" "f1") (type $t0)))"#)),
+            )
+            .unwrap()
+            .is_ok()
+        );
+        // f0 : $t0, declared $t1 — the wrong direction, refused.
+        assert_eq!(
+            l.instantiate(
+                &mut store,
+                md(&format!(r#"(module {types} (func (import "lib" "f0") (type $t1)))"#)),
+            )
+            .unwrap()
+            .err(),
+            Some(Trap::IncompatibleImport)
+        );
+    }
+
     #[test]
     fn a_global_import_of_the_wrong_type_does_not_link() {
         let mut store = Store::new();
