@@ -120,6 +120,13 @@ struct Runner {
     named: Vec<(String, InstanceId)>,
     /// Modules published by `(register "name")`, which later modules may import from.
     registered: Vec<(String, InstanceId)>,
+    /// The instance that owns `spectest`'s exported memory, built on first use.
+    ///
+    /// A memory's identity in this engine *is* a store slot, so `spectest.memory` cannot be
+    /// conjured from a factory the way its `print*` functions are — something must own it. This
+    /// is that owner: a one-field module instantiated into the same store, so a guest importing
+    /// `(memory 1 2)` genuinely shares its bytes.
+    spectest_mem: Option<InstanceId>,
     summary: Summary,
 }
 
@@ -227,10 +234,36 @@ impl Runner {
         ] {
             l.define_global("spectest", name, v);
         }
+        if let Some(id) = self.spectest_mem {
+            l.define_memory("spectest", "memory", id, 0);
+        }
         for (name, id) in &self.registered {
             l.define_instance(name, *id);
         }
         l
+    }
+
+    /// Ensure `spectest`'s memory exists, so [`Runner::linker`] can name it.
+    ///
+    /// `(memory 1 2)` is the type the suite declares for it — the exact limits matter, because
+    /// `imports.wast` asserts that importing it with a *wider* type is unlinkable. Built lazily
+    /// so a script that never mentions it pays nothing, and once, so every importer in a script
+    /// shares one memory (which is what `spectest` means).
+    fn ensure_spectest_memory(&mut self) {
+        if self.spectest_mem.is_some() {
+            return;
+        }
+        // Assembled from source rather than hand-built bytes: it goes through the same
+        // assembler the suite's own modules do, so it cannot drift from what that accepts.
+        let Ok(bytes) = crate::wat::assemble(b"(module (memory (export \"memory\") 1 2))") else {
+            return;
+        };
+        let Ok(md) = crate::module::decode(&bytes) else {
+            return;
+        };
+        if let Ok(id) = self.store.instantiate(md, Imports::new()) {
+            self.spectest_mem = Some(id);
+        }
     }
 
     /// Resolve a module's declared imports against `spectest` and the registered modules.
@@ -240,13 +273,16 @@ impl Runner {
     /// binding two same-kind imports in the wrong order links fine and misroutes every
     /// call, so it must be written once.
     fn resolve_imports(&mut self, md: &Module) -> Result<Imports, BuildErr> {
-        // Imported memories and tables need shared-resource linking, which the engine does
-        // not do yet, and `LinkError` does not distinguish "unresolved" finely enough for
-        // the runner's skip accounting — so both collapse to `Unresolved`, exactly as
-        // before.
+        // An imported table still has no correct backing (T9a#4), and `LinkError` does not
+        // distinguish "unresolved" finely enough for the runner's skip accounting — so every
+        // link failure collapses to `Unresolved`, exactly as before.
+        self.ensure_spectest_memory();
         self.linker()
             .resolve(&self.store, md)
-            .map_err(|_| BuildErr::Unresolved)
+            .map_err(|e| match e {
+                crate::linker::LinkError::UnsupportedImportKind(k) => BuildErr::UnsupportedLink(k),
+                other => BuildErr::Unlinkable(other),
+            })
     }
 
     fn build(&mut self, form: &[Sexpr]) -> Result<InstanceId, BuildErr> {
@@ -468,11 +504,31 @@ impl Runner {
         }
     }
 
-    /// `assert_unlinkable (module …) "reason"` — valid, but must fail to link. Linking
-    /// needs host imports, which the interpreter does not support yet, so these are
-    /// skipped rather than counted either way.
-    fn assert_unlinkable(&mut self, _form: &[Sexpr]) {
-        self.summary.skipped += 1;
+    /// `assert_unlinkable (module …) "reason"` — the module is well-formed and valid, but must
+    /// fail to **link**.
+    ///
+    /// The stage is the whole assertion, exactly as for `assert_invalid` / `assert_malformed`:
+    /// a module we turn away at assembly, decoding or validation did not demonstrate an
+    /// unlinkable *link*, so that is scored a failure, not a pass. Anything wasmrt cannot back
+    /// at all stays a skip.
+    fn assert_unlinkable(&mut self, form: &[Sexpr]) {
+        let Some(inner) = form.get(1).filter(|s| s.keyword() == Some("module")) else {
+            self.summary.skipped += 1;
+            return;
+        };
+        match self.build(inner.as_list().unwrap_or(&[])) {
+            Ok(_) => self.fail(format!(
+                "Unlinkable: module linked (should fail to link: {})",
+                match form.get(2) {
+                    Some(Sexpr::Str(b)) => String::from_utf8_lossy(b).into_owned(),
+                    Some(Sexpr::Atom(a)) => a.clone(),
+                    _ => String::from("<no reason given>"),
+                }
+            )),
+            Err(e) if e.is_unsupported() => self.summary.skipped += 1,
+            Err(e) if e.is_link_failure() => self.summary.passed += 1,
+            Err(e) => self.fail(format!("Unlinkable: rejected before linking ({e})")),
+        }
     }
 }
 
@@ -511,9 +567,13 @@ impl Rejection {
 /// Why a module failed to become an instance — the stage matters for the assertions.
 enum BuildErr {
     Assemble(wat::Error),
-    /// An import naming a module this script has not registered, or a kind the engine
-    /// cannot link yet (memory/table). Counts as a SKIP, never a pass or a failure.
-    Unresolved,
+    /// Linking failed with a real **verdict on the module**: it names an import nothing
+    /// provides, or provides it as the wrong kind. This is what `assert_unlinkable` asks for.
+    Unlinkable(crate::linker::LinkError),
+    /// Linking could not be attempted at all, because wasmrt cannot back the kind — an imported
+    /// table (T9a#4) or a tag. A SKIP: the module was never put to the test, and scoring a gap
+    /// as a pass is how a missing feature comes to look like conformance.
+    UnsupportedLink(crate::types::ExternKind),
     Decode(crate::types::DecodeError),
     Validate(crate::validate::ValidateError),
     Instantiate(Trap),
@@ -527,11 +587,21 @@ impl BuildErr {
             self,
             BuildErr::Assemble(
                 wat::Error::Unsupported(_) | wat::Error::UnknownInstr | wat::Error::NotAModule
-            ) | BuildErr::Unresolved
+            ) | BuildErr::UnsupportedLink(_)
                 | BuildErr::Validate(crate::validate::ValidateError::UnsupportedValidation)
-                | BuildErr::Instantiate(
-                    Trap::MissingImport | Trap::UnsupportedImportKind | Trap::UnsupportedInstruction
-                )
+                | BuildErr::Instantiate(Trap::UnsupportedImportKind | Trap::UnsupportedInstruction)
+        )
+    }
+
+    /// Did this module get all the way to **linking** and fail there? That is the outcome
+    /// `assert_unlinkable` demands, and it is deliberately narrower than "failed to build":
+    /// a module rejected at assembly, decoding or validation was never linked, so counting it
+    /// would let a decoder bug masquerade as a conformance pass.
+    fn is_link_failure(&self) -> bool {
+        matches!(
+            self,
+            BuildErr::Unlinkable(_)
+                | BuildErr::Instantiate(Trap::MissingImport | Trap::IncompatibleImport)
         )
     }
 }
@@ -540,7 +610,8 @@ impl fmt::Display for BuildErr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuildErr::Assemble(e) => write!(f, "assemble: {e}"),
-            BuildErr::Unresolved => f.write_str("unresolved import"),
+            BuildErr::Unlinkable(e) => write!(f, "link: {e}"),
+            BuildErr::UnsupportedLink(k) => write!(f, "cannot link an imported {k:?} yet"),
             BuildErr::Decode(e) => write!(f, "decode: {e}"),
             BuildErr::Validate(e) => write!(f, "validate: {e}"),
             BuildErr::Instantiate(t) => write!(f, "instantiate: {t}"),

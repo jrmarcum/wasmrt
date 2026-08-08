@@ -11,8 +11,9 @@
 //! enough to run a compute module (`fib`, `factorial`, `add`). Float arithmetic and linear
 //! memory land in 0.6.1; tables, reference types, GC, SIMD, threads, and exception handling in
 //! later 0.6.x slices. **Anything not yet executed traps loudly** ([`Trap::UnsupportedInstruction`]),
-//! never silent-wrong. Host imports link through [`Imports`]; imported memories and tables still
-//! need the module-linking model and reject loudly ([`Trap::UnsupportedImportKind`]).
+//! never silent-wrong. Host imports link through [`Imports`], as do imported **memories**
+//! (shared with the exporting instance, never copied); imported **tables** still reject loudly
+//! ([`Trap::UnsupportedImportKind`]) until a `funcref` carries its owning instance.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -196,6 +197,11 @@ pub struct Memory {
     pub is64: bool,
     /// A `shared` memory (threads proposal) — required by `memory.atomic.wait*`.
     pub shared: bool,
+    /// The **declared** minimum in pages, kept alongside the current size because import
+    /// matching (§4.5.9) compares declared *types*, not current sizes. After a `memory.grow`
+    /// the two differ, and matching on the current size would accept an import whose declared
+    /// minimum was never large enough.
+    pub min: u64,
 }
 
 /// A reference table: `Value` slots (`NULL_REF` = uninitialized; a funcref is its function
@@ -353,9 +359,17 @@ pub enum Trap {
     UnsupportedInstruction,
     /// The host supplied fewer (or more) imports than the module declares.
     MissingImport,
-    /// An imported memory or table — those must be *shared* with the exporting instance,
-    /// which needs the module-linking model (T7b). Loud rather than silently private.
+    /// An imported **table**. A table holds `funcref`s, and a `funcref` is currently a bare
+    /// function index with no instance identity — so a table shared between two instances
+    /// would have `call_indirect` resolve an entry against the *calling* instance and dispatch
+    /// to the wrong function. Refused loudly until the funcref encoding carries its owner
+    /// (`cmem/known-issues.md`, T9a#4). Imported *memories* are supported: bytes have no
+    /// identity problem.
     UnsupportedImportKind,
+    /// An import resolved to a definition of the right kind whose **type** does not satisfy the
+    /// declared import type (§4.5.9) — a memory whose limits are too narrow, or a function whose
+    /// signature differs from the one the importer declared.
+    IncompatibleImport,
     /// A host function signalled failure. Hosts may also return any other [`Trap`].
     HostTrap,
     /// A body failed to decode at instantiation.
@@ -409,7 +423,10 @@ impl fmt::Display for Trap {
             }
             Trap::MissingImport => f.write_str("import count does not match the module"),
             Trap::UnsupportedImportKind => {
-                f.write_str("imported memories and tables are not linkable yet")
+                f.write_str("imported tables are not linkable yet")
+            }
+            Trap::IncompatibleImport => {
+                f.write_str("an import does not match the declared import type")
             }
             Trap::HostTrap => f.write_str("host function trapped"),
             Trap::Decode(e) => write!(f, "decode error at instantiation: {e}"),
@@ -518,6 +535,10 @@ pub struct Imports {
     /// each to the right slot.
     funcs: Vec<ImportedFunc>,
     pub globals: Vec<Value>,
+    /// Memory backings **in declaration order**. A memory is never copied in: the backing
+    /// names another instance's memory, and instantiation resolves it to that instance's
+    /// store slot, so both instances index the same bytes.
+    memories: Vec<MemoryImport>,
 }
 
 impl fmt::Debug for Imports {
@@ -527,6 +548,7 @@ impl fmt::Debug for Imports {
         f.debug_struct("Imports")
             .field("funcs", &self.funcs.len())
             .field("globals", &self.globals.len())
+            .field("memories", &self.memories.len())
             .finish()
     }
 }
@@ -535,6 +557,15 @@ impl fmt::Debug for Imports {
 enum ImportedFunc {
     Host(HostFunc),
     Wasm(FuncTarget),
+}
+
+/// One memory import's backing: **another instance's** memory, named by that instance and its
+/// own memory index. Deliberately not a store slot — an embedder holds [`InstanceId`]s and has
+/// no business knowing pool layout, and resolving here keeps the mapping in one place.
+#[derive(Clone, Copy)]
+struct MemoryImport {
+    instance: usize,
+    index: u32,
 }
 
 impl Imports {
@@ -579,6 +610,36 @@ impl Imports {
         }));
         self
     }
+
+    /// Satisfy a memory import with **another instance's** memory, named by that instance's
+    /// own memory index. Appended in the order the module declares its memory imports.
+    ///
+    /// The two instances then share the *same* bytes — a write through either is visible
+    /// through the other by construction, because both maps hold one store slot. That is the
+    /// whole point of an imported memory, and it is why nothing is copied.
+    #[must_use]
+    pub fn with_instance_memory(mut self, instance: InstanceId, index: u32) -> Imports {
+        self.memories.push(MemoryImport {
+            instance: instance.0,
+            index,
+        });
+        self
+    }
+}
+
+/// Does an existing memory satisfy a declared import type? §4.5.9 matching, which compares
+/// **types**: the actual minimum must be at least the declared one, and a declared maximum
+/// requires the actual to have one no larger (an unbounded memory never satisfies a bounded
+/// import). The index type and `shared` flag must be equal, not merely compatible — they change
+/// what instructions are legal against the memory, so neither direction is substitutable.
+fn memory_import_matches(actual: &Memory, declared: &crate::module::MemoryType) -> bool {
+    actual.is64 == declared.limits.is64
+        && actual.shared == declared.limits.shared
+        && actual.min >= declared.limits.min
+        && match declared.limits.max {
+            Some(m) => actual.max.is_some_and(|a| a <= m),
+            None => true,
+        }
 }
 
 /// What backs one of an instance's **imported** functions.
@@ -661,7 +722,9 @@ impl Instance {
     ///
     /// # Errors
     /// [`Trap::MissingImport`] if a count does not match what the module declares, or
-    /// [`Trap::UnsupportedImportKind`] for an imported memory/table (module linking, T7b).
+    /// [`Trap::UnsupportedImportKind`] for an imported table. A memory import needs another
+    /// instance to share from, so it is only reachable through [`Store`] — a lone `Instance`
+    /// declaring one gets [`Trap::MissingImport`].
     pub fn new_with_imports(module: Module, imports: Imports) -> Result<Instance> {
         Instance::new_with(module, imports, ResourceLimits::defaults())
     }
@@ -757,6 +820,24 @@ impl Store {
         self.pools.globals.get(data.maps.global(index)).copied()
     }
 
+    /// The declared **type** of an instance's exported global.
+    ///
+    /// Separate from [`Store::export_global`], which returns the value, because import matching
+    /// (§4.5.9) compares types: a value alone cannot say whether the global was declared
+    /// mutable, and `i32`/`f32` are indistinguishable once both are bits in a slot.
+    #[must_use]
+    pub fn export_global_type(
+        &self,
+        id: InstanceId,
+        name: &str,
+    ) -> Option<crate::module::GlobalType> {
+        let data = self.code.get(id.0)?;
+        let index = data.module.exports.iter().find_map(|e| {
+            (e.name == name && e.ty.kind() == crate::types::ExternKind::Global).then_some(e.index)
+        })?;
+        data.module.globals.get(index as usize).copied()
+    }
+
     /// How many instances this store holds. An [`InstanceId`] is valid here iff its index
     /// is below this.
     #[must_use]
@@ -823,9 +904,10 @@ impl Store {
     /// Instantiate a module into this store, linking `imports` against its declared imports.
     ///
     /// # Errors
-    /// [`Trap::MissingImport`] if a count does not match, [`Trap::UnsupportedImportKind`]
-    /// for an import kind this store cannot yet back, or a trap from evaluating an
-    /// initializer or applying an active segment.
+    /// [`Trap::MissingImport`] if a count does not match, [`Trap::UnsupportedImportKind`] for
+    /// an imported table, [`Trap::IncompatibleImport`] if a supplied memory does not satisfy
+    /// the declared import type, or a trap from evaluating an initializer or applying an active
+    /// segment.
     pub fn instantiate(&mut self, module: Module, imports: Imports) -> Result<InstanceId> {
         if module.functions.len() != module.code.len() {
             return Err(Trap::UndefinedFunc);
@@ -844,16 +926,63 @@ impl Store {
                 crate::types::ExternKind::Tag => {}
             }
         }
-        // Imported memories and tables must be SHARED with the exporting instance, which
-        // needs the shared-ownership model that lands with module linking. Reject loudly
-        // rather than silently allocating a private one the exporter cannot see.
-        if n_mems > 0 || n_tables > 0 {
+        // An imported TABLE is still refused, and not for want of plumbing: a `funcref` is a
+        // bare function index with no instance identity, so `call_indirect` on a shared table
+        // would dispatch against the *calling* instance and silently call the wrong function.
+        // Refusing to link beats linking and mis-dispatching (`cmem/known-issues.md`, T9a#4).
+        if n_tables > 0 {
             return Err(Trap::UnsupportedImportKind);
         }
         // A function import may be backed by a host callback OR another instance's export,
         // so both pools count toward the declared total.
-        if imports.funcs.len() != n_funcs || imports.globals.len() != n_globals {
+        if imports.funcs.len() != n_funcs
+            || imports.globals.len() != n_globals
+            || imports.memories.len() != n_mems
+        {
             return Err(Trap::MissingImport);
+        }
+
+        // Import type matching for functions (§4.5.9). Checked here rather than in the linker
+        // because this is the one place every caller passes through — a hand-built `Imports`
+        // gets the same check the `Linker` does.
+        //
+        // Only a backing whose type is KNOWN can be checked. A [`HostFunc`] is a bare closure
+        // with no declared signature (the C ABI cannot express one either), so a host import is
+        // taken on trust; a wasm→wasm backing does carry a signature, and binding it to a
+        // mismatched declaration is the silent-wrong-call class — the guest would marshal
+        // arguments for one shape and the callee read another.
+        let mut declared_funcs = module.imports.iter().filter_map(|i| match &i.ty {
+            crate::module::Extern::Func(ft) => Some(ft),
+            _ => None,
+        });
+        for backing in &imports.funcs {
+            let declared = declared_funcs.next().ok_or(Trap::MissingImport)?;
+            if let ImportedFunc::Wasm(FuncTarget::Wasm { instance, func }) = backing {
+                let actual = self
+                    .code
+                    .get(*instance)
+                    .and_then(|d| d.module.func_type(*func))
+                    .ok_or(Trap::MissingImport)?;
+                // Structural equality, not subtyping — deliberately, and the choice was measured
+                // rather than assumed.
+                //
+                // §4.5.9 matching is subtyping, and a `ValType` naming a *concrete* GC type packs
+                // a **module-local type index**, so deciding it properly needs cross-module type
+                // canonicalisation, which this engine does not do (logged in `known-issues.md`).
+                // Equality is therefore an approximation, and the question is which way it may
+                // err. It errs toward **refusing** a link that subtyping would allow — never
+                // toward accepting one it would refuse. That is the direction the standing rule
+                // wants: a refused link announces itself, a wrongly-bound one dispatches a call
+                // whose arguments and signature disagree and says nothing.
+                //
+                // Exempting concrete-typed signatures instead was tried and is *worse* on both
+                // counts: it costs 3 correct refusals in `type-subtyping.wast` to recover 1 false
+                // one in `type-equivalence.wast`, trading three silent mis-links for one loud
+                // over-strictness. The residual is that single assertion.
+                if actual != *declared {
+                    return Err(Trap::IncompatibleImport);
+                }
+            }
         }
 
         // Globals: the imported values occupy the low indices, then each defined
@@ -866,11 +995,32 @@ impl Store {
             globals.push(v);
         }
 
-        // Linear memories: allocate each defined memory sized to its declared minimum
+        // Imported memories occupy the LOW memory indices, so resolve them first — each to the
+        // exporting instance's existing store slot, never to a fresh allocation. `maps.mem`
+        // yields `usize::MAX` for an out-of-range index, which the pool lookup then rejects, so
+        // a bogus backing cannot alias some other instance's memory.
+        let mut imported_mems: Vec<usize> = Vec::with_capacity(n_mems);
+        for (i, im) in imports.memories.iter().enumerate() {
+            let slot = self
+                .code
+                .get(im.instance)
+                .map_or(usize::MAX, |d| d.maps.mem(im.index));
+            let actual = self.pools.memories.get(slot).ok_or(Trap::MissingImport)?;
+            // `module.memories` is the whole index space, imports first, so index `i` is this
+            // import's declared type.
+            let declared = module.memories.get(i).ok_or(Trap::MissingImport)?;
+            if !memory_import_matches(actual, declared) {
+                return Err(Trap::IncompatibleImport);
+            }
+            imported_mems.push(slot);
+        }
+
+        // Linear memories: allocate each *defined* memory sized to its declared minimum
         // (demand-zero via `vec![0; n]`), bounded by the per-instance budget.
-        let mut memories: Vec<Memory> = Vec::with_capacity(module.memories.len());
+        let defined_mems = module.memories.get(n_mems..).unwrap_or(&[]);
+        let mut memories: Vec<Memory> = Vec::with_capacity(defined_mems.len());
         let mut total_bytes: usize = 0;
-        for mt in &module.memories {
+        for mt in defined_mems {
             let min_pages = usize::try_from(mt.limits.min).map_err(|_| Trap::MemoryLimitExceeded)?;
             let nbytes = min_pages
                 .checked_mul(PAGE_SIZE)
@@ -884,17 +1034,29 @@ impl Store {
                 max: mt.limits.max,
                 is64: mt.limits.is64,
                 shared: mt.limits.shared,
+                min: mt.limits.min,
             });
         }
 
         // Apply active data segments, then mark them (and only them) dropped (§4.5.4).
+        //
+        // A segment may target an imported memory, which already lives in the pools, or a
+        // defined one, which is still local until this instantiation commits. Splitting on the
+        // index keeps the *defined* resources out of the store until every step has succeeded —
+        // so a later failure leaves no orphaned slots. An imported memory is inherently shared,
+        // so a write to it is visible whatever happens next; that is the exporter's memory, and
+        // the spec's instantiation is not transactional over it either.
         for seg in &module.data {
             if !seg.active {
                 continue;
             }
-            let mem = memories
-                .get_mut(seg.mem_index as usize)
-                .ok_or(Trap::NoMemory)?;
+            let mi = seg.mem_index as usize;
+            let mem: &mut Memory = if mi < n_mems {
+                let slot = *imported_mems.get(mi).ok_or(Trap::NoMemory)?;
+                self.pools.memories.get_mut(slot).ok_or(Trap::NoMemory)?
+            } else {
+                memories.get_mut(mi - n_mems).ok_or(Trap::NoMemory)?
+            };
             let offset = eval_const_offset(&seg.offset_expr, &globals, mem.is64)?;
             let start = usize::try_from(offset).map_err(|_| Trap::MemoryOutOfBounds)?;
             let end = start
@@ -976,8 +1138,15 @@ impl Store {
         // one point at another instance's existing slot instead — everything downstream
         // already reads through them.
         let base = |n: usize, len: usize| (n..n + len).collect::<Vec<_>>();
+        let mem_base = self.pools.memories.len();
         let maps = IndexMaps {
-            memories: base(self.pools.memories.len(), memories.len()),
+            // Imported memories keep the exporter's slots; defined ones take fresh slots after
+            // them. Index order therefore matches the module's own memory index space.
+            memories: imported_mems
+                .iter()
+                .copied()
+                .chain(mem_base..mem_base + memories.len())
+                .collect(),
             tables: base(self.pools.tables.len(), tables.len()),
             globals: base(self.pools.globals.len(), globals.len()),
             data: base(self.pools.data_dropped.len(), data_dropped.len()),
@@ -5785,10 +5954,10 @@ mod tests {
     }
 
     #[test]
-    fn imported_memories_reject_loudly() {
-        // Sharing a memory with the exporting instance needs the module-linking model, so
-        // this must fail visibly rather than quietly allocating a private memory the
-        // exporter cannot see.
+    fn a_lone_instance_cannot_satisfy_a_memory_import() {
+        // A memory import needs another instance to share from, so there is nothing a
+        // single-instance `Instance::new` can bind it to. It must fail visibly rather than
+        // quietly allocating a private memory the exporter cannot see.
         let m = asm(&[
             (1, vec![0x01, 0x60, 0x00, 0x00]),
             (
@@ -5799,7 +5968,199 @@ mod tests {
             (10, code1(&[0x00, 0x0b])),
         ]);
         let md = decode(&m).unwrap();
-        assert_eq!(Instance::new(md).err(), Some(Trap::UnsupportedImportKind));
+        assert_eq!(Instance::new(md).err(), Some(Trap::MissingImport));
+    }
+
+    #[test]
+    fn imported_tables_still_reject_loudly() {
+        // Not plumbing: a `funcref` is a bare function index, so `call_indirect` on a shared
+        // table resolves against the CALLING instance and would silently call the wrong
+        // function (T9a#4). Refusing to link is the correct behaviour until the funcref value
+        // carries its owner — this test is what keeps that refusal from being "fixed" by
+        // accident.
+        let m = crate::wat::assemble(
+            br#"(module (import "env" "t" (table 1 funcref)) (func (export "f")))"#,
+        )
+        .unwrap();
+        let md = decode(&m).unwrap();
+        assert_eq!(
+            Instance::new(md).err(),
+            Some(Trap::UnsupportedImportKind)
+        );
+    }
+
+    // --- imported memories (T9a#4, the memory half) ---
+
+    /// Two instances, one memory: a write through the *importer* must be visible to the
+    /// *exporter*. Copying the bytes at link time would pass a one-instance test and fail this.
+    #[test]
+    fn an_imported_memory_is_the_same_memory() {
+        let mut store = Store::new();
+        let provider = store
+            .instantiate(
+                decode(
+                    &crate::wat::assemble(
+                        br#"(module (memory (export "m") 1)
+                             (func (export "peek") (result i32) (i32.load (i32.const 4))))"#,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                Imports::new(),
+            )
+            .unwrap();
+        let index = store
+            .export_index(provider, "m", crate::types::ExternKind::Memory)
+            .unwrap();
+        let consumer = store
+            .instantiate(
+                decode(
+                    &crate::wat::assemble(
+                        br#"(module (import "env" "m" (memory 1))
+                             (func (export "poke") (i32.store (i32.const 4) (i32.const 0x2a))))"#,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                Imports::new().with_instance_memory(provider, index),
+            )
+            .unwrap();
+        store.invoke(consumer, "poke", &[]).unwrap();
+        // Read it back through the PROVIDER, whose own memory index is its own.
+        assert_eq!(as_i32(store.invoke(provider, "peek", &[]).unwrap()[0]), 0x2a);
+    }
+
+    /// The shared-store defect class one level down: the importer's memory index 0 must resolve
+    /// to the *provider's* slot, not to slot 0 of the pool. Two providers make the two differ —
+    /// with one, the wrong answer and the right one coincide.
+    #[test]
+    fn an_imported_memory_resolves_through_the_maps_not_by_raw_index() {
+        let mut store = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        // Slot 0: a decoy holding 0x11 at address 0.
+        let decoy = store
+            .instantiate(
+                mk(br#"(module (memory (export "m") 1) (data (i32.const 0) "\11\00\00\00"))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        // Slot 1: the memory actually imported, holding 0x22.
+        let real = store
+            .instantiate(
+                mk(br#"(module (memory (export "m") 1) (data (i32.const 0) "\22\00\00\00"))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        let index = store
+            .export_index(real, "m", crate::types::ExternKind::Memory)
+            .unwrap();
+        let consumer = store
+            .instantiate(
+                mk(br#"(module (import "env" "m" (memory 1))
+                        (func (export "read") (result i32) (i32.load (i32.const 0))))"#),
+                Imports::new().with_instance_memory(real, index),
+            )
+            .unwrap();
+        assert_eq!(as_i32(store.invoke(consumer, "read", &[]).unwrap()[0]), 0x22);
+        let _ = decoy;
+    }
+
+    /// An active data segment in the *importer* writes into the imported memory, which lives in
+    /// the pools already rather than in the instantiation's local vector — the one place the two
+    /// code paths for "which memory" diverge.
+    #[test]
+    fn an_active_data_segment_targets_the_imported_memory() {
+        let mut store = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let provider = store
+            .instantiate(
+                mk(br#"(module (memory (export "m") 1)
+                        (func (export "peek") (result i32) (i32.load (i32.const 8))))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        let index = store
+            .export_index(provider, "m", crate::types::ExternKind::Memory)
+            .unwrap();
+        store
+            .instantiate(
+                mk(br#"(module (import "env" "m" (memory 1)) (data (i32.const 8) "\77\00\00\00"))"#),
+                Imports::new().with_instance_memory(provider, index),
+            )
+            .unwrap();
+        assert_eq!(as_i32(store.invoke(provider, "peek", &[]).unwrap()[0]), 0x77);
+    }
+
+    /// §4.5.9 limits matching. Importing `(memory 2)` from a memory declared `(memory 1)` must
+    /// be refused — the guest would otherwise index pages that do not exist.
+    #[test]
+    fn a_memory_import_whose_limits_do_not_match_is_refused() {
+        let mut store = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let provider = store
+            .instantiate(mk(br#"(module (memory (export "m") 1))"#), Imports::new())
+            .unwrap();
+        let index = store
+            .export_index(provider, "m", crate::types::ExternKind::Memory)
+            .unwrap();
+        assert_eq!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "env" "m" (memory 2)))"#),
+                    Imports::new().with_instance_memory(provider, index),
+                )
+                .err(),
+            Some(Trap::IncompatibleImport)
+        );
+        // An unbounded memory does not satisfy a *bounded* import either: the importer's
+        // declared ceiling would not be enforced.
+        assert_eq!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "env" "m" (memory 1 4)))"#),
+                    Imports::new().with_instance_memory(provider, index),
+                )
+                .err(),
+            Some(Trap::IncompatibleImport)
+        );
+        // And the same type does match.
+        assert!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "env" "m" (memory 1)))"#),
+                    Imports::new().with_instance_memory(provider, index),
+                )
+                .is_ok()
+        );
+    }
+
+    /// Matching compares declared *types*, not current sizes. A memory grown past its declared
+    /// minimum must still fail an import that asks for more than it was declared with —
+    /// otherwise a `memory.grow` in the exporter silently changes what links.
+    #[test]
+    fn memory_import_matching_uses_the_declared_minimum_not_the_grown_size() {
+        let mut store = Store::new();
+        let mk = |src: &[u8]| decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        let provider = store
+            .instantiate(
+                mk(br#"(module (memory (export "m") 1)
+                        (func (export "grow") (result i32) (memory.grow (i32.const 3))))"#),
+                Imports::new(),
+            )
+            .unwrap();
+        assert_eq!(as_i32(store.invoke(provider, "grow", &[]).unwrap()[0]), 1);
+        let index = store
+            .export_index(provider, "m", crate::types::ExternKind::Memory)
+            .unwrap();
+        assert_eq!(
+            store
+                .instantiate(
+                    mk(br#"(module (import "env" "m" (memory 4)))"#),
+                    Imports::new().with_instance_memory(provider, index),
+                )
+                .err(),
+            Some(Trap::IncompatibleImport)
+        );
     }
 
     // --- module linking (T7b) ---

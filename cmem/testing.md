@@ -18,16 +18,39 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-07, T9 first pass)
+## Spec-suite conformance — current (2026-08-08, T9a#4 memory half)
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | **T9a/b (08-07)** |
-| --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | **61,247** |
-| failed | 871 | 1,521 | 751 | 738 | **655** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | **2,932** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | **98.9%** of 61,902 adjudicated |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a/b (08-07) | **T9a#4 (08-08)** |
+| --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,247 | **61,593** |
+| failed | 871 | 1,521 | 751 | 738 | 655 | **697** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,932 | **2,469** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | **98.9%** of 62,290 adjudicated |
+
+### The 08-08 column: +346 passes, +42 failures, −463 skips, and **no file lost a single pass**
+
+Two changes produced it, and the second one is the one worth remembering.
+
+- **Imported memories now link** (T9a#4's memory half). `imports.wast` **25/6/108 → 196/13/95** — the
+  largest single-file gain since the `register` work — `linking.wast` **55/15/78 → 107/11/28** (failures
+  *down* as well as skips), `linking3.wast` 4/4/4 → 8/2/2.
+- **`assert_unlinkable` is adjudicated for the first time.** It had been an unconditional skip since the
+  runner was written, which meant **nothing had ever checked that a badly-typed import is refused** — and
+  the first thing switching it on revealed is that imports were **not type-checked at link time at all**.
+  A module importing `(func (param i32))` bound to a `(func)` linked and then ran, caller and callee
+  disagreeing about the stack. That is the silent-wrong-output class, found by making a skip honest.
+
+**The +42 failures are all previously-unadjudicated assertions becoming visible verdicts**, the same
+accounting as 08-04 and 08-06 — plus ~8 in files T9g already lists as out of scope
+(`custom-page-sizes-invalid`, `memory64-imports`, `exact-func-import`). Every failure increase is paired
+with a skip decrease. The check that matters is **no file regressed**: pass counts rose or held on all 284.
+
+⚠️ **A blanket skip is not a neutral placeholder.** `assert_unlinkable` was skipped for a stated reason
+that had been obsolete since T7b, and while it was skipped it hid a defect class in the *engine*, not just
+a gap in the runner. Any assertion category the runner declines wholesale should carry a note saying what
+would be measured if it stopped declining — otherwise the skip silently insures the code it covers.
 
 **The 08-07 column is the cleanest movement in the table: failures down, skips down, passes up, and
 not one of the 284 files regressed.** Two distinct effects, both worth telling apart:
@@ -64,13 +87,14 @@ conflation that is *unobservable* with a single instance per store. Regression t
 nothing.
 
 **Skips are never folded into passes.** A construct this build cannot put to the test is not a pass —
-that is the runner's honesty rule (`wast.rs`), and it is why the number is trustworthy. The residual
-3,094 skips are dominated by **imported memories and tables**, which the shared store now models but the
-`.wast` runner's `spectest` provider does not yet supply.
+that is the runner's honesty rule (`wast.rs`), and it is why the number is trustworthy. As of 08-08 the
+runner also distinguishes **"nothing defines this import"** (a real unlinkable verdict) from **"wasmrt
+cannot back this kind"** (a gap → skip); collapsing the two, as `BuildErr::Unresolved` did, is precisely
+what made `assert_unlinkable` unimplementable.
 
-Worst remaining files (2026-08-05): `annotations` 51 (a proposal wasmrt does not target — the file became
-parseable only on 08-05), `binary` 44 (x2 copies), `type-subtyping` 36, `i31` 30. **All 284 files now
-parse (0 unparseable).** The ranked punch list is in `known-issues.md`.
+Worst remaining files (2026-08-08): `annotations` 51 and `binary` 44×2 (proposals wasmrt does not target),
+`type-subtyping` 44, `binary` 44 (core), `func` 21, `custom-page-sizes-invalid` 20, `binary-leb128` 15.
+**All 284 files parse (0 unparseable).** The ranked punch list is in `known-issues.md`.
 
 The first run scored 96.7% and surfaced four bugs the hand vectors could not — a panic, an element-segment
 encoding no decoder could read, truncated out-of-range constants, and mis-placed digit separators (all in
@@ -108,9 +132,21 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-07, T9 first pass)
+## Current test state (2026-08-08, T9a#4 memory half)
 
-**363 workspace tests, all green** (337 core + 26 capi), clippy clean on all four build surfaces; the
+**375 workspace tests, all green** (349 core + 26 capi), clippy clean on all four build surfaces; the
+C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. T9a#4 added 12, each aimed at a way the memory half
+could be wrong rather than at "it links": a write through the *importer* is visible to the *exporter* (a
+copy-at-link-time bug passes any one-instance test); a **two-provider** case so the importer's index 0 and
+the pool's slot 0 differ — the standing two-instance rule, one level deeper; an active data segment
+targeting the imported memory, which is the single place the "which memory" code path forks; §4.5.9 limits
+matching in both directions plus the *grown-memory* case (matching compares declared types, so a
+`memory.grow` in the exporter must not change what links); function- and global-import type mismatch
+across five and four shapes respectively, each with the matching declaration asserted to still link — a
+check that refuses everything would otherwise look identical; and the table refusal, kept as a test so it
+cannot be "fixed" by accident before the funcref encoding is decided.
+
+Previous (2026-08-07, T9 first pass): **363 workspace tests** (337 core + 26 capi), clippy clean; the
 C-ABI gate (74/74 symbols + `c_smoke` compiled by clang) and Miri (26/26 incl. the lifecycle fuzz) both
 pass. T9 added 12: the four `br_table.wast` blockers (each pinned separately, because each one alone
 still left the file failing — a single "the file builds now" test would not say which fix mattered), the

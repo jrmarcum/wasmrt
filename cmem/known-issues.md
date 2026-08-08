@@ -213,13 +213,75 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
-## 🚦 DECISION-GATE — T9a#4 (imported memories/tables) has an unlisted prerequisite (found 2026-08-07)
+## ✅ DECIDED + half-shipped 2026-08-08 — T9a#4: imported **memories** land, **tables** stay refused
 
-T9a#4 reads as plumbing: instances already share memories and tables through the store, so "there is
-just no way to *name* one as a linker definition". The `IndexMaps` design anticipates it — `instantiate`
-already comments that the maps are what "let an imported one point at another instance's existing slot".
-Two thirds of it genuinely is plumbing (`Imports` grows memory/table slot vectors; `instantiate` builds
-the maps from imports-then-defined; active data/elem segments apply through the maps).
+**Owner decision (2026-08-08): option 2 — ship imported memories, keep tables refused, leave the funcref
+encoding as its own later decision.** The gate below stands unchanged for the table half; do not
+re-litigate the memory half.
+
+**Why "half" is the wrong word for the memory part.** An imported memory needed no value-model change at
+all — a memory is bytes indexed through `IndexMaps`, so publishing one under a name is *finished* work,
+not scaffolding for tables. `Imports` grew a memory vector holding `(instance, that instance's memory
+index)` — deliberately **not** a store slot, since an embedder holds `InstanceId`s and has no business
+knowing pool layout — and `instantiate` resolves each to the exporter's existing slot. The importer's map
+is imported-slots-then-fresh-slots, matching the module's own memory index space.
+
+Three details that were not obvious from the plan:
+
+1. **`module.memories` is the whole index space, imports first.** The old code allocated a fresh memory
+   for *every* entry, which is exactly why the blanket `n_mems > 0` refusal was load-bearing: without it
+   an imported memory would have been silently given a private allocation. Only the tail
+   (`module.memories[n_mems..]`) is now allocated.
+2. **Active data segments fork on the index.** A segment targeting an imported memory writes into the
+   pools (the memory is already there); one targeting a defined memory writes into the still-local vector.
+   Keeping defined resources out of the store until every step succeeds is what stops a *later* failure
+   from leaving orphaned slots — the store stays clean on a failed instantiation, as it did before.
+3. **Limits matching compares declared types, not current sizes** (§4.5.9), so `Memory` now carries its
+   declared `min`. Matching on `bytes.len()` would let a `memory.grow` in the exporter change what links.
+
+### 🆕 What switching on `assert_unlinkable` found: imports were never type-checked
+
+`assert_unlinkable` had been an **unconditional skip** since the runner was written. Implementing it was
+in scope (the T7b entry already noted it was gated on this work), and the first thing it revealed is a
+defect in the *engine*: **a function or global import was bound with no type check at all**. A module
+importing `(func (param i32))` against a `(func)` linked and then ran, caller and callee disagreeing about
+the stack — the silent-wrong-output class, sitting behind a skip nobody had questioned.
+
+Fixed in the two places where the type is actually known, which is not the same place:
+
+- **Functions — in `Store::instantiate`**, so a hand-built `Imports` gets the same check the `Linker`
+  does. Only a **wasm-backed** import can be checked: a `HostFunc` is a bare closure with no declared
+  signature (the C ABI cannot express one either), so a host import is still taken on trust.
+- **Globals — in `Linker::resolve`**, because `Imports` carries a bare `Value`. That is not a split
+  authority but a consequence of linking globals *by value*: a value cannot say `i32` from `f32`, let
+  alone mutable from immutable, so the check has to happen while the definition's `GlobalType` is still in
+  hand (new `Store::export_global_type`).
+
+**The function check uses structural equality, and the choice was measured, not assumed.** §4.5.9 matching
+is subtyping, and a `ValType` naming a *concrete* GC type packs a **module-local type index**, so deciding
+it properly needs cross-module type canonicalisation this engine does not do. Exempting concrete-typed
+signatures was tried and is **worse both ways**: it costs 3 correct refusals in `type-subtyping.wast` to
+recover 1 false one in `type-equivalence.wast` — three silent mis-links traded for one loud
+over-strictness. Equality errs toward **refusing** a link, which is the direction the standing rule wants.
+**Residual: exactly 1 assertion**, and the real fix is cross-module canonicalisation (open, below).
+
+**The lesson, which outranks the numbers again: a blanket skip is not a neutral placeholder.** This one was
+skipped for a stated reason that had been obsolete since T7b, and while it sat there it insured a defect
+class in the engine. Any assertion category the runner declines wholesale should carry a note saying what
+would be measured if it stopped declining.
+
+### ⚠️ For whenever the funcref decision is taken: the obvious layout is wrong
+
+The natural proposal — *instance id in bits 32–63, function index in 0–31* — **collides with
+`I31_TAG = 1 << 63`**. Any packing has to fit under bit 63 (e.g. instance in 32–62) or restructure the
+tag bits deliberately. Worth having on paper before that decision rather than discovering it during.
+
+## 🚦 DECISION-GATE — the TABLE half of T9a#4 is still open (found 2026-08-07)
+
+*(The memory half is DONE — see the section above. What follows applies to **tables only**.)*
+
+T9a#4 read as plumbing: instances already share memories and tables through the store, so "there is
+just no way to *name* one as a linker definition". For memories that turned out to be true and it shipped.
 
 **But a shared TABLE cannot be made correct without deciding how a `funcref` is represented.**
 
@@ -242,17 +304,38 @@ comparison. That is an owner decision, not an improvisation — the same shape a
 of 2026-08-05.
 
 **Options, for that decision:**
-1. **Pack the instance id into the funcref slot** (e.g. instance in bits 32–63, index in 0–31, keeping
-   `NULL_REF = u64::MAX` distinct). Correct and complete; touches the invariant and every site that
-   reads a funcref.
-2. **Ship imported *memories* only** and keep tables refused. Memories carry raw bytes with no identity
-   problem, so this is genuinely just plumbing — and it unblocks the `load1.wast`/`memory`-import family
-   without touching the value model.
-3. **Leave both refused** and take the skips.
+1. **Pack the instance id into the funcref slot** — instance in bits **32–62**, index in 0–31, keeping
+   `NULL_REF = u64::MAX` distinct. ⚠️ **Not 32–63**: bit 63 is `I31_TAG`. Correct and complete; touches the
+   recorded invariant and every site that reads a funcref (~27 `NULL_REF` sites, 21 of them in `interp.rs`
+   including the hottest dispatch path, plus the GC heap, the C ABI's value marshalling and the `.wast`
+   runner's result comparison).
+2. ~~Ship imported *memories* only~~ — **CHOSEN and DONE 2026-08-08.**
+3. **Leave tables refused** and take the remaining skips.
 
-⚠️ Whatever is chosen, **do not implement imported tables without option 1** — a table that links
-successfully and dispatches to the wrong function is worse than one that refuses to link. The current
-`LinkError::UnsupportedImportKind` is a correct, loud refusal.
+⚠️ **Do not implement imported tables without option 1** — a table that links successfully and dispatches
+to the wrong function is worse than one that refuses to link. `LinkError::UnsupportedImportKind` /
+`Trap::UnsupportedImportKind` are a correct, loud refusal, and **two tests now pin that refusal** so it
+cannot be lifted by accident.
+
+## 🔧 Open — found 2026-08-08 by the T9a#4 work
+
+- **No cross-module type canonicalisation.** A `ValType` naming a concrete GC type carries a module-local
+  type index, so import matching across two modules cannot decide subtyping and falls back to structural
+  equality. Measured residual: **1 assertion** (`type-equivalence.wast`). Errs toward refusing a valid
+  link, never toward binding an invalid one. `interp.rs` (the func-import check in `instantiate`).
+- **Host function imports are unchecked by construction.** A `HostFunc` is a bare closure with no declared
+  signature, so nothing can be compared against the guest's declaration — and the C ABI cannot express one
+  either. Not a defect so much as a limit of the callback shape; worth revisiting only if the C ABI grows a
+  way to declare a host function's type.
+- **Malformed modules rejected at the *link* stage.** Newly visible now that link failures are adjudicated
+  rather than skipped: several `assert_malformed` modules in `memory.wast` / `global.wast` reach linking
+  with **empty module and field names**, meaning the *decoder* accepted a malformed import. Same class as
+  T9a#11 (wrong-stage rejection), and previously invisible because the old `BuildErr::Unresolved` counted
+  as a skip. ~4 assertions.
+- **Imported globals link by value, so a *mutable* global import is a snapshot.** Pre-existing and
+  documented on `Store::export_global`; the new type check enforces that mutability *matches*, which does
+  not make the sharing live. Only a concern if a consumer imports a mutable global and expects writes to
+  propagate.
 
 ## 🔧 Open — noted at T8 (2026-08-06)
 

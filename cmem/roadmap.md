@@ -1,13 +1,14 @@
 # Roadmap
 
-## Status (2026-08-07) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
+## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,247 / 655 / 2,932 — 98.9%**,
-**363 workspace tests**. T9's first pass landed T9a #1/#2/#3 plus three unlisted defects, and all of
-**T9b (size)**, **T9c (performance)** and **T9d (licensing/docs)** — so **every one of the three success
-axes now carries a real measurement**, which is what T11 was blocked on. Open: T9a #4 (🚦 decision-gate
-— a `funcref` carries no instance identity), #5–#9, #11, #12, **T9e `pin`**, **T9f tail calls**.
-The T8 block below is kept as the v0.9.0 release record.
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,593 / 697 / 2,469 — 98.9%**,
+**375 workspace tests**. T9's first pass landed T9a #1/#2/#3 plus three unlisted defects, and all of
+**T9b (size)**, **T9c (performance)** and **T9d (licensing/docs)**. **2026-08-08: T9a#4's memory half is
+DONE** (owner chose option 2) together with `assert_unlinkable` and **link-time import type checking** —
+which that assertion category, unskipped for the first time, revealed had never existed. Still open:
+T9a#4's **table** half (🚦 still a decision-gate — a `funcref` carries no instance identity), #5–#9, #11,
+#12, **T9e `pin`**, **T9f tail calls**. The T8 block below is kept as the v0.9.0 release record.
 
 ### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
@@ -511,22 +512,50 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
      just plumbing; imported **tables** need the funcref encoding decided first, and that touches a
      recorded invariant. **Do not implement imported tables without it.**
 
-  **Still open in T9:** T9a #4 (gated as above), #5, #6, #7, #8, #9, #11, #12 · **T9e `pin`** ·
-  **T9f tail calls**. #10 stays a non-issue by design.
+  **Still open in T9:** T9a #4's **table** half (gated as above), #5, #6, #7, #8, #9, #11, #12 ·
+  **T9e `pin`** · **T9f tail calls**. #10 stays a non-issue by design.
+
+  ### ◐ Progress 2026-08-08 — T9a#4 memory half. Suite 61,247/655/2,932 → **61,593 / 697 / 2,469**
+
+  **+346 passes, +42 failures, −463 skips — and no file lost a single pass.** 375 workspace tests (was
+  363); clippy, all four surfaces, the C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) green.
+
+  **Owner decision (2026-08-08): option 2** — imported **memories** ship, imported **tables** stay refused
+  until the funcref encoding is decided. Rationale and the three non-obvious implementation details are in
+  `known-issues.md`; the short version is that the memory half needed no value-model change, so it is
+  finished work rather than scaffolding.
+
+  Measured: `imports.wast` **25/6/108 → 196/13/95** (+171, the largest single-file gain since `register`),
+  `linking.wast` **55/15/78 → 107/11/28** (failures down too), `linking3.wast` 4/4/4 → 8/2/2.
+
+  **The finding that outranks the numbers: `assert_unlinkable` had been an unconditional skip, and it was
+  insuring a real defect.** Implementing it — in scope, since the T7b entry already noted it was gated on
+  this work — immediately showed that **imports were never type-checked at link time**: a module importing
+  `(func (param i32))` bound to a `(func)` linked and then ran with caller and callee disagreeing about the
+  stack. Now checked in the two places the type is actually known: functions in `Store::instantiate` (so a
+  hand-built `Imports` is checked too; a `HostFunc` has no declared signature and is still trusted), globals
+  in `Linker::resolve` (because `Imports` carries a bare `Value`, which cannot say `i32` from `f32`).
+  ⚠️ **A blanket skip is not a neutral placeholder** — this one was justified by a reason obsolete since
+  T7b. Any category the runner declines wholesale should say what would be measured if it stopped.
+
+  The equality-vs-subtyping choice for function matching was **measured both ways**, not assumed: exempting
+  concrete GC types costs 3 correct refusals to recover 1 false one, so equality stays. Residual: 1
+  assertion, logged.
 
   ### T9a — Correctness defects (real bugs) `[◐]`
 
-  **Status 2026-08-07:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
-  #4 🚦 decision-gate · #5–#9, #11, #12 open · #10 not a defect.
+  **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
+  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5–#9, #11, #12 open · #10 not a defect.
   Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
-  `store1` 4 → 0 · `ref_is_null` 1 → 0 · `i31` 31 → 6 · `load1` 15 → 5 · `type-subtyping` 20 skips → 8.
+  `store1` 4 → 0 · `ref_is_null` 1 → 0 · `i31` 31 → 6 · `load1` 15 → 5 · `type-subtyping` 20 skips → 8 ·
+  `imports` +171 passes · `linking` +52 passes / −4 failures.
 
   | # | Defect | Where | Measured cost |
   | --- | --- | --- | --- |
   | 1 | **`ref.null $ConcreteType` rejected by the assembler.** The `O::RefNull` arm matches only the *abstract* heap types and its `_ =>` returns `BadImmediate`. A concrete heap type is legal and encodes as a **positive s33 type index** — the same encoding `(ref $t)` already uses — so the fix is to fall through to type-name resolution. | `wat.rs` ~3059 | **161 skipped assertions in `br_table.wast` alone** (line 1052 is `(br_table … (ref.null $t) …)`, so the file's single module fails to build and *every* `assert_return` in it is skipped) + the only 2 of 534 wasmtk `.wat` files we cannot assemble. **The largest concentrated win available**, and it was previously logged as a cosmetic 2-file gap. |
   | 2 | 🆕 **`Op::MemorySize` reads ANOTHER instance's memory — SILENT WRONG OUTPUT.** It indexes `store.memories` with the **raw module-local immediate**, never routing through `ctx.maps.mem()`. `Op::MemoryGrow`, one line below, does it correctly. **The fourth instance of the shared-store defect class** (after `CallIndirect`, `exec_memory_init`, and the assembler shorthands) and the *only* remaining unmapped pool access — verified by auditing every `store.{memories,tables,globals,elem_values,data_dropped,elem_dropped}.get*` site. Clippy's `unused variable: maps` could not fire, because the same function's `MemoryGrow` arm does use `maps`. | `interp.rs` 2374 | `memory_size.wast` 16 failures — all four of its modules report `5`, which is *module 1's* page count. A core MVP instruction returning another module's answer. **Fix + a two-instance regression test.** |
   | 3 | 🆕 **The `.wast` runner redirects a failed module's assertions to an unrelated earlier module.** When a build fails, `current = None` — and `target(None)` then falls back to `self.named.last()`. So assertions belonging to the module that failed silently run against a *different* instance and are reported as **value mismatches**. The fallback itself is wanted (a file naming every module must still run bare actions); it must simply not apply after a *failed* build. | `wast.rs` ~290 | Inflates **failures**, never passes — so 98.8% is if anything understated. The real damage is diagnostic: `load1.wast` reports "got 0x0, expected 1", which sends you hunting a load bug that does not exist. Fix by tracking "the last build failed" distinctly from "there is no unnamed current module". |
-  | 4 | **Imported memories and tables cannot be named as linker definitions** (`LinkError::UnsupportedImportKind`). Instances *can* share them through the store; there is just no way to publish one under a name. Refused loudly, never half-linked. | `linker.rs` | `imports.wast` **108 skips**, `linking.wast` **80 skips + 16 failures**. The largest remaining *skip* block that is in scope. |
+  | 4 | ◐ **Memories ✅ DONE 2026-08-08** (`Linker::define_memory` + resolution through a registered instance; shared, never copied; §4.5.9 limits matching). **Tables still refused** (`LinkError::UnsupportedImportKind`) — a `funcref` carries no instance identity, so a shared table would dispatch to the wrong function. 🚦 Owner decision required before the table half; two tests pin the refusal. | `linker.rs`, `interp.rs` | Was: `imports.wast` 108 skips, `linking.wast` 80 skips + 16 failures. **Now `imports.wast` 196/13/95 and `linking.wast` 107/11/28.** Remaining skips there are the table imports. |
   | 5 | **GC constant expressions** (`struct.new`, `array.new*`, `ref.i31` in global inits) rejected by **both** validator and interpreter. Consistent, so no disagreement — an honest missing feature. | `validate.rs`, `interp.rs` | `i31.wast` **31 failures** + part of `type-subtyping`. |
   | 6 | **GC subtyping depth not modelled** by the validator. | `validate.rs` | `type-subtyping.wast` **36 failures**. |
   | 7 | **No trap backtrace** — the `decode_body_tracked` byte offsets deferred at **T2**. The C ABI already ships the frame API in its **final shape**, reporting 0 frames deliberately, so this lands **without a breaking ABI change**. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only, but an embedder feels it most. |

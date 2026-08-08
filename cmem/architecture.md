@@ -53,6 +53,23 @@ warning that wasmrt therefore performs no authenticity check today).
 range so a bad index **traps rather than aliasing another instance**. `Instance` survives as a thin
 `{ store, id }` wrapper, so the single-instance API is unchanged.
 
+**Imported memories (2026-08-08) are what that shape was for.** `Imports` holds a memory backing as
+`(instance, that instance's memory index)` — never a store slot, because an embedder holds `InstanceId`s and
+has no business knowing pool layout — and `instantiate` resolves each to the exporter's existing slot,
+building the importer's map as **imported slots then fresh slots** so it matches the module's own memory
+index space (`module.memories` is the whole space, imports first, so only its tail is allocated). Nothing
+is copied, so a write through either instance is visible to the other by construction.
+Two properties fall out and are worth not breaking: an active data segment **forks on the index** — into
+the pools for an imported memory, into the still-local vector for a defined one — which keeps defined
+resources out of the store until instantiation has fully succeeded, so a late failure leaves no orphaned
+slots; and **import matching compares declared types** (§4.5.9), which is why `Memory` carries its declared
+`min` alongside its current size. **Imported tables are refused on purpose** — a `funcref` is a bare
+function index with no instance identity, so a shared table would dispatch against the *calling* instance.
+**Import type checking lives in two places by necessity, not by accident:** function signatures in
+`Store::instantiate` (the one path every caller takes, hand-built `Imports` included), global types in
+`Linker::resolve` — because a global links *by value*, and a bare `Value` cannot say `i32` from `f32`, let
+alone mutable from immutable. A `HostFunc` has no declared signature at all, so a host import is trusted.
+
 The CLI does summarize + validate + `run` + `wasi` (with `--dir`/`--ro-dir` preopens) + `wat` (assemble)
 + `wast` (conformance). **A memory's index type is a property of the
 memory, not the engine:** `Memory.is64` drives one `pop_mem(is64)` on the address/count path and one

@@ -49,9 +49,18 @@ pub enum LinkError {
         name: String,
         expected: ExternKind,
     },
-    /// The module imports a memory, table or tag. Instances can share memories and tables
-    /// through the store, but there is no way yet to *name* one as a linker definition.
+    /// The module imports a **table** or a tag. A table is refused because a `funcref` carries
+    /// no instance identity, so a shared table would dispatch to the wrong function
+    /// (`cmem/known-issues.md`, T9a#4); refusing to link beats linking and mis-dispatching.
+    /// Memories *are* linkable — see [`Linker::define_memory`].
     UnsupportedImportKind(ExternKind),
+    /// The definition exists and is the right *kind*, but its type does not match what the
+    /// module declares (§4.5.9) — a global's content type or mutability differing, say.
+    ///
+    /// Distinct from [`LinkError::KindMismatch`] on purpose: "you gave me a global where I
+    /// wanted a function" and "you gave me an `i64` global where I wanted `i32`" are different
+    /// mistakes, and collapsing them costs the embedder the diagnosis.
+    IncompatibleType { module: String, name: String },
 }
 
 impl fmt::Display for LinkError {
@@ -71,6 +80,10 @@ impl fmt::Display for LinkError {
             LinkError::UnsupportedImportKind(k) => {
                 write!(f, "cannot link an imported {k:?} by name")
             }
+            LinkError::IncompatibleType { module, name } => write!(
+                f,
+                "import `{module}`.`{name}` resolves to a definition of an incompatible type"
+            ),
         }
     }
 }
@@ -81,6 +94,10 @@ impl core::error::Error for LinkError {}
 enum Def {
     Func(Rc<LinkedFn>),
     Global(Value),
+    /// A memory belonging to an already-instantiated module, named by that instance's own
+    /// memory index. Not the bytes: the importer must see the *same* memory, so what is stored
+    /// is a reference to it, resolved at instantiation.
+    Memory { instance: InstanceId, index: u32 },
     /// Every export of an already-instantiated module, published under one namespace —
     /// what the `.wast` `(register "name")` command does.
     Instance(InstanceId),
@@ -142,6 +159,20 @@ impl Linker {
         self.insert(module, name, Def::Global(value));
     }
 
+    /// Define an existing instance's memory under `module`.`name`, so a later module can import
+    /// it and share the same bytes.
+    ///
+    /// `index` is in `instance`'s **own** memory index space, which is what
+    /// [`Store::export_index`] returns — instantiation resolves it to the store slot, so an
+    /// imported memory of the exporter's re-exports correctly rather than being re-allocated.
+    ///
+    /// There is deliberately no way to define a memory that no instance owns: a memory's
+    /// identity in this engine *is* a store slot, and inventing one outside an instance would
+    /// give the embedder a resource with no lifetime tied to anything.
+    pub fn define_memory(&mut self, module: &str, name: &str, instance: InstanceId, index: u32) {
+        self.insert(module, name, Def::Memory { instance, index });
+    }
+
     /// Publish every export of an already-instantiated module under the namespace `module`,
     /// so later modules can import from it. This is wasm→wasm linking: the callee runs
     /// against **its own** instance, so it sees the exporter's memory and globals.
@@ -198,7 +229,7 @@ impl Linker {
     /// # Errors
     /// [`LinkError::UnknownImport`] for a name nothing defines, [`LinkError::KindMismatch`]
     /// if the definition is the wrong kind, or [`LinkError::UnsupportedImportKind`] for an
-    /// imported memory/table/tag.
+    /// imported table/tag.
     pub fn resolve(&self, store: &Store, md: &Module) -> Result<Imports, LinkError> {
         let mut imports = Imports::new();
         for imp in &md.imports {
@@ -222,7 +253,7 @@ impl Linker {
                             let f = Rc::clone(rc);
                             imports.with_func(move |c, a, r| f(c, a, r))
                         }
-                        Some(Def::Global(_)) => return Err(mismatch()),
+                        Some(Def::Global(_) | Def::Memory { .. }) => return Err(mismatch()),
                         Some(Def::Instance(_) | Def::Namespace(_)) => unreachable!(
                             "instances and namespaces are stored in `namespaces`, not `defs`"
                         ),
@@ -248,11 +279,28 @@ impl Linker {
                 ExternKind::Global => {
                     let v = match self.exact(&imp.module, &imp.name) {
                         Some(Def::Global(v)) => *v,
-                        Some(Def::Func(_)) => return Err(mismatch()),
+                        Some(Def::Func(_) | Def::Memory { .. }) => return Err(mismatch()),
                         Some(_) => unreachable!("not stored in `defs`"),
                         None => match self.namespace(&imp.module) {
-                            // A registered instance's exported global links by value.
+                            // A registered instance's exported global links by value — so this
+                            // is the only place its declared TYPE is still known. Checking it
+                            // here rather than at instantiation is not a split authority but a
+                            // consequence of that: `Imports` carries a bare `Value`, which
+                            // cannot say `i32` from `f32`, let alone mutable from not.
                             Some(Def::Instance(id)) => {
+                                let actual = store
+                                    .export_global_type(*id, &imp.name)
+                                    .ok_or_else(unknown)?;
+                                let declared = match &imp.ty {
+                                    crate::module::Extern::Global(gt) => *gt,
+                                    _ => return Err(mismatch()),
+                                };
+                                if actual != declared {
+                                    return Err(LinkError::IncompatibleType {
+                                        module: imp.module.clone(),
+                                        name: imp.name.clone(),
+                                    });
+                                }
                                 store.export_global(*id, &imp.name).ok_or_else(unknown)?
                             }
                             _ => return Err(unknown()),
@@ -260,10 +308,32 @@ impl Linker {
                     };
                     imports = imports.with_global(v);
                 }
-                // Sharing a memory or table across instances is something the *store*
-                // does; there is no way to name one as a linker definition yet. Refused
-                // loudly rather than skipped, so an embedder never gets a half-linked
-                // instance.
+                ExternKind::Memory => {
+                    // Resolved to (instance, that instance's memory index) — never to bytes, so
+                    // the importer shares the exporter's memory instead of getting a copy.
+                    let (inst, index) = match self.exact(&imp.module, &imp.name) {
+                        Some(Def::Memory { instance, index }) => (*instance, *index),
+                        Some(Def::Func(_) | Def::Global(_)) => return Err(mismatch()),
+                        Some(_) => unreachable!("not stored in `defs`"),
+                        None => match self.namespace(&imp.module) {
+                            Some(Def::Instance(id)) => {
+                                let index = store
+                                    .export_index(*id, &imp.name, ExternKind::Memory)
+                                    .ok_or_else(unknown)?;
+                                (*id, index)
+                            }
+                            // A namespace catch-all produces host *functions*; it cannot
+                            // conjure a memory. "Unknown" is the honest report — nothing here
+                            // defines this name as one.
+                            _ => return Err(unknown()),
+                        },
+                    };
+                    imports = imports.with_instance_memory(inst, index);
+                }
+                // A table stays refused: a `funcref` carries no instance identity, so a shared
+                // table would dispatch against the *calling* instance and silently call the
+                // wrong function (T9a#4). A tag import needs no backing, but nothing publishes
+                // one by name yet. Both refused loudly rather than half-linked.
                 other => return Err(LinkError::UnsupportedImportKind(other)),
             }
         }
@@ -572,13 +642,187 @@ mod tests {
     }
 
     #[test]
-    fn an_imported_memory_is_refused_loudly() {
+    fn an_imported_table_is_refused_loudly() {
+        // Still refused on purpose: a `funcref` carries no instance identity, so a shared table
+        // would dispatch to the wrong function (T9a#4). Memories have no such problem.
+        let l = Linker::new();
+        let store = Store::new();
+        assert_eq!(
+            l.resolve(&store, &md(r#"(module (import "env" "t" (table 1 funcref)))"#))
+                .unwrap_err(),
+            LinkError::UnsupportedImportKind(ExternKind::Table)
+        );
+    }
+
+    #[test]
+    fn an_undefined_memory_import_is_unknown_not_unsupported() {
+        // The distinction matters to the `.wast` runner: "nothing defines this" is a real
+        // unlinkable verdict, while "wasmrt cannot back this kind" is a gap that must be
+        // skipped. Collapsing them would score a gap as conformance.
         let l = Linker::new();
         let store = Store::new();
         assert_eq!(
             l.resolve(&store, &md(r#"(module (import "env" "m" (memory 1)))"#))
                 .unwrap_err(),
-            LinkError::UnsupportedImportKind(ExternKind::Memory)
+            LinkError::UnknownImport {
+                module: String::from("env"),
+                name: String::from("m"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_named_memory_definition_links_and_is_shared() {
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let provider = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (memory (export "m") 1)
+                       (func (export "peek") (result i32) (i32.load (i32.const 0))))"#),
+            )
+            .unwrap()
+            .unwrap();
+        let index = store
+            .export_index(provider, "m", ExternKind::Memory)
+            .unwrap();
+        l.define_memory("host", "mem", provider, index);
+
+        let consumer = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (import "host" "mem" (memory 1))
+                       (func (export "poke") (i32.store (i32.const 0) (i32.const 5))))"#),
+            )
+            .unwrap()
+            .unwrap();
+        store.invoke(consumer, "poke", &[]).unwrap();
+        // Same bytes, seen through the exporter — not a copy taken at link time.
+        assert_eq!(as_i32(store.invoke(provider, "peek", &[]).unwrap()[0]), 5);
+    }
+
+    #[test]
+    fn a_registered_instances_exported_memory_links_by_name() {
+        // The `(register "name")` path: no explicit `define_memory`, the namespace resolves it.
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let provider = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (memory (export "mem") 1) (data (i32.const 0) "\09\00\00\00"))"#),
+            )
+            .unwrap()
+            .unwrap();
+        l.define_instance("lib", provider);
+        let consumer = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (import "lib" "mem" (memory 1))
+                       (func (export "read") (result i32) (i32.load (i32.const 0))))"#),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(as_i32(store.invoke(consumer, "read", &[]).unwrap()[0]), 9);
+    }
+
+    /// A function import bound to a definition of a **different signature** must not link.
+    ///
+    /// Without this check the module links and then calls it: the caller pushes arguments for one
+    /// shape and the callee reads another — the silent-wrong-call class. Nothing tested it before
+    /// because the `.wast` runner skipped every `assert_unlinkable`.
+    #[test]
+    fn a_function_import_of_the_wrong_signature_does_not_link() {
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let provider = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (func (export "f") (param i32) (result i32) (local.get 0)))"#),
+            )
+            .unwrap()
+            .unwrap();
+        l.define_instance("lib", provider);
+
+        for bad in [
+            r#"(module (import "lib" "f" (func)))"#,
+            r#"(module (import "lib" "f" (func (result i32))))"#,
+            r#"(module (import "lib" "f" (func (param i64) (result i32))))"#,
+            r#"(module (import "lib" "f" (func (param i32) (result i64))))"#,
+            r#"(module (import "lib" "f" (func (param i32 i32) (result i32))))"#,
+        ] {
+            assert_eq!(
+                l.instantiate(&mut store, md(bad)).unwrap().err(),
+                Some(Trap::IncompatibleImport),
+                "should not link: {bad}"
+            );
+        }
+        // The matching signature still links — the check must not simply refuse everything.
+        assert!(
+            l.instantiate(
+                &mut store,
+                md(r#"(module (import "lib" "f" (func (param i32) (result i32))))"#),
+            )
+            .unwrap()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_global_import_of_the_wrong_type_does_not_link() {
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let provider = l
+            .instantiate(
+                &mut store,
+                md(r#"(module (global (export "g") i32 (i32.const 1))
+                       (global (export "mg") (mut i32) (i32.const 2)))"#),
+            )
+            .unwrap()
+            .unwrap();
+        l.define_instance("lib", provider);
+        let err = |src: &str| l.resolve(&store, &md(src)).unwrap_err();
+        // Wrong content type — and `i32`/`f32` are the case a value-only check cannot catch,
+        // since both are just bits in a slot.
+        assert!(matches!(
+            err(r#"(module (import "lib" "g" (global i64)))"#),
+            LinkError::IncompatibleType { .. }
+        ));
+        assert!(matches!(
+            err(r#"(module (import "lib" "g" (global f32)))"#),
+            LinkError::IncompatibleType { .. }
+        ));
+        // Mutability is part of the type in both directions.
+        assert!(matches!(
+            err(r#"(module (import "lib" "g" (global (mut i32))))"#),
+            LinkError::IncompatibleType { .. }
+        ));
+        assert!(matches!(
+            err(r#"(module (import "lib" "mg" (global i32)))"#),
+            LinkError::IncompatibleType { .. }
+        ));
+        // The matching declaration resolves.
+        assert!(l
+            .resolve(&store, &md(r#"(module (import "lib" "g" (global i32)))"#))
+            .is_ok());
+    }
+
+    #[test]
+    fn a_memory_definition_bound_to_a_function_import_is_a_kind_mismatch() {
+        let mut store = Store::new();
+        let mut l = Linker::new();
+        let provider = l
+            .instantiate(&mut store, md(r#"(module (memory (export "m") 1))"#))
+            .unwrap()
+            .unwrap();
+        l.define_memory("host", "thing", provider, 0);
+        assert_eq!(
+            l.resolve(&store, &md(r#"(module (import "host" "thing" (func)))"#))
+                .unwrap_err(),
+            LinkError::KindMismatch {
+                module: String::from("host"),
+                name: String::from("thing"),
+                expected: ExternKind::Func,
+            }
         );
     }
 

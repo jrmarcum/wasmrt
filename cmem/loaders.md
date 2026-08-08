@@ -68,6 +68,16 @@ C-ABI surface must expose it.
   durable memory handle must be tagged against a live store, and during a callback the store is
   mid-borrow. Use `wasmrt_caller_read`/`_write`/`_memory_size` inside callbacks — which is what the
   loaders actually need; the handle form exists so the wasmtime-shaped call sequence compiles.
+- **A second, smaller caveat (2026-08-08):** **imported memories now link, but only from Rust.**
+  `Linker::define_memory` and `Imports::with_instance_memory` are core-only — the C ABI has no
+  `wasmrt_linker_define_memory`, because no surveyed loader needs one (they instantiate one module per
+  store, with the guest *defining* its memory and the host reading it via `wasmrt_memory_data`). Adding it
+  is additive when a loader does need it; `abi_version()` would stay 1. **Imported *tables* are refused in
+  both layers** and that refusal is deliberate, not a gap — see `known-issues.md`.
+- **What did change for embedders (2026-08-08):** imports are now **type-checked at link time**, so a
+  wasm→wasm import whose signature or global type disagrees with the declaration fails to link instead of
+  running. Host callbacks are unaffected — a `HostFunc` carries no declared signature, so the C ABI's
+  `wasmrt_linker_define_func` is still trusted to match what the guest declared.
 
 Three substrates today; **all 10 loaders are eventual targets, phased by effort:**
 
