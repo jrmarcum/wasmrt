@@ -213,6 +213,38 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — the same type-use rules at their other two sites (`call_indirect`, functions)
+
+**Suite 61,778 / 496 / 2,466 → 61,802 / 472 / 2,466 — 99.2%.** +24 passes, −24 failures.
+**`call_indirect.wast` 158/11 → 169/0/0** and **`func.wast` 147/21 → 160/8**. No file lost a pass, none
+gained a failure, `.wat` corpus held at 533/534. 405 workspace tests.
+
+**Block types, `call_indirect` and function definitions each had their own copy of the type-use loop** —
+and each therefore shipped its own copy of all three defects (clause order, named parameter, inline
+signature silently overridden by the `(type x)` beside it). `parse_type_use` is now the **single authority**
+for block types and `call_indirect`; the function-definition path enforces the same order inline, because
+its loop also owns `import`/`export`/`local` and the body and so cannot delegate wholesale.
+
+**Two copies of a grammar drift. Three copies drifted identically** — which is a stronger argument for one
+authority than any amount of reasoning about it.
+
+### ⚠️ A rule attempted, measured, and WITHDRAWN — and it looked obviously right
+
+**"No declaration may appear after the body begins"** (`(func (nop) (local i32))` is malformed). Implemented
+by scanning the items after the header loop for a `type`/`param`/`result`/`local` keyword. It broke
+**`select.wast`, `stack.wast` and `call_indirect.wast`**: in **flat** instruction form each immediate is its
+own top-level item, so `select (result i32)` and `call_indirect (type $t)` put a `result`/`type` form exactly
+where a misplaced declaration would sit. **Keyword scanning cannot tell an immediate from a declaration at
+that layer** — deciding it needs the body's instruction structure, which the header loop does not have.
+
+Withdrawn rather than forced. `(func (nop) (local i32))` and its three siblings still assemble: **~4
+assertions, open**, and worth revisiting only alongside a body-structure-aware pass. **A rule that is
+obviously right is still a hypothesis until it is measured.**
+
+**Still open in this cluster:** `func.wast` 8 — the withdrawn body-order rule (~4), duplicate **identifiers**
+(3 "duplicate local", 1 "duplicate func" — a distinct rule, untouched), 2 wrong results, and 2 malformed
+import names the decoder accepts.
+
 ## ✅ Fixed 2026-08-08 — the text format's own grammar was not enforced (type-use well-formedness)
 
 **Suite 61,738 / 536 / 2,466 → 61,778 / 496 / 2,466 — 99.2%.** +40 passes, −40 failures.

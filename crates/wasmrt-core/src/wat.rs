@@ -1479,19 +1479,37 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let mut locals: Vec<V> = Vec::new();
     let mut sig = Sig::default();
 
-    // Header clauses, in any order: import/export, `(type $t)`, params/results, locals.
-    // The first form that is none of those begins the body.
+    // Header clauses: import/export, then the **type use** `(type x)? (param …)* (result …)*`, then
+    // `(local …)*`. The first form that is none of those begins the body.
+    //
+    // The order is FIXED by the text format (§6.4.4 / §6.6.4) and was not enforced — this is the third
+    // copy of the same loop to have that gap, after block types and `call_indirect`. So
+    // `(func (result i32) (param i32) …)` assembled and the *validator* reported it, and
+    // `(func (nop) (local i32))` — a declaration after the body has started — assembled too.
+    let (mut seen_param, mut seen_result, mut seen_local, mut seen_body) = (false, false, false, false);
     let mut k = j;
     while k < items.len() {
         match items[k].keyword() {
             Some("import" | "export") => {}
             Some("type") => {
+                if type_ref.is_some() || seen_param || seen_result || seen_local || seen_body {
+                    return Err(Error::UnexpectedToken);
+                }
                 type_ref = Some(resolve_by_name(
                     &b.type_names,
                     nth(want_list(&items[k])?, 1)?,
                 )?);
             }
             Some("param" | "result") => {
+                let is_param = items[k].keyword() == Some("param");
+                if seen_local || seen_body || (is_param && seen_result) {
+                    return Err(Error::UnexpectedToken);
+                }
+                if is_param {
+                    seen_param = true;
+                } else {
+                    seen_result = true;
+                }
                 let s = parse_sig(
                     core::slice::from_ref(&items[k]),
                     &b.type_names,
@@ -1501,6 +1519,7 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
                 sig.results.extend(s.results);
             }
             Some("local") => {
+                seen_local = true;
                 let l = want_list(&items[k])?;
                 if l.len() >= 2 && is_id(&l[1]) {
                     locals.push(parse_val_type(nth(l, 2)?, &b.type_names)?);
@@ -1515,6 +1534,28 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             _ => break,
         }
         k += 1;
+    }
+
+    // ⚠️ **"No declaration after the body begins" is NOT checkable by keyword here**, and the attempt
+    // is recorded because it looked obviously right. In **flat** instruction form each immediate is its
+    // own top-level item, so `select (result i32)` and `call_indirect (type $t)` put a `result`/`type`
+    // form directly in `items[k..]` — indistinguishable, by keyword alone, from a misplaced
+    // declaration. Scanning for them rejected valid modules in `select.wast`, `stack.wast` and
+    // `call_indirect.wast`. Deciding it needs the body's instruction structure, which this layer does
+    // not have. `(func (nop) (local i32))` therefore still assembles; logged in `known-issues.md`.
+    let _ = seen_body;
+
+    // An inline signature given ALONGSIDE a `(type $t)` must match it — they are not alternatives.
+    // Without this the explicit clauses were kept while the type index was also used, so the module
+    // could mean something the text did not say. The suite calls it "inline function type".
+    if let Some(ti) = type_ref {
+        if (seen_param || seen_result)
+            && func_sig_at(&b.types, ti).is_none_or(|d| {
+                d.params != sig.params || d.results != sig.results
+            })
+        {
+            return Err(Error::UnexpectedToken);
+        }
     }
 
     // An explicit `(type $t)` with no inline params/results takes its signature from the
@@ -2595,24 +2636,11 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool) ->
             j += 1;
         }
     }
-    // The type annotation: `(type $t)` and/or an inline signature.
-    let mut type_ref = None;
-    let mut sig = Sig::default();
-    while let Some(s) = l.get(j) {
-        match s.keyword() {
-            Some("type") => {
-                type_ref = Some(resolve_by_name(ctx.type_names, nth(want_list(s)?, 1)?)?);
-                j += 1;
-            }
-            Some("param" | "result") => {
-                let one = parse_sig(core::slice::from_ref(s), ctx.type_names, None)?;
-                sig.params.extend(one.params);
-                sig.results.extend(one.results);
-                j += 1;
-            }
-            _ => break,
-        }
-    }
+    // The type annotation: `(type $t)` and/or an inline signature — the same **type use** grammar a
+    // block type reads, through the same function. This had its own copy of the loop and therefore its
+    // own copy of all three defects: clause order, named parameters, and an inline signature silently
+    // overridden by the `(type x)` beside it.
+    let (type_ref, sig) = parse_type_use(ctx, l, &mut j)?;
     // An inline signature interns into the shared type table — bodies are encoded before
     // any section is written, so appending here is safe.
     let ti = type_ref.unwrap_or_else(|| intern_sig(ctx.types, sig));
@@ -3891,15 +3919,30 @@ enum BlockTy {
 }
 
 /// Parse a block type from `items[*j..]`, advancing `j` past it.
-fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<BlockTy> {
+/// Parse a **type use** — `(type x)?` then `(param …)*` then `(result …)*` — advancing `*j` past it,
+/// and enforcing the three rules the text format fixes (§6.4.4).
+///
+/// **One function for every site that reads one**, because the rules are identical and two copies of a
+/// grammar drift. They already had: block types and `call_indirect` each had their own loop, and
+/// `call_indirect` shipped all three of these defects independently of the block-type path.
+///
+/// The rules, each bought with measured assertions:
+///
+/// 1. **Clause order.** Collected in any order before, so `(block (result i32) (param i32))` assembled
+///    and the **validator** reported the result as a stack-height mismatch — the wrong stage, 36
+///    assertions across `block`/`if`/`loop`.
+/// 2. **No named parameter.** Only a *function's* parameters bind identifiers, because only a function
+///    has local slots for them to name; a block's or an indirect call's operands are stack values.
+/// 3. **An inline signature must MATCH a `(type x)` given alongside it** — the two are not
+///    alternatives. This used to return on the type index and silently discard the explicit clauses,
+///    so the module meant something the text did not say. The suite calls it "inline function type".
+///
+/// ⚠️ Enforced **here**, not in [`parse_sig`]: this loop hands `parse_sig` one clause at a time, so
+/// `parse_sig`'s own order state resets per call and can never observe a sequence. A first attempt put
+/// the rule there and moved exactly one assertion out of forty.
+fn parse_type_use(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<(Option<u32>, Sig)> {
     let mut sig = Sig::default();
     let mut type_ref = None;
-    // A type use has a fixed clause order (§6.4.4): `(type x)?` then `(param …)*` then
-    // `(result …)*`. Enforced **here** rather than in `parse_sig`, because this loop hands
-    // `parse_sig` one clause at a time — so `parse_sig`'s own order state resets on every call and
-    // could never see the sequence. That is why `(block (result i32) (param i32))` assembled and was
-    // then refused by the *validator* as a stack-height mismatch: the wrong stage, and 36 assertions
-    // across `block`/`if`/`loop` alone.
     let (mut seen_param, mut seen_result) = (false, false);
     while let Some(s) = items.get(*j) {
         match s.keyword() {
@@ -3915,14 +3958,7 @@ fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<Blo
                 if is_param && seen_result {
                     return Err(Error::UnexpectedToken);
                 }
-                // A block parameter cannot be NAMED: `(block (param $x i32))` is malformed text.
-                // Only a function's parameters bind identifiers, because only a function has locals
-                // for them to name; a block's operands are stack values with no local slots.
-                if is_param
-                    && want_list(s)?
-                        .get(1)
-                        .is_some_and(|first| is_id(first))
-                {
+                if is_param && want_list(s)?.get(1).is_some_and(is_id) {
                     return Err(Error::UnexpectedToken);
                 }
                 if is_param {
@@ -3939,22 +3975,23 @@ fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<Blo
         }
     }
     if let Some(ti) = type_ref {
-        // When a type use gives BOTH a `(type x)` and explicit `(param …)`/`(result …)`, the
-        // explicit clauses are not an alternative — they must **match** the referenced type
-        // exactly (§6.4.4). This used to `return` here and silently discard them, so
-        // `(block (type $sig) (result i32))` against a `(type $sig (func))` assembled as `$sig`
-        // and the module meant something the text did not say. The suite calls that
-        // "inline function type" and asserts it is malformed.
         if seen_param || seen_result {
             let declared = match ctx.types.get(ti as usize) {
                 Some(TypeDef::Func(s)) => s,
-                // A block type naming a non-function type is malformed, not merely unmatched.
+                // Naming a non-function type here is malformed, not merely unmatched.
                 _ => return Err(Error::UnexpectedToken),
             };
             if declared.params != sig.params || declared.results != sig.results {
                 return Err(Error::UnexpectedToken);
             }
         }
+    }
+    Ok((type_ref, sig))
+}
+
+fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<BlockTy> {
+    let (type_ref, sig) = parse_type_use(ctx, items, j)?;
+    if let Some(ti) = type_ref {
         return Ok(BlockTy::TypeIndex(ti));
     }
     // The shorthand forms: no params and at most one result.
@@ -4172,6 +4209,65 @@ mod tests {
                     (func (result i32) (i32.const 0) (block (type $sig))))"#)
                 .is_ok()
         );
+    }
+
+    /// The same type-use rules on a **function definition** and on **`call_indirect`** — each had its
+    /// own copy of the loop, and therefore its own copy of all three defects. `parse_type_use` is now
+    /// the single authority for block types and `call_indirect`; the function path enforces the same
+    /// order inline, because its loop also owns `import`/`export`/`local` and the body.
+    #[test]
+    fn the_type_use_rules_apply_to_functions_and_call_indirect() {
+        // A function's own signature: clause order.
+        assert_eq!(
+            asm("(module (func (result i32) (param i32) (i32.const 0)))").unwrap_err(),
+            Error::UnexpectedToken
+        );
+        assert_eq!(
+            asm(r#"(module (type $s (func (param i32) (result i32)))
+                    (func (param i32) (type $s) (result i32) (i32.const 0)))"#)
+                .unwrap_err(),
+            Error::UnexpectedToken
+        );
+        // A function's inline signature must match a `(type …)` given beside it.
+        assert_eq!(
+            asm(r#"(module (type $s (func)) (func (type $s) (result i32) (i32.const 0)))"#)
+                .unwrap_err(),
+            Error::UnexpectedToken
+        );
+        // `call_indirect`'s type use: order, named parameter, and inline mismatch.
+        assert_eq!(
+            asm(r#"(module (type $s (func (param i32) (result i32))) (table 0 funcref)
+                    (func (result i32)
+                      (call_indirect (type $s) (result i32) (param i32)
+                        (i32.const 0) (i32.const 0))))"#)
+                .unwrap_err(),
+            Error::UnexpectedToken
+        );
+        assert_eq!(
+            asm(r#"(module (table 0 funcref)
+                    (func (call_indirect (param $x i32) (i32.const 0) (i32.const 0))))"#)
+                .unwrap_err(),
+            Error::UnexpectedToken
+        );
+        assert_eq!(
+            asm(r#"(module (type $s (func)) (table 0 funcref)
+                    (func (result i32) (call_indirect (type $s) (result i32) (i32.const 0))))"#)
+                .unwrap_err(),
+            Error::UnexpectedToken
+        );
+        // …and the canonical spellings all still assemble.
+        assert!(asm("(module (func (param i32) (result i32) (local.get 0)))").is_ok());
+        assert!(
+            asm(r#"(module (type $s (func (param i32) (result i32))) (table 0 funcref)
+                    (func (result i32)
+                      (call_indirect (type $s) (i32.const 0) (i32.const 0))))"#)
+                .is_ok()
+        );
+        // ⚠️ Not asserted here, deliberately: that a flat-form `select (result i32)` still assembles.
+        // Its immediate sits at the same level a misplaced declaration would, which is why the
+        // over-strict version of this rule broke `select.wast`/`stack.wast` — but the flat `select`
+        // spelling is itself an assembler gap, so a unit test would be asserting the wrong thing.
+        // **The suite is what pins that regression**, and the per-file diff is where it showed up.
     }
 
     /// T9b. §5.5.13 requires the data-count section only when `memory.init`/`data.drop`

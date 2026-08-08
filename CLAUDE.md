@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — seven passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — eight passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.2%** (61,778 / 496 / 2,466 of 62,274) — **first time
-over 99%** — **404 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.2%** (61,802 / 472 / 2,466 of 62,274) — **first time
+over 99%** — **405 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -78,9 +78,15 @@ read-through — every existing test asserts the module *runs*, and all three de
 plus explicit clauses must match (they were silently discarded). ⚠️ **Where a guard lives matters — the
 first attempt put the rule in `parse_sig` and moved ONE assertion of forty, because `parse_block_type`
 calls it one clause at a time; a guard one call-level away from the iteration it guards is no check at all.**
-**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5, #7, #8, #9, the rest of the
-text-parser work (`func.wast` 17 + `call_indirect.wast` 7 — duplicate identifiers, a distinct rule),
-`pin`, **tail calls**.
+**The eighth pass applied those same three rules at their OTHER TWO sites.** Block types, `call_indirect`
+and function definitions each had their **own copy of the type-use loop**, and so its own copy of all three
+defects; `parse_type_use` is now one authority for the first two. **`call_indirect.wast` → 169/0/0**,
+`func.wast` 21 → 8. ⚠️ **One rule was attempted, measured and WITHDRAWN** — "no declaration after the body
+begins" broke `select`/`stack`/`call_indirect`, because in **flat** instruction form `select (result i32)`
+puts its immediate exactly where a misplaced declaration would sit, so keyword scanning cannot tell them
+apart. **A rule that is obviously right is still a hypothesis until measured.**
+**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5, #7, #8, #9, `func.wast` 8 (the withdrawn
+body-order rule + duplicate identifiers), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`

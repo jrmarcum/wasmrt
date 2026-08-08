@@ -2,8 +2,8 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,778 / 496 / 2,466 — 99.2%**
-of 62,290 adjudicated (**first time over 99%**), **404 workspace tests**. T9's first pass landed T9a
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,802 / 472 / 2,466 — 99.2%**
+of 62,290 adjudicated (**first time over 99%**), **405 workspace tests**. T9's first pass landed T9a
 #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **2026-08-08 landed three more passes:** T9a#4's **memory half** (owner chose
 option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
@@ -701,6 +701,27 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
 
   **Still open in this cluster:** `func.wast` 17 and `call_indirect.wast` 7 — duplicate **identifiers**
   (locals, funcs, types) are a distinct rule from clause order and were not touched.
+
+  ### ◐ Progress 2026-08-08 (eighth) — the same type-use rules at their other two sites
+
+  **61,778/496 → 61,802 / 472 / 2,466.** +24 passes, −24 failures. **`call_indirect.wast` 158/11 →
+  169/0/0**, **`func.wast` 147/21 → 160/8**. No file lost a pass, none gained a failure, `.wat` corpus
+  held at 533/534. 405 tests.
+
+  **Block types, `call_indirect` and function definitions each had their OWN COPY of the type-use loop**,
+  and therefore its own copy of all three defects (clause order, named parameter, inline signature silently
+  overridden). `parse_type_use` is now the single authority for the first two; the function-definition path
+  enforces the same order inline, because its loop also owns `import`/`export`/`local` and the body and so
+  cannot delegate wholesale. **Two copies of a grammar drift — three copies drifted identically**, which is
+  a better argument for one authority than any reasoning about it.
+
+  ⚠️ **One rule was attempted, MEASURED, and WITHDRAWN — and it looked obviously right.** "No declaration
+  after the body begins" (`(func (nop) (local i32))` is malformed) broke **`select.wast`, `stack.wast` and
+  `call_indirect.wast`**: in **flat** instruction form each immediate is its own top-level item, so
+  `select (result i32)` and `call_indirect (type )` put a `result`/`type` form exactly where a misplaced
+  declaration would sit. Keyword scanning cannot tell an immediate from a declaration at that layer.
+  Withdrawn rather than forced; ~4 assertions stay open, worth revisiting only with a body-structure-aware
+  pass. **A rule that is obviously right is still a hypothesis until it is measured.**
 
   ### T9a — Correctness defects (real bugs) `[◐]`
 

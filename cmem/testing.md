@@ -22,12 +22,29 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | subtyping (08-08) | canon (08-08) | T9h registry (08-08) | **type-use (08-08)** |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | canon (08-08) | T9h registry (08-08) | type-use I (08-08) | **type-use II (08-08)** |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,712 | 61,724 | 61,738 | **61,778** |
-| failed | 871 | 1,521 | 751 | 738 | 578 | 554 | 536 | **496** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,469 | 2,466 | 2,466 | **2,466** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.1% | 99.1% | 99.1% | **99.2%** of 62,274 |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,724 | 61,738 | 61,778 | **61,802** |
+| failed | 871 | 1,521 | 751 | 738 | 554 | 536 | 496 | **472** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,466 | **2,466** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.1% | 99.1% | 99.2% | **99.2%** of 62,274 |
+
+### The eighth 08-08 column: the same type-use rules at their OTHER TWO sites. `call_indirect` → 0
+
++24 passes, −24 failures. **`call_indirect.wast` 158/11 → 169/0/0** and **`func.wast` 147/21 → 160/8**; no
+file lost a pass, none gained a failure, and the `.wat` corpus held at 533/534.
+
+**Block types, `call_indirect`, and function definitions each had their OWN COPY of the type-use loop** —
+and therefore its own copy of all three defects. `parse_type_use` is now the single authority for the first
+two; the function path enforces the same order inline, because its loop also owns `import`/`export`/`local`
+and the body. **Two copies of a grammar drift — three copies drifted identically.**
+
+⚠️ **One rule was attempted, measured, and withdrawn.** "No declaration after the body begins" looked
+obviously right and broke `select.wast`, `stack.wast` and `call_indirect.wast`: in **flat** instruction form
+each immediate is its own top-level item, so `select (result i32)` puts a `result` form exactly where a
+misplaced declaration would sit. Keyword scanning cannot tell them apart at that layer — deciding it needs
+the body's instruction structure. `(func (nop) (local i32))` therefore still assembles; logged as open.
+**A rule that is obviously right is still a hypothesis until measured.**
 
 ### The seventh 08-08 column: type-use well-formedness. **`block`, `if`, `loop` all reach ZERO failures**
 
@@ -224,7 +241,7 @@ re-run.
 
 ## Current test state (2026-08-08, type-use well-formedness)
 
-**404 workspace tests, all green** (378 core + 26 capi), clippy clean on all four build surfaces; the
+**405 workspace tests, all green** (379 core + 26 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
 there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
 (the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —
