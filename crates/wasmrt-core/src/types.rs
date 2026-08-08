@@ -65,6 +65,36 @@ impl SectionId {
             _ => return None,
         })
     }
+
+    /// This section's position in the fixed order a module's sections must appear in (§5.5.2),
+    /// with `Custom` reported as `None` because a custom section may appear anywhere, any number
+    /// of times.
+    ///
+    /// **The order is NOT the id order**, which is the whole reason this is a table rather than a
+    /// comparison. `DataCount` is id **12** but must appear *before* `Code` (id 10) — its entire
+    /// purpose is to let `memory.init` decode without having read the data section — and `Tag`
+    /// (id 13) belongs between `Memory` and `Global`, because it was added to the middle of the
+    /// list by the exception-handling proposal. Comparing raw ids would accept both in the wrong
+    /// place and reject them in the right one.
+    #[must_use]
+    pub const fn order(self) -> Option<u8> {
+        Some(match self {
+            SectionId::Custom => return None,
+            SectionId::Type => 0,
+            SectionId::Import => 1,
+            SectionId::Function => 2,
+            SectionId::Table => 3,
+            SectionId::Memory => 4,
+            SectionId::Tag => 5,
+            SectionId::Global => 6,
+            SectionId::Export => 7,
+            SectionId::Start => 8,
+            SectionId::Element => 9,
+            SectionId::DataCount => 10,
+            SectionId::Code => 11,
+            SectionId::Data => 12,
+        })
+    }
 }
 
 /// The kind of an import or export, from the binary import/export descriptor byte
@@ -457,6 +487,29 @@ pub enum DecodeError {
     DataCountMismatch,
     /// An instruction opcode wasmrt does not decode (or a raw internal-tag byte).
     UnsupportedOpcode,
+    /// A non-custom section appeared twice, or out of the order §5.5.2 fixes. Both read the same
+    /// way to a decoder: it has already finished with that section, so those bytes are unexpected
+    /// content — which is exactly how the spec suite words it. Silently taking the *second*
+    /// occurrence, as a decoder without this check does, is the worse outcome: a repeated function
+    /// section quietly changes what the module is.
+    SectionOrder,
+    /// A section's declared size does not match the bytes its contents occupy. Leftover bytes
+    /// inside a section are never harmless — they mean the producer and the decoder disagree about
+    /// where the section ends.
+    SectionSizeMismatch,
+    /// The function and code sections declare different numbers of functions (§5.5.13). A
+    /// structural disagreement between two sections, so it is *malformed*, not invalid.
+    FuncCodeCountMismatch,
+    /// A body uses `memory.init` or `data.drop` but the module has no data-count section. The
+    /// count is what makes those instructions decodable without reading the data section, so its
+    /// absence is a decode-stage failure (bulk-memory, §5.5.16).
+    DataCountRequired,
+    /// An expression's bytes ran out before its terminating `end` (§5.4.9).
+    MissingEnd,
+    /// A function's declared locals sum to more than 2^32−1, so the count cannot be represented.
+    /// A *malformed* encoding, distinct from the validator's `TooManyLocals` resource ceiling:
+    /// this says "these bytes cannot mean anything", that one says "we decline to allocate it".
+    TooManyLocals,
 }
 
 impl fmt::Display for DecodeError {
@@ -476,6 +529,14 @@ impl fmt::Display for DecodeError {
             DecodeError::InvalidUtf8 => "name is not valid UTF-8",
             DecodeError::DataCountMismatch => "data count disagrees with data segments",
             DecodeError::UnsupportedOpcode => "unsupported instruction opcode",
+            DecodeError::SectionOrder => "section repeated or out of order",
+            DecodeError::SectionSizeMismatch => "section size mismatch",
+            DecodeError::FuncCodeCountMismatch => {
+                "function and code section have inconsistent lengths"
+            }
+            DecodeError::DataCountRequired => "data count section required",
+            DecodeError::TooManyLocals => "too many locals",
+            DecodeError::MissingEnd => "unexpected end of section or function (missing END)",
         };
         f.write_str(s)
     }

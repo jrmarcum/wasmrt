@@ -206,14 +206,25 @@ pub struct Local {
     pub ty: ValType,
 }
 
-/// A defined function's body from the code section (§5.5.13): its declared locals and the
-/// raw instruction bytes (including the terminating `end`). Instructions are decoded later
-/// (with [`crate::opcode::decode_body`]).
+/// A defined function's body from the code section (§5.5.13): its declared locals and its
+/// instructions, decoded at decode time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Code {
     pub locals: Vec<Local>,
-    pub body: Vec<u8>,
-    /// Absolute byte offset of `body` within the original module binary (for truthful
+    /// The body decoded to instructions, produced **at decode time**.
+    ///
+    /// Two reasons it lives here rather than being decoded on demand. First, correctness of
+    /// *stage*: a malformed instruction encoding is a decode error by the spec, and while bodies
+    /// were decoded lazily the decoder accepted modules the validator then had to reject —
+    /// `assert_malformed` cases surfacing as validation failures. Second, it is less work: the
+    /// validator and every instantiation each used to decode the same bytes again.
+    ///
+    /// This **replaced** a `body: Vec<u8>` field rather than joining it. Keeping both meant a
+    /// second copy of every function body in every module, which is measurable on cold start —
+    /// cold start being mostly decode — and nothing read the bytes once the IR existed.
+    /// `body_offset` is what the raw form was actually needed for.
+    pub ir: Vec<crate::opcode::Instr>,
+    /// Absolute byte offset of the body within the original module binary (for truthful
     /// trap backtraces).
     pub body_offset: u32,
 }
@@ -465,12 +476,25 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
     let mut data_count: Option<u32> = None;
     let mut func_names: Option<Vec<u8>> = None;
 
+    // Order index of the last non-custom section seen, to enforce §5.5.2.
+    let mut last_order: Option<u8> = None;
+
     while !r.at_end() {
         let raw_id = r.read_byte()?;
         if raw_id > SectionId::MAX {
             return Err(DecodeError::InvalidSectionId);
         }
         let id = SectionId::from_u8(raw_id).ok_or(DecodeError::InvalidSectionId)?;
+        // Sections appear at most once, in the fixed order (§5.5.2); custom sections are exempt.
+        // Strictly greater, not `>=`: a repeated section is as malformed as a misordered one, and
+        // without this the second occurrence silently *replaced* the first — a repeated function
+        // section changed the module's function count and only surfaced later as a count mismatch.
+        if let Some(ord) = id.order() {
+            if last_order.is_some_and(|prev| ord <= prev) {
+                return Err(DecodeError::SectionOrder);
+            }
+            last_order = Some(ord);
+        }
         let size = r.read_var_u32()? as usize;
         let offset = r.pos();
         let payload = r.read_bytes(size)?;
@@ -503,6 +527,36 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
             SectionId::DataCount => data_count = Some(sub.read_var_u32()?),
             SectionId::Start => start = Some(sub.read_var_u32()?),
         }
+
+        // The section's contents must occupy exactly the size it declared. Custom sections are
+        // exempt — everything after the name is arbitrary payload by definition, and the `name`
+        // subsection walk deliberately stops early.
+        //
+        // Leftover bytes are not a cosmetic disagreement: the outer reader has already skipped
+        // `size` bytes, so a section that under-reads means the producer and the decoder disagree
+        // about the section's contents while still agreeing where the next one starts. Whatever
+        // was in the gap is simply not in the module we built.
+        if id != SectionId::Custom && !sub.at_end() {
+            return Err(DecodeError::SectionSizeMismatch);
+        }
+    }
+
+    // Constant expressions are stored as raw bytes and read by the validator and the interpreter,
+    // each with its own little reader — so a malformed *encoding* inside one (an over-long LEB, a
+    // truncated immediate) used to surface as a validation error. Structurally checking them here
+    // puts that where it belongs. Unlike function bodies the result is discarded rather than
+    // stored: a const-expr is a handful of bytes and both consumers want the raw form, so decoding
+    // it twice costs nothing worth the data-model change.
+    for expr in module_const_exprs(&d, &elements, &data) {
+        crate::opcode::decode_body(expr)?;
+    }
+
+    // The function and code sections must declare the same number of functions (§5.5.13). This is
+    // a *decode*-stage check because it is a disagreement between two sections' structure, not a
+    // typing fact — the validator also caught it, one stage too late, and `assert_malformed` is
+    // the assertion the spec suite uses. Both empty is fine: a module may have neither section.
+    if functions.len() != code.len() {
+        return Err(DecodeError::FuncCodeCountMismatch);
     }
 
     // If present, the data-count section must equal the data-segment count (§5.5.16).
@@ -510,6 +564,16 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
         if dc as usize != data.len() {
             return Err(DecodeError::DataCountMismatch);
         }
+    } else if code
+        .iter()
+        .flat_map(|c| c.ir.iter())
+        .any(|i| matches!(i.op, crate::opcode::Op::MemoryInit | crate::opcode::Op::DataDrop))
+    {
+        // …and when ABSENT it is required, if any body references a data segment (bulk-memory).
+        // The count is what lets `memory.init`'s segment index be checked without having read the
+        // data section, so its absence is a decode-stage failure rather than a validation one.
+        // Only reachable now that bodies are decoded here — the check needs the instructions.
+        return Err(DecodeError::DataCountRequired);
     }
 
     Ok(Module {
@@ -1231,6 +1295,43 @@ fn decode_data_section(r: &mut Reader) -> DecodeResult<Vec<DataSegment>> {
 
 /// `payload_base` is the code section payload's absolute offset in the module, so each
 /// body can record where its bytes live in the original binary.
+/// Every constant expression a module carries, as raw byte slices: global initializers, table
+/// initializers (function-references), element-segment offsets and element expressions, and
+/// data-segment offsets.
+///
+/// One list so the decode-time encoding check cannot miss a kind — the alternative, five separate
+/// loops at the call site, is exactly the shape that grows a sixth const-expr field and forgets it.
+fn module_const_exprs<'a>(
+    d: &'a Decoder,
+    elements: &'a [Element],
+    data: &'a [DataSegment],
+) -> impl Iterator<Item = &'a [u8]> {
+    // Keyed on the segment MODE, not on whether the byte string is empty: a *passive* segment has
+    // no offset expression at all, while an *active* one whose expression is empty is genuinely
+    // malformed. Filtering by `is_empty()` would conflate the two and silently excuse the second.
+    d.global_init_space
+        .iter()
+        .map(Vec::as_slice)
+        .chain(d.table_space.iter().filter_map(|t| t.init.as_deref()))
+        .chain(elements.iter().flat_map(|e| {
+            (e.mode == ElementMode::Active)
+                .then_some(e.offset_expr.as_slice())
+                .into_iter()
+                .chain(e.exprs.iter().map(Vec::as_slice))
+        }))
+        .chain(
+            data.iter()
+                .filter(|s| s.active)
+                .map(|s| s.offset_expr.as_slice()),
+        )
+}
+
+/// The spec ceiling on a function's total locals: the count must be representable, i.e. at most
+/// 2^32−1 (§5.4.5 / `binary.wast` "too many locals"). Deliberately **not** the validator's
+/// `MAX_LOCALS` resource cap, which is far smaller: the two say different things — this one is
+/// "these bytes cannot mean anything", that one is "we decline to allocate that much".
+const MAX_DECLARED_LOCALS: u64 = u32::MAX as u64;
+
 fn decode_code_section(d: &Decoder, r: &mut Reader, payload_base: usize) -> DecodeResult<Vec<Code>> {
     let count = r.read_vec_len()?;
     let mut list = Vec::with_capacity(count as usize);
@@ -1242,13 +1343,25 @@ fn decode_code_section(d: &Decoder, r: &mut Reader, payload_base: usize) -> Deco
         let entry = r.read_bytes(entry_len)?;
         let mut er = Reader::new(entry);
         let locals = decode_locals(&mut er, &d.type_kinds)?;
-        let body = entry[er.pos()..].to_vec(); // instruction bytes, incl. terminating end
+        // Too many declared locals is a *malformed* encoding, not a typing fact (the count cannot
+        // be represented), so it belongs here. Summed as `u64` before anything is allocated, so a
+        // run of `0xFFFFFFFF` costs a comparison rather than an allocation.
+        let declared: u64 = locals.iter().map(|l| u64::from(l.count)).sum();
+        if declared > MAX_DECLARED_LOCALS {
+            return Err(DecodeError::TooManyLocals);
+        }
+        // Decode the body HERE, borrowing the entry rather than copying it out first. A malformed
+        // instruction stream is a decode error by the spec, and deferring it meant `decode`
+        // accepted modules the validator then rejected — the wrong stage, and measurably so
+        // (`binary-leb128.wast` reported 15 such assertions). Doing it once also replaces two later
+        // decodes of the same bytes (the validator's, and each instantiation's).
+        let ir = crate::opcode::decode_body(&entry[er.pos()..])?;
         // The body starts `er.pos()` into the entry, which began at `entry_start`.
         // Saturate rather than truncate (only used to label a trap backtrace).
         let body_offset = u32::try_from(payload_base + entry_start + er.pos()).unwrap_or(u32::MAX);
         list.push(Code {
             locals,
-            body,
+            ir,
             body_offset,
         });
     }
@@ -1265,6 +1378,169 @@ mod tests {
         let mut v = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
         v.extend_from_slice(rest);
         v
+    }
+
+    // --- §5.5.2 section structure: order, uniqueness, declared size (2026-08-08) ---
+
+    /// A repeated section used to **silently replace** the first occurrence, because each arm
+    /// assigns (`functions = decode_function_section(…)`). That is the silent-wrong-output class:
+    /// the module that ran was not the module on disk.
+    #[test]
+    fn rejects_a_repeated_section() {
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type
+            0x03, 0x02, 0x01, 0x00, // function: 1 func
+            0x03, 0x02, 0x01, 0x00, // function AGAIN
+            0x0a, 0x07, 0x02, 0x02, 0x00, 0x0b, 0x02, 0x00, 0x0b, // code: 2 bodies
+        ]);
+        assert_eq!(decode(&bytes), Err(DecodeError::SectionOrder));
+        // Mutation guard: without the repeat it decodes — but as ONE function against TWO bodies,
+        // so it is then caught by the func/code count check rather than accepted.
+        let one = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x0a, 0x07, 0x02, 0x02, 0x00, 0x0b, 0x02, 0x00, 0x0b,
+        ]);
+        assert_eq!(decode(&one), Err(DecodeError::FuncCodeCountMismatch));
+    }
+
+    #[test]
+    fn rejects_sections_out_of_order() {
+        // Export (7) after code (10). Ordinary producers never emit this; a hostile one might.
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+            0x07, 0x05, 0x01, 0x01, b'f', 0x00, 0x00,
+        ]);
+        assert_eq!(decode(&bytes), Err(DecodeError::SectionOrder));
+    }
+
+    /// The order is **not** the id order, so this is the case a `>` on raw ids gets backwards:
+    /// `DataCount` is id 12 yet must precede `Code` (id 10), and `Tag` is id 13 yet belongs
+    /// between `Memory` and `Global`. Both are accepted here in their correct positions.
+    #[test]
+    fn accepts_data_count_before_code_and_tag_before_global() {
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type (1)
+            0x03, 0x02, 0x01, 0x00, // function (3)
+            0x05, 0x03, 0x01, 0x00, 0x01, // memory (5)
+            0x0d, 0x03, 0x01, 0x00, 0x00, // tag (13) — before global
+            0x06, 0x06, 0x01, 0x7f, 0x00, 0x41, 0x00, 0x0b, // global (6)
+            0x0c, 0x01, 0x01, // data count (12) — before code
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // code (10)
+            0x0b, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x2a, // data (11)
+        ]);
+        let md = decode(&bytes).expect("the canonical order must decode");
+        assert_eq!(md.tags.len(), 1);
+        assert_eq!(md.data.len(), 1);
+        // And the same two, moved to where their raw ids would put them, are refused.
+        let tag_last = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x06, 0x06, 0x01, 0x7f, 0x00, 0x41, 0x00, 0x0b, // global (6)
+            0x0d, 0x03, 0x01, 0x00, 0x00, // tag (13) AFTER global — id order, wrong order
+        ]);
+        assert_eq!(decode(&tag_last), Err(DecodeError::SectionOrder));
+    }
+
+    /// Custom sections are exempt: any number, anywhere.
+    #[test]
+    fn custom_sections_may_repeat_and_appear_anywhere() {
+        let bytes = m(&[
+            0x00, 0x03, 0x02, b'h', b'i', // custom
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type
+            0x00, 0x03, 0x02, b'h', b'i', // custom again, mid-module
+            0x03, 0x02, 0x01, 0x00,
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+            0x00, 0x03, 0x02, b'h', b'i', // and after the last real section
+        ]);
+        assert!(decode(&bytes).is_ok());
+    }
+
+    /// A section that under-reads its declared size left the leftover bytes simply *absent* from
+    /// the decoded module — the outer reader had already skipped them.
+    #[test]
+    fn rejects_a_section_whose_contents_are_shorter_than_its_declared_size() {
+        // Type section declares size 5 but its contents occupy 4.
+        let bytes = m(&[0x01, 0x05, 0x01, 0x60, 0x00, 0x00, 0x00]);
+        assert_eq!(decode(&bytes), Err(DecodeError::SectionSizeMismatch));
+        // The honest size decodes.
+        assert!(decode(&m(&[0x01, 0x04, 0x01, 0x60, 0x00, 0x00])).is_ok());
+    }
+
+    #[test]
+    fn rejects_function_code_count_mismatch_at_decode() {
+        // A function section with no code section at all — malformed (§5.5.13), and previously
+        // only caught one stage later by the validator.
+        let bytes = m(&[0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00]);
+        assert_eq!(decode(&bytes), Err(DecodeError::FuncCodeCountMismatch));
+        // Neither section is fine: not every module has functions.
+        assert!(decode(&m(&[0x01, 0x04, 0x01, 0x60, 0x00, 0x00])).is_ok());
+    }
+
+    /// A malformed *instruction encoding* is a decode error, not a validation one. Bodies used to
+    /// be decoded lazily, so `decode` accepted these and the validator reported them — which is
+    /// what `binary-leb128.wast` was measuring when it showed 15 wrong-stage rejections.
+    #[test]
+    fn rejects_a_malformed_body_encoding_at_decode() {
+        // `i32.const` with an over-long LEB (unused bits set): malformed, not ill-typed.
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x0a, 0x0b, 0x01, 0x09, 0x00, 0x41, 0x80, 0x80, 0x80, 0x80, 0x70, 0x1a, 0x0b,
+        ]);
+        assert_eq!(decode(&bytes), Err(DecodeError::LebOverflow));
+    }
+
+    /// The same rule for constant expressions, which are stored as raw bytes and were read by the
+    /// validator and the interpreter with their own little readers.
+    #[test]
+    fn rejects_a_malformed_const_expr_encoding_at_decode() {
+        // Global section: i32 immutable, `i32.const` with unused bits set.
+        let bytes = m(&[0x06, 0x0a, 0x01, 0x7f, 0x00, 0x41, 0x80, 0x80, 0x80, 0x80, 0x70, 0x0b]);
+        assert_eq!(decode(&bytes), Err(DecodeError::LebOverflow));
+        // A well-formed one decodes.
+        assert!(decode(&m(&[0x06, 0x06, 0x01, 0x7f, 0x00, 0x41, 0x00, 0x0b])).is_ok());
+    }
+
+    /// A **passive** data segment has no offset expression at all, so the const-expr sweep must key
+    /// on the segment's mode. Keying on "is the byte string empty" instead would also excuse an
+    /// *active* segment whose offset is genuinely missing. This test is why that distinction is in
+    /// the code: written the sloppy way, it fails.
+    #[test]
+    fn a_passive_segment_has_no_offset_expression_to_check() {
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type
+            0x03, 0x02, 0x01, 0x00, // function
+            0x05, 0x03, 0x01, 0x00, 0x01, // memory
+            0x0c, 0x01, 0x01, // data count 1 — required by memory.init below
+            // code: memory.init 0 0 with three zero operands
+            0x0a, 0x0e, 0x01, 0x0c, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x08, 0x00,
+            0x00, 0x0b,
+            0x0b, 0x05, 0x01, 0x01, 0x02, b'h', b'i', // data: PASSIVE (flag 1), no offset expr
+        ]);
+        let md = decode(&bytes).expect("a passive segment must decode");
+        assert!(!md.data[0].active);
+        assert!(md.data[0].offset_expr.is_empty());
+    }
+
+    /// `memory.init` / `data.drop` need the data-count section: it is what lets their segment index
+    /// be checked without having read the data section, so its absence is malformed (bulk-memory).
+    #[test]
+    fn rejects_a_bulk_data_op_with_no_data_count_section() {
+        let body = [
+            0x0a, 0x0e, 0x01, 0x0c, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0xfc, 0x08, 0x00,
+            0x00, 0x0b,
+        ];
+        let mut bytes = vec![
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x05, 0x03, 0x01, 0x00, 0x01,
+        ];
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(&[0x0b, 0x05, 0x01, 0x01, 0x02, b'h', b'i']);
+        assert_eq!(decode(&m(&bytes)), Err(DecodeError::DataCountRequired));
+        // With the section present (id 12, before code) it decodes — see the test above.
     }
 
     #[test]
@@ -1349,9 +1625,12 @@ mod tests {
             0x02, 0x0b, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'a', b'd', b'd', 0x00, 0x00,
             0x03, 0x02, 0x01, 0x00,
             0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+            // A code section is now REQUIRED alongside the function section (§5.5.13) — this
+            // fixture omitted it, which the func/code count check correctly calls malformed.
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
         ]);
         let md = decode(&bytes).unwrap();
-        assert_eq!(md.sections.len(), 4);
+        assert_eq!(md.sections.len(), 5);
         assert_eq!(md.comp_types.len(), 1);
         assert_eq!(md.func_sig(0).unwrap().params, vec![ValType::I32, ValType::I32]);
         assert_eq!(md.func_sig(0).unwrap().results, vec![ValType::I32]);
@@ -1420,11 +1699,13 @@ mod tests {
     #[test]
     fn decodes_code_section() {
         // (func (param i32 i32) (result i32) (local i32) local.get 0 local.get 1 i32.add)
+        // Sections in the order §5.5.2 fixes — export (7) BEFORE code (10). This fixture had them
+        // reversed until the section-order check was added and refused it.
         let bytes = m(&[
             0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type
             0x03, 0x02, 0x01, 0x00, // function: 1 func of type 0
-            0x0a, 0x0b, 0x01, 0x09, 0x01, 0x01, 0x7f, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // code
             0x07, 0x07, 0x01, 0x03, b'a', b'd', b'd', 0x00, 0x00, // export
+            0x0a, 0x0b, 0x01, 0x09, 0x01, 0x01, 0x7f, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // code
         ]);
         let md = decode(&bytes).unwrap();
         assert_eq!(md.code.len(), 1);
@@ -1432,7 +1713,17 @@ mod tests {
         assert_eq!(md.code[0].locals[0].count, 1);
         assert_eq!(md.code[0].locals[0].ty, ValType::I32);
         assert_eq!(md.code[0].local_count(), 1);
-        assert_eq!(md.code[0].body, vec![0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b]);
+        // The body is now stored decoded, so assert on the instructions rather than the bytes —
+        // which is the stronger assertion anyway: it checks the decode, not just the slicing.
+        assert_eq!(
+            md.code[0].ir.iter().map(|i| i.op).collect::<Vec<_>>(),
+            vec![
+                crate::opcode::Op::LocalGet,
+                crate::opcode::Op::LocalGet,
+                crate::opcode::Op::I32Add,
+                crate::opcode::Op::End,
+            ]
+        );
     }
 
     #[test]

@@ -1039,6 +1039,20 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
         list.push(Instr { op, imm });
     }
 
+    // An `expr` is terminated by its matching `end` (§5.4.9), so the last instruction must be one.
+    // Both callers decode a complete expression — a function body or a constant expression — and a
+    // body that simply runs out of bytes was previously accepted here and only refused later, by
+    // the validator's control-stack underflow.
+    //
+    // Deliberately a **terminator** check, not a nesting one: full balance (which `end` closes
+    // which opener, and the legacy-EH `delegate` that terminates a `try` without one) is
+    // `precompute_control_flow`'s job, and duplicating that here would be two authorities on the
+    // same rule. Every well-formed expression ends in `end` regardless of what it contains, so this
+    // much is provable in one line.
+    if list.last().map(|i| i.op) != Some(Op::End) {
+        return Err(DecodeError::MissingEnd);
+    }
+
     Ok(list)
 }
 
@@ -1077,9 +1091,9 @@ mod tests {
     #[test]
     fn decodes_br_table() {
         // br_table 0 1 (default 2)
-        let body = [0x0e, 0x02, 0x00, 0x01, 0x02];
+        let body = [0x0e, 0x02, 0x00, 0x01, 0x02, 0x0b];
         let instrs = decode_body(&body).unwrap();
-        assert_eq!(instrs.len(), 1);
+        assert_eq!(instrs.len(), 2); // br_table + the terminating `end`
         assert_eq!(
             instrs[0].imm,
             Imm::BrTable(BrTable { labels: vec![0, 1], default: 2 })
@@ -1113,7 +1127,7 @@ mod tests {
     #[test]
     fn decodes_simd_v128_const() {
         // 0xfd 0x0c <16 bytes> — v128.const with a 1,2,3,4 (i32x4) little-endian payload.
-        let body = [0xfd, 0x0c, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0];
+        let body = [0xfd, 0x0c, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0x0b];
         let instrs = decode_body(&body).unwrap();
         assert_eq!(instrs[0].op, Op::Simd);
         let Imm::Simd(s) = &instrs[0].imm else {
@@ -1126,7 +1140,7 @@ mod tests {
     #[test]
     fn decodes_fc_memory_copy() {
         // 0xfc 0x0a 0x00 0x00 — memory.copy dst-mem 0, src-mem 0.
-        let instrs = decode_body(&[0xfc, 0x0a, 0x00, 0x00]).unwrap();
+        let instrs = decode_body(&[0xfc, 0x0a, 0x00, 0x00, 0x0b]).unwrap();
         assert_eq!(
             instrs[0],
             Instr { op: Op::MemoryCopy, imm: Imm::MemCopy { dst: 0, src: 0 } }
@@ -1138,6 +1152,31 @@ mod tests {
         assert_eq!(decode_body(&[0xff]), Err(DecodeError::UnsupportedOpcode));
     }
 
+    /// An expression must be terminated by its matching `end` (§5.4.9). Without this, a body that
+    /// simply ran out of bytes decoded fine and was only refused later by the validator's control
+    /// stack — the wrong stage for a malformed encoding.
+    #[test]
+    fn rejects_an_expression_with_no_terminating_end() {
+        // i32.const 1 ; drop — and then nothing.
+        assert_eq!(
+            decode_body(&[0x41, 0x01, 0x1a]),
+            Err(DecodeError::MissingEnd)
+        );
+        // An empty expression has no `end` either.
+        assert_eq!(decode_body(&[]), Err(DecodeError::MissingEnd));
+        // The same bytes terminated properly decode.
+        assert!(decode_body(&[0x41, 0x01, 0x1a, 0x0b]).is_ok());
+        assert!(decode_body(&[0x02, 0x40, 0x0b, 0x0b]).is_ok()); // block … end, then the body's end
+
+        // **The boundary, asserted rather than assumed.** `block … end` with the function's own
+        // `end` missing still *ends* in an `end`, so this check passes it — the check is a
+        // terminator check, not a nesting one. That imbalance is caught later, by
+        // `precompute_control_flow` at instantiation and by the validator's control stack. Pinned
+        // here so the limitation is visible in the tests instead of being discovered by someone
+        // trusting the name of the error.
+        assert!(decode_body(&[0x02, 0x40, 0x0b]).is_ok());
+    }
+
     #[test]
     fn rejects_raw_internal_tag_bytes() {
         // `0xd7..=0xfa` are internal Op tags whose real wire form is a prefix + sub-opcode.
@@ -1147,7 +1186,7 @@ mod tests {
         // The real single-byte ops just below the range must still decode.
         assert!(decode_body(&[0xd1, 0x0b]).is_ok()); // ref.is_null
         assert!(decode_body(&[0xd4, 0x0b]).is_ok()); // ref.as_non_null
-        assert!(decode_body(&[0xd6, 0x00]).is_ok()); // br_on_non_null <label>
+        assert!(decode_body(&[0xd6, 0x00, 0x0b]).is_ok()); // br_on_non_null <label>
     }
 
     #[test]

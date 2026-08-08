@@ -46,6 +46,17 @@ rights lattice, the sandbox resolver, and ~20 `fd_*`/`path_*` calls). **`pin` re
 — now T9** (it was slated for T7, then T8, and slipped both times; `security-model.md` carries the
 warning that wasmrt therefore performs no authenticity check today).
 
+**Each pipeline stage owns its own class of rejection (tightened 2026-08-08).** `decode` refuses a
+*malformed* binary — section order and uniqueness (§5.5.2, via `SectionId::order()`, because **the required
+order is not the id order**: `DataCount` is id 12 yet precedes `Code`, and `Tag` is 13 yet sits between
+`Memory` and `Global`), a section whose contents do not fill its declared size, a func/code count
+disagreement, a malformed instruction or const-expression encoding, a missing terminating `end`, and more
+locals than 2^32−1. `validate` refuses an *ill-typed* one, and keeps its own resource ceilings
+(`MAX_LOCALS`) — a different statement from the decoder's representability limit and deliberately not
+merged with it. **Function bodies are decoded during `decode`**, with the IR stored in `Code` (replacing
+the raw bytes, which nothing read once the IR existed): that is what puts encoding errors at the right
+stage, and it also removed one of the two later decodes of the same bytes.
+
 **The shared store is the load-bearing T7 shape.** `Store` holds `code: Vec<InstanceData>` and
 `pools: Pools` as **separate fields**, so a cross-instance call borrows two disjoint pieces — no `Rc`, no
 `RefCell`, no `unsafe`, and no borrow check on the interpreter's hot path. Each instance carries an

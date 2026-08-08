@@ -2,13 +2,16 @@
 
 ## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,593 / 697 / 2,469 — 98.9%**,
-**375 workspace tests**. T9's first pass landed T9a #1/#2/#3 plus three unlisted defects, and all of
-**T9b (size)**, **T9c (performance)** and **T9d (licensing/docs)**. **2026-08-08: T9a#4's memory half is
-DONE** (owner chose option 2) together with `assert_unlinkable` and **link-time import type checking** —
-which that assertion category, unskipped for the first time, revealed had never existed. Still open:
-T9a#4's **table** half (🚦 still a decision-gate — a `funcref` carries no instance identity), #5–#9, #11,
-#12, **T9e `pin`**, **T9f tail calls**. The T8 block below is kept as the v0.9.0 release record.
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,691 / 599 / 2,469 — 99.0%**
+of 62,290 adjudicated (**first time over 99%**), **386 workspace tests**. T9's first pass landed T9a
+#1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
+**T9d (licensing/docs)**. **2026-08-08 landed two more passes:** T9a#4's **memory half** (owner chose
+option 2) with `assert_unlinkable` and **link-time import type checking** — which that assertion
+category, unskipped for the first time, revealed had never existed — and then **T9a#11 + most of #12,
+the decoder-strictness cluster**: seven checks making the *decoder* the stage that rejects a malformed
+binary. Still open: T9a#4's **table** half (🚦 still a decision-gate — a `funcref` carries no instance
+identity), #5, #6, #7, #8, #9, the text-parser remainder of #12, **T9e `pin`**, **T9f tail calls**.
+The T8 block below is kept as the v0.9.0 release record.
 
 ### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
@@ -542,10 +545,43 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   concrete GC types costs 3 correct refusals to recover 1 false one, so equality stays. Residual: 1
   assertion, logged.
 
+  ### ◐ Progress 2026-08-08 (second) — decoder strictness. **61,593/697 → 61,691 / 599 / 2,469 = 99.0%**
+
+  **+98 passes, −98 failures, skips UNCHANGED** — the cleanest column in `testing.md`'s table, because
+  nothing changed about what gets adjudicated; 98 assertions simply started passing. `binary.wast`
+  **128/88 → 208/8**, **`binary-leb128.wast` → 58/0/0 (100%)**, `.wat` corpus 532/534 → **533/534**.
+  386 workspace tests. Clippy, four surfaces, C-ABI gate and Miri green.
+
+  **This closed T9a#11 and most of #12 — and showed they were never two items.** Reading the actual
+  failures instead of the logged descriptions showed one theme in two halves: *rejected at the wrong
+  stage* (the validator refuses it, the decoder should have) and *module was accepted* (over-acceptance,
+  the worse half, and T12-relevant since it is hostile input reaching further than it should). Seven
+  checks, all at decode: section order + uniqueness (16 assertions, and a repeated section had been
+  **silently replacing** the first — the silent-wrong-output class), section size (7), func/code count
+  (8), bodies decoded at decode time, const-expr encodings, the `end` terminator, and the 2^32−1 locals
+  ceiling. Full write-up in `known-issues.md`.
+
+  ⚠️ **The order of sections is not the order of their ids** — `DataCount` is 12 but precedes `Code`
+  (10); `Tag` is 13 but sits between `Memory` and `Global`. `SectionId::order()` is a table for that
+  reason; a `>` on raw ids gets both backwards.
+
+  **Two findings worth keeping.** *(1)* Four of our own hand-built test fixtures were **malformed
+  modules** (export section after code; a function section with no code section) — always malformed,
+  never in a position to be told. A permissive decoder lets bad fixtures accumulate, and they then
+  encode the wrong rule. *(2)* The const-expr sweep must key on a segment's **mode**, not on whether its
+  offset bytes are empty: a *passive* segment has no offset expression, but an *active* one with none is
+  malformed, and the emptiness shortcut excuses the second. A test is written so the shortcut fails.
+
+  **Cost: cold start unchanged within noise.** Bodies decode once now instead of twice later, but `Code`
+  briefly held both the raw bytes *and* the IR — a second copy of every body in every module, measuring
+  ~5% slower cold. Removing the redundant `body` field recovered it: same-session A/B/A gives ~4.5 ms vs
+  ~4.4 ms at 48 KB, a 2–3% difference inside the recorded spread. Steady-state untouched by construction.
+
   ### T9a — Correctness defects (real bugs) `[◐]`
 
   **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ ·
-  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5–#9, #11, #12 open · #10 not a defect.
+  #4 ◐ **memory half ✅, table half 🚦 still gated** · #5–#9 open · **#11 ✅** · **#12 ◐ (binary half done;
+  the text-parser remainder moved to `wat.rs`)** · #10 not a defect.
   Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
   `store1` 4 → 0 · `ref_is_null` 1 → 0 · `i31` 31 → 6 · `load1` 15 → 5 · `type-subtyping` 20 skips → 8 ·
   `imports` +171 passes · `linking` +52 passes / −4 failures.
@@ -562,8 +598,8 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 8 | **`reference-types.wat` → `UndefinedType`**, oracle says valid. Undiagnosed. | ? | 1 wasmtk file. Re-verified still failing 2026-08-06. |
   | 9 | **`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`**, oracle assembles **and runs** them — so this is our type-checker being wrong, not the input. | `validate.rs` | 2 wasmtk files. Re-verified still failing 2026-08-06. |
   | 10 | **`wasmrt_caller_get_memory` always returns `false`.** A durable handle must be tagged against a live store, and during a callback the store is mid-borrow. Callbacks use `wasmrt_caller_read`/`_write` instead — the shape the loaders actually need. | `capi/src/lib.rs` | None today. Revisit only if a loader needs the handle form. |
-  | 11 | **Malformed modules rejected at the wrong STAGE** — caught during *validation* when the decoder should have refused them. The runner distinguishes the two on purpose. | `module.rs` | `binary-leb128.wast` **15**. |
-  | 12 | **Needs triage** — mixed symptoms, not yet root-caused: `binary.wast` **44** (core copy), `func.wast` **19** (a wrong result `0x2a` where `0` expected, *plus* over-accepted malformed modules), `load1.wast` **15** (may be entirely explained by #3 — recheck after fixing it). | — | ~78 combined. **Re-measure after #1–#3; some will evaporate.** |
+  | 11 | ✅ **DONE 2026-08-08.** Malformed modules were rejected at the wrong STAGE — during *validation* where the decoder should have refused them. Seven decode-stage checks landed (section order/uniqueness, section size, func/code count, bodies decoded at decode, const-expr encodings, the `end` terminator, the 2^32−1 locals ceiling). | `module.rs`, `opcode.rs`, `types.rs` | Was `binary-leb128.wast` 15 → **58/0/0, a file at 100%**. |
+  | 12 | ◐ **Mostly DONE 2026-08-08 — and it was never "mixed symptoms".** Reading the actual failures showed #11 and #12 were **one theme in two halves**: wrong-stage rejection, and outright over-acceptance. `binary.wast` **128/88 → 208/8** (both copies). `load1.wast` was indeed explained by #3, as suspected. **What remains is a different cluster: the TEXT parser**, `func.wast` 21 — "unexpected token" 9, "inline function type" 3, "duplicate local" 3, "duplicate func" 1, 2 wrong results (`0x2a` where `0` expected), 2 malformed imports still accepted. | `wat.rs` (not `module.rs`) | ~78 → **~21, and they moved crate-module**. |
 
   ### T9b — Size (the "small" axis) ✅ MEASURED 2026-08-07 `[x]`
   - **Unconditional `data_count` section — FIXED.** Emitted only when `memory.init`/`data.drop` actually

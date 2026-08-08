@@ -213,6 +213,66 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — decoder strictness: the decoder is now the stage that rejects a malformed binary
+
+**Suite 61,593 / 697 / 2,469 → 61,691 / 599 / 2,469 — 99.0%, the first time over 99.** +98 passes,
+−98 failures, **skips unchanged**: no accounting movement, 98 assertions simply started passing.
+`binary.wast` **128/88 → 208/8**, **`binary-leb128.wast` → 58/0/0 (a file at 100%)**. 386 workspace tests.
+
+This came out of measurement rather than the punch list: T9a#11 and #12 named ~78 assertions across
+three files, and reading the actual failures showed they were one theme in two halves — *rejected at the
+wrong stage* (the module is refused, but by the validator) and *module was accepted* (over-acceptance,
+the worse half). Seven checks, all at decode:
+
+1. **Section order and uniqueness (§5.5.2)** — worth 16 assertions on its own, the largest single item.
+   A repeated section had been **silently replacing** the first, because every arm assigns
+   (`functions = decode_function_section(…)`): a module with two function sections ran as the second
+   one. That is the silent-wrong-output class. ⚠️ **The order is NOT the id order**, which is why
+   `SectionId::order()` is a table and not a comparison: `DataCount` is id **12** but must precede
+   `Code` (id 10), and `Tag` (id 13) belongs between `Memory` and `Global` — EH inserted it mid-list.
+   Comparing raw ids would accept both in the wrong place and reject them in the right one.
+2. **A section's contents must occupy exactly its declared size** — 7 assertions. Leftover bytes were
+   simply *absent* from the decoded module: the outer reader had already skipped `size`, so producer and
+   decoder disagreed about the contents while still agreeing where the next section began.
+3. **func/code count mismatch (§5.5.13) at decode**, not validation — 8 assertions.
+4. **Function bodies are decoded at decode time**, with the IR stored in `Code`. A malformed instruction
+   encoding is a decode error by the spec; deferring it meant `decode` accepted modules the validator
+   then rejected (`binary-leb128.wast`'s 15). This also **replaced** `Code::body: Vec<u8>` rather than
+   joining it — see the note on cost below.
+5. **Constant expressions are structurally checked at decode** — global inits, table inits, element and
+   data offsets, element expressions. They are stored raw and read by the validator *and* the
+   interpreter, each with its own little reader, so a malformed encoding surfaced during validation.
+6. **`decode_body` requires the terminating `end`** (§5.4.9). Deliberately a *terminator* check, not a
+   nesting one: full balance is `precompute_control_flow`'s job, and two authorities on one rule is how
+   they drift. The limitation is pinned by a test rather than left to be discovered.
+7. **The 2^32−1 locals ceiling at decode**, kept distinct from the validator's `MAX_LOCALS` resource cap.
+   The two say different things — "these bytes cannot mean anything" versus "we decline to allocate
+   that much" — and collapsing them would lose that.
+
+### Two findings from doing it
+
+- **Our own test fixtures were malformed modules.** Four hand-built vectors put the export section (7)
+  *after* code (10), and one declared a function section with no code section at all. They had always
+  been malformed; nothing had ever been in a position to say so. A decoder that accepts what no
+  conforming producer emits lets malformed fixtures accumulate, and they then encode the wrong rule.
+- **The first version of the const-expr sweep was wrong in a way emptiness-checking would have hidden.**
+  It fed the offset expression of *every* segment to the check, but a **passive** segment has no offset
+  expression, so three tests failed on empty input. The tempting fix — skip empty byte strings — also
+  excuses an *active* segment whose offset is genuinely missing. Keying on the segment's **mode** keeps
+  the two apart, and `a_passive_segment_has_no_offset_expression_to_check` is written so the sloppy
+  version fails it.
+
+### Cost: cold start unchanged within noise
+
+Bodies are now decoded once at decode instead of twice later (validator + each instantiation), and
+instantiation clones the IR rather than re-walking bytes — but `Code` briefly held **both** the raw bytes
+and the IR, a second copy of every function body in every module, which measured as a ~5% cold-start
+regression. Removing the now-redundant `body` field (nothing read it once the IR existed; `body_offset`
+is what the raw form was needed for) brought it back. Same-session A/B/A: **~4.5 ms vs ~4.4 ms at 48 KB,
+a 2–3% difference inside the recorded run-to-run spread** — so: unchanged, not improved. Steady-state is
+untouched by construction (no interpreter change). ⚠️ The session drifted ~10% between A/B/A runs, which
+is itself the reminder that `bench/README.md`'s "same-session A/B/A only" rule is not a formality.
+
 ## ✅ DECIDED + half-shipped 2026-08-08 — T9a#4: imported **memories** land, **tables** stay refused
 
 **Owner decision (2026-08-08): option 2 — ship imported memories, keep tables refused, leave the funcref
@@ -330,8 +390,14 @@ cannot be lifted by accident.
 - **Malformed modules rejected at the *link* stage.** Newly visible now that link failures are adjudicated
   rather than skipped: several `assert_malformed` modules in `memory.wast` / `global.wast` reach linking
   with **empty module and field names**, meaning the *decoder* accepted a malformed import. Same class as
-  T9a#11 (wrong-stage rejection), and previously invisible because the old `BuildErr::Unresolved` counted
-  as a skip. ~4 assertions.
+  T9a#11 (wrong-stage rejection) but **not fixed by the 08-08 decoder pass**, which covered section
+  structure and instruction encodings, not import-name well-formedness. ~4 assertions.
+- **Full control-flow nesting is not checked at decode.** `decode_body` requires the terminating `end`
+  (§5.4.9) but does not model which `end` closes which opener, so `block … end` with the function's own
+  `end` missing decodes and is refused later by `precompute_control_flow` / the validator's control stack.
+  Deliberate — two authorities on one nesting rule is how they drift — and pinned by the last assertion in
+  `opcode::tests::rejects_an_expression_with_no_terminating_end` so the limitation is visible rather than
+  discovered. Costs nothing measured today.
 - **Imported globals link by value, so a *mutable* global import is a snapshot.** Pre-existing and
   documented on `Store::export_global`; the new type check enforces that mutability *matches*, which does
   not make the sharing live. Only a concern if a consumer imports a mutable global and expects writes to

@@ -18,16 +18,28 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, T9a#4 memory half)
+## Spec-suite conformance — current (2026-08-08, decoder strictness) — **99.0%, first time over 99**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a/b (08-07) | **T9a#4 (08-08)** |
-| --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,247 | **61,593** |
-| failed | 871 | 1,521 | 751 | 738 | 655 | **697** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,932 | **2,469** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | **98.9%** of 62,290 adjudicated |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | T9a/b (08-07) | T9a#4 (08-08) | **decoder (08-08)** |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,247 | 61,593 | **61,691** |
+| failed | 871 | 1,521 | 751 | 738 | 655 | 697 | **599** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,932 | 2,469 | **2,469** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 98.9% | 98.9% | **99.0%** of 62,290 |
+
+### The second 08-08 column: decoder strictness. +98 passes, −98 failures, skips **unchanged**
+
+The cleanest column in the table: no accounting movement at all, because nothing changed about what
+gets adjudicated — 98 assertions simply started passing. `binary.wast` **128/88 → 208/8** (both copies
+summed), **`binary-leb128.wast` → 58/0/0, a file at 100%**, `exact.wast` +1. The `.wat` corpus went
+532/534 → **533/534**; the `wasm_mod` corpus still validates 12/12.
+
+One theme: **the decoder must be the stage that rejects a malformed binary.** Seven checks, all of
+which the validator had been catching one stage too late (or not at all) — section order and
+uniqueness, section size, func/code count, bodies decoded at decode time, const-expr encodings, the
+`end` terminator, and the 2^32−1 locals ceiling. Details and the two findings in `known-issues.md`.
 
 ### The 08-08 column: +346 passes, +42 failures, −463 skips, and **no file lost a single pass**
 
@@ -92,9 +104,14 @@ runner also distinguishes **"nothing defines this import"** (a real unlinkable v
 cannot back this kind"** (a gap → skip); collapsing the two, as `BuildErr::Unresolved` did, is precisely
 what made `assert_unlinkable` unimplementable.
 
-Worst remaining files (2026-08-08): `annotations` 51 and `binary` 44×2 (proposals wasmrt does not target),
-`type-subtyping` 44, `binary` 44 (core), `func` 21, `custom-page-sizes-invalid` 20, `binary-leb128` 15.
+Worst remaining files (2026-08-08, after the decoder pass): `annotations` 51 (a proposal wasmrt does not
+target), `type-subtyping` 44, `func` 21, `custom-page-sizes-invalid` 20, `memory64-imports` 26.
 **All 284 files parse (0 unparseable).** The ranked punch list is in `known-issues.md`.
+
+**The remaining `func.wast` 21 are the TEXT parser, not the decoder** — "unexpected token" 9, "inline
+function type" 3, "duplicate local" 3, "duplicate func" 1, plus 2 wrong results and 2 malformed imports
+the decoder still accepts. A separate cluster from the binary work above, and the assembler is where it
+lives.
 
 The first run scored 96.7% and surfaced four bugs the hand vectors could not — a panic, an element-segment
 encoding no decoder could read, truncated out-of-range constants, and mis-placed digit separators (all in
@@ -132,9 +149,19 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-08, T9a#4 memory half)
+## Current test state (2026-08-08, decoder strictness)
 
-**375 workspace tests, all green** (349 core + 26 capi), clippy clean on all four build surfaces; the
+**386 workspace tests, all green** (360 core + 26 capi), clippy clean on all four build surfaces; the
+C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. The decoder pass added 11, and two of them are
+there because writing the check the obvious way is wrong: `a_passive_segment_has_no_offset_expression_to_check`
+(the const-expr sweep must key on the segment's **mode**, not on whether the byte string is empty —
+keyed on emptiness it would also excuse an *active* segment with a missing offset, and that is the
+version this test fails), and `rejects_an_expression_with_no_terminating_end`, whose last assertion pins
+the **limitation**: `block … end` with the function's own `end` missing still ends in an `end`, so the
+terminator check passes it. Full nesting balance stays `precompute_control_flow`'s job. A test that
+asserts where a check *stops* working is worth as much as one asserting where it starts.
+
+Previous (2026-08-08, T9a#4 memory half): **375 workspace tests** (349 core + 26 capi); the
 C-ABI gate (74/74 + `c_smoke`) and Miri (26/26) pass. T9a#4 added 12, each aimed at a way the memory half
 could be wrong rather than at "it links": a write through the *importer* is visible to the *exporter* (a
 copy-at-link-time bug passes any one-instance test); a **two-provider** case so the importer's index 0 and

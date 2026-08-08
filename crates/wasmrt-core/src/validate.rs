@@ -31,7 +31,7 @@ use crate::features::{
     op_feature, simd_sub_feature, table_element_feature, val_type_feature, Feature, Features,
 };
 use crate::module::{Code, CompType, FuncType, Module};
-use crate::opcode::{self, decode_body, HeapType, Imm, Instr, Op, RefType};
+use crate::opcode::{self, HeapType, Imm, Instr, Op, RefType};
 use crate::reader::Reader;
 use crate::types::{DecodeError, RefHeap, ValType};
 
@@ -566,7 +566,10 @@ fn validate_function(
         locals.resize(locals.len() + l.count as usize, l.ty);
     }
 
-    let instrs = decode_body(&code.body)?;
+    // Already decoded, at decode time — where a malformed instruction stream belongs. This used to
+    // call `decode_body` here, which both put the error at the wrong stage and decoded every body
+    // a second time.
+    let instrs = &code.ir;
 
     // Local-init: params + defaultable locals start initialized; a non-nullable-ref local
     // starts uninitialized (function-references, §3.3.5).
@@ -590,7 +593,7 @@ fn validate_function(
     };
     // The whole body is an implicit block of type [] -> results.
     v.push_ctrl(FrameKind::Block, Vec::new(), ft.results.clone())?;
-    for instr in &instrs {
+    for instr in instrs {
         v.step(instr)?;
     }
     if !v.ctrls.is_empty() {
@@ -2070,11 +2073,13 @@ mod tests {
 
     #[test]
     fn validates_well_typed_add() {
+        // Export (7) before code (10), the order §5.5.2 fixes — this fixture had them reversed
+        // until the decoder started enforcing it.
         let bytes = m(&[
             0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
             0x03, 0x02, 0x01, 0x00,
-            0x0a, 0x0b, 0x01, 0x09, 0x01, 0x01, 0x7f, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
             0x07, 0x07, 0x01, 0x03, b'a', b'd', b'd', 0x00, 0x00,
+            0x0a, 0x0b, 0x01, 0x09, 0x01, 0x01, 0x7f, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
         ]);
         let md = decode(&bytes).unwrap();
         assert_eq!(validate(&md), Ok(()));
@@ -2106,9 +2111,22 @@ mod tests {
 
     #[test]
     fn rejects_function_code_count_mismatch() {
-        // function section declares 1 func, but no code section.
-        let bytes = m(&[0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00]);
-        let md = decode(&bytes).unwrap();
+        // The decoder now refuses this at the right stage (§5.5.13 is malformed, not invalid), so
+        // it can no longer be reached through `decode` — pinned there by
+        // `module::tests::rejects_function_code_count_mismatch_at_decode`.
+        //
+        // The validator's arm stays and is exercised by building the mismatch directly, because
+        // `Module`'s fields are public: `validate` can be handed a module nobody decoded. A check
+        // that is only harmless "because that case cannot occur" becomes a bug the moment it can —
+        // the third-order lesson from T8.
+        let bytes = m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b,
+        ]);
+        let mut md = decode(&bytes).unwrap();
+        assert_eq!(validate(&md), Ok(()));
+        md.code.clear();
         assert_eq!(validate(&md), Err(ValidateError::CountMismatch));
     }
 

@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::module::{CompKind, CompType, FuncType, Module, StorageType};
-use crate::opcode::{decode_body, BlockType, Catch, CatchKind, HeapType, Imm, Instr, Op, RefType};
+use crate::opcode::{BlockType, Catch, CatchKind, HeapType, Imm, Instr, Op, RefType};
 use crate::reader::Reader;
 use crate::types::{DecodeError, RefHeap};
 
@@ -1121,7 +1121,10 @@ impl Store {
         for (&type_index, code) in module.functions.iter().zip(&module.code) {
             let ty = module.func_sig(type_index).ok_or(Trap::UndefinedFunc)?;
             let num_locals = ty.params.len() + code.local_count() as usize;
-            let ir = decode_body(&code.body)?;
+            // Cloned, not re-decoded: the module carries the decoded body already (a clone of the
+            // instruction vector is cheaper than walking the bytes again, and this ran once per
+            // instantiation).
+            let ir = code.ir.clone();
             let cf = precompute_control_flow(&ir)?;
             func_bodies.push(FuncBody {
                 ty,

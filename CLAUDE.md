@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — second pass landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — two passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **98.9%** (61,593 / 697 / 2,469 of 62,290), **375
-workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.0%** (61,691 / 599 / 2,469 of 62,290) — **first time
+over 99%** — **386 workspace tests**, no file lost a pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -29,7 +29,13 @@ genuinely shared; imported **tables** stay refused because a `funcref` carries n
 shared table would dispatch to the wrong function). That pass also implemented `assert_unlinkable`, whose
 first run showed **imports had never been type-checked at link time** — ⚠️ **a blanket skip is not a
 neutral placeholder; that one had been insuring a silent-wrong-call defect since T7b.**
-**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5–#9, #11, #12, `pin`, **tail calls**.
+**The second pass closed T9a#11 and most of #12 — decoder strictness**: seven checks making the *decoder*
+the stage that rejects a malformed binary (section order/uniqueness, section size, func/code count, bodies
+decoded at decode with the IR stored in `Code`, const-expr encodings, the `end` terminator, the 2^32−1
+locals ceiling). ⚠️ **Section order is not id order** (`DataCount` is 12 but precedes `Code`; `Tag` is 13
+but precedes `Global`), and a repeated section had been **silently replacing** the first.
+**Still open in T9:** T9a#4's **table** half (🚦 decision-gate), #5–#9, #12's **text-parser** remainder
+(`func.wast` 21, in `wat.rs`), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`
