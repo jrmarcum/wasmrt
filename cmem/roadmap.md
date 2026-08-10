@@ -943,7 +943,33 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   implementation, RUN it.** "What does wasmtime's `Module::new` do" invites answering from memory; three
   lines through the real binary settled it in seconds *and* produced two numbers to assert against.
 
-  🚦 Two T12 items came out of this — **T12z** (sweep an invariant across every entry point, because the
+  ### 🔒 Then the symlink-creation policy (owner, 2026-08-10)
+
+  Chasing the same question into the **rights masks** found a real hole in the oracle and produced a
+  policy decision in both.
+
+  ⚠️ **wazmrt had no `path_symlink` right at all** — the bit list jumped `1 << 23` to `1 << 25`. So
+  `write_mask` could not strip it and the handler demanded `path_open`, a READ right: **a guest could
+  plant symlinks inside a `--ro-dir` read-only preopen.** wasmrt was correct throughout
+  (`PATH_SYMLINK = 1 << 24`, in `WRITE_MASK`, demanded by `path_symlink`). Fixed in `wazmrta6d745`.
+  ⚠️⚠️ **wazmrt's own read-only test passed the whole time** — it asserts `ro & write_mask == 0`, which
+  is **trivially true for a right that is not in the mask**. The guard and the gap shared a blind spot.
+
+  **The owner's policy:** *"symlink creation during runtime for the purpose of running processes shall
+  be illegal; creating symlinks for a program install situation should be legal."* So `--dir` now grants
+  `READ_WRITE = ALL & !PATH_SYMLINK` and `--allow-symlink` opts back in. The premise is sound: composing
+  modules over shared linear memory is the **store's** job (imported memories are genuinely shared since
+  T9a#4), so a workload run never needs new links on disk — and denying creation shrinks what an
+  external process could later repoint, which is what makes the accepted TOCTOU residual survivable.
+
+  **Enforced at COMPILE TIME** (`const _: () = assert!(…)`), because every operand is a constant: a
+  violation fails the **build**, including for a crate depending on `wasmrt-core`, which a `#[test]`
+  would not. Mutation-verified. ⚠️ It governs **creation, not traversal** — following a pre-existing link
+  needs `PATH_OPEN`, which both grants keep, and that is asserted too.
+
+  🚦 Three T12 items came out of this — **T12x** (diff the two runtimes' security tables against each
+  other; both of today's defects were "the property holds in one and not the other, and nothing compared
+  them"), **T12z** (sweep an invariant across every entry point, because the
   bug is never "nobody does X" but "three of the four do X") and **T12y** (the oracle's sandbox-escape
   tests do not run on this host).
 

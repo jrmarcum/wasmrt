@@ -152,6 +152,16 @@ assembles AND RUNS them" is true, but `wazmrt <module> <export>` DOES NOT VALIDA
 validating path the oracle reports `TypeMismatch` too, agreeing with wasmrt. **Cite the subcommand,
 not the tool.** What landed instead: validation failures now name the function
 (`validation FAILED in function 8`), since localizing this by hand is what the item actually cost.
+**2026-08-10 — the validation / symlink round.** ⚠️ **`wasmrt run` executed WITHOUT VALIDATING** while
+`wasmrt wasi` refused the same bytes — **the asymmetry was the bug**, and the oracle had it worse (both
+execute paths *and* its C ABI). Both fixed; an invalid module now reports offset + function +
+expected-vs-found, **matched byte-for-byte against wasmtime 47** (same offsets, 33 and 61, pinned as
+tests). 🔒 **Symlink CREATION is now denied by default** (owner): `--dir` grants `ALL & !PATH_SYMLINK`,
+`--allow-symlink` opts in for installers — enforced by `const` assertions, so a violation fails the
+**build**. ⚠️ Chasing that found **a real hole in the oracle**: wazmrt had **no `path_symlink` right at
+all**, so `--ro-dir` never stripped it and a guest could plant links in a read-only preopen.
+🔒 **The oracle is no longer at its original freeze** — it moved four times on 2026-08-10, each
+owner-authorized and deliberately re-baselined; `check-wazmrt.sh` reports NO DRIFT.
 **T9a #1–#9 and #11 are now all closed. Still open in T9:** `func.wast` 8 (the withdrawn body-order
 rule + duplicate identifiers), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
