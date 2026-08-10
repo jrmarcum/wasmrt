@@ -1247,6 +1247,52 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   3. **A careless or hostile EMBEDDER** misusing the C ABI. (Distinct from a hostile guest, and the only
      adversary that meets `unsafe` code.)
 
+  ### T12z — Sweep an INVARIANT across every entry point, not one site at a time *(added 2026-08-10)* `[ ]`
+
+  **The owner's framing, and it is the right one for a security review:** *"better to identify an issue
+  and fix it than let it trip us up later — I foresee more of these as we approach completion and
+  security review."* Two defects this week were the same shape, and neither was "nobody does X":
+
+  | invariant | held at | missing at |
+  | --- | --- | --- |
+  | validate before executing | summarize, `wasi`, C ABI | **`wasmrt run`** (and 3 wazmrt sites) |
+  | a value handle carries its issuing store | the C ABI (T8) | **core's `InstanceId`** (until T9a#3) |
+
+  **The bug is "three of the four do X".** So the T12 method is not "audit file by file" but: name an
+  invariant, enumerate **every** entry point in a table, and check the property at each. Candidates
+  worth a table each — validation before execution ✅ done; **bounds-checking guest-derived indices**;
+  **store-tag checking on every handle**; **resource ceilings honoured on every allocation path**;
+  **`no_std` parity** (a `#[cfg(feature = "std")]` guard that silently no-ops is the same class);
+  **every `wasmrt_*` C entry point rejecting a NULL/foreign/stale handle**.
+
+  Prefer one guard on a predicate the paths already share over N copies — wazmrt's `will_execute`
+  already existed to gate pin verification, so validation hung off it and a future execute path
+  inherits it. `best-practices.md` §3.4 carries the generalization.
+
+  ### T12y — The oracle's sandbox-escape tests DO NOT RUN on this machine `[ ]`
+
+  ⚠️ **Found while answering "are the 4 skipped tests meant to be skipped?" — they are conditional, and
+  the condition is met here, so they skip.** wazmrt's `zig build test` reports **489/493, 4 skipped**;
+  all four are the same two tests in `src/wasi.zig`, once per test binary:
+
+  - `symlink traversal: in-sandbox links follow, escaping links refused (#17/4.3)`
+  - `symlink resolver fuzz: no adversarial topology reaches outside the preopen`
+
+  Both bail with `error.SkipZigTest` when the host refuses to create a symlink, and **this host does**:
+  `New-Item -ItemType SymbolicLink` fails with *"Administrator privilege required"*. Windows needs
+  Developer Mode or elevation.
+
+  **These are the sandbox-escape tests.** The skip is honest — with no link there is nothing to
+  traverse — but the effect is that **the escape properties are unverified in this environment**, which
+  is exactly the wrong thing to discover during a security review rather than before it. The source
+  notes one case is covered on Windows another way (`examples/wasi_symlink_traversal.zig`, the
+  absolute-target canary), so the coverage is partial, not absent.
+
+  **Action before T12:** enable Developer Mode (or run the suite elevated once) and confirm all four
+  turn into passes; if any then *fails*, that is a real finding the skip has been hiding. wasmrt's own
+  sandbox tests should get the same treatment — its resolver is the one place the port knowingly
+  diverges (`std` has no dir-relative open, `security-model.md`).
+
   ### T12a — Reachable panics are a DoS surface, and the release profile makes them fatal `[ ]`
   **`[profile.release]` sets `panic = "abort"`.** For a library whose purpose is to contain untrusted
   code, **any panic reachable from hostile input kills the embedder's process outright** — no unwind, no
