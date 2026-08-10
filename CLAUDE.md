@@ -18,10 +18,11 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — twelve passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — thirteen passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,037 / 393 / 2,245 of 62,430),
-**435 workspace tests** (407 core + 28 capi), Miri 28/28, no file lost a pass in any pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,113 / 385 / 2,163 of 62,498),
+**438 workspace tests** (410 core + 28 capi), Miri 28/28, no file lost a pass in any pass. The `.wat`
+corpus assembles **534/534** for the first time, with 0 decode failures. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -124,8 +125,27 @@ so two distinct identifiers collided on one name. ⚠️ **One probe of the four
 left alone** — `linechar` admits any character but a newline, so a control byte in a *comment* is
 legal, and a test pins that it stays accepted: **tightening what the grammar permits is the same error
 as accepting what it forbids.**
-**Still open in T9:** #8, #9, `func.wast` 8 (the withdrawn body-order rule + duplicate identifiers),
-`pin`, **tail calls**.
+**The thirteenth pass did T9a#8 — logged at "1 wasmtk file", it delivered 76 assertions.**
+`immediate_arity` ended in `_ => 0` and the emitter's match in `_ => {}`, so **four instructions were
+emitted as bare opcodes with their operand left in the token stream**: `call_ref`/`return_call_ref`
+(typeidx) and `br_on_null`/`br_on_non_null` (labelidx). All four decode and execute correctly — only
+the *assembler* was wrong. ⚠️ **None of the three symptoms named the assembler**: folded `call_ref`
+shifted every following byte into a body the **decoder** rejected for a missing `end`, and the flat
+forms blamed the *next* token with `UnknownInstr` — which is why `gc-linked-list.wat` sat as an
+unexplained "1 of 534" logged **separately from #8**. One cause, three symptoms, two punch-list items.
+`call_ref.wast` → **31/0/0**, `br_on_null.wast` → **7/0/0**, `ref_as_non_null.wast` → **5/0/0**,
+`unreached-valid.wast` → **10/0/0**. 🆕 **The gate had been measuring the wrong thing** — the `.wat`
+corpus check ran *assemble only* and read 533/534 while `call_ref`'s output was undecodable.
+**"The assembler returned Ok" is evidence about the parser, not the emitter**; the corpus gate is now
+assemble→decode→validate, and reads **534/534 with 0 decode failures**. ✅ **T10a's field-coverage
+sweep landed for opcodes** — `Op::from_u8` makes the opcode space enumerable, so a test walks all 256
+single-byte opcodes and asserts the decoder and assembler agree about which take an immediate. That is
+the **fourth** instance of the emitter mechanism; T10a predicted "more than three" and is 4-for-4.
+⚠️ **Mutation-verified — and the first attempt LIED**: a `perl` substitution silently failed to match,
+the test passed, and that reads exactly like "my check is decoration". **Confirm the mutation applied
+before believing the mutation test.**
+**Still open in T9:** #9 (the last `.wat`-corpus failure), `func.wast` 8 (the withdrawn body-order
+rule + duplicate identifiers), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`

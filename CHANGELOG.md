@@ -22,6 +22,12 @@ measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt a
   instantiation (§4.5.5), after the data and element segments so it can observe them; a trap in it
   fails the instantiation.
 
+- **`call_ref`, `return_call_ref`, `br_on_null` and `br_on_non_null` now assemble correctly.** The
+  assembler did not know these four instructions take an immediate, so it emitted a bare opcode and
+  left the operand in the token stream — producing either an undecodable module or a confusing
+  `UnknownInstr` about the *following* token. They decoded and executed correctly all along; only the
+  text assembler was affected.
+
 ### Changed
 
 - **The text format is now strict about its source character set** (§6.2/§6.3). Control characters

@@ -11,8 +11,8 @@ defects the list never had: a cross-store `InstanceId` that let a guest silently
 memory, and — found while wiring #7 — **the start function, which was decoded, validated and printed
 but never executed** (§4.5.5).
 
-**Still open in T9:** T9a **#8**, **#9**, the text-parser remainder of **#12**, **T9e `pin`**,
-**T9f tail calls**. #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
+**Still open in T9:** T9a **#9** (the last `.wat`-corpus failure), the text-parser remainder of
+**#12**, **T9e `pin`**, **T9f tail calls**. #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
 
 ### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
@@ -517,7 +517,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
      just plumbing; imported **tables** need the funcref encoding decided first, and that touches a
      recorded invariant. **Do not implement imported tables without it.**
 
-  **Still open in T9** (as of the eleventh pass): T9a **#8**, **#9**, the text-parser remainder of
+  **Still open in T9** (as of the thirteenth pass): T9a **#9**, the text-parser remainder of
   **#12** · **T9e `pin`** · **T9f tail calls**. #10 stays a non-issue by design. Note 2 above is
   now **resolved** — the funcref carries its owning instance and imported tables ship.
 
@@ -849,10 +849,49 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   same error as accepting what it forbids**, and the only thing separating them was reading the
   production.
 
+  ### ◐ Progress 2026-08-08 (thirteenth) — T9a#8. **Logged at 1 file, delivered 76 assertions**
+
+  **62,037/393/2,245 → 62,113 / 385 / 2,163 = 99.4%.** +76 passes, −8 failures, **−82 skips**. Four
+  files reached zero: `call_ref.wast` 4/4/27 → **31/0/0**, `br_on_null.wast` 1/3/6 → **7/0/0**,
+  `ref_as_non_null.wast` 1/1/4 → **5/0/0**, `unreached-valid.wast` 1/2/9 → **10/0/0**;
+  `return_call_ref.wast` 10/5/36 → 40/7/0. No file lost a pass. 438 tests.
+
+  🆕 **The entire `.wat` corpus now assembles — 534/534 for the first time**, with **zero** decode
+  failures on a full assemble→decode→validate round trip. Only the two `39_JstyperMixed` files (T9a#9)
+  fail, at validation.
+
+  **The defect.** `immediate_arity` ended in `_ => 0` and the emitter's match ended in `_ => {}`, so an
+  instruction nobody had listed was emitted as a **bare opcode with its operand left in the token
+  stream**. Four were in that state: `call_ref` and `return_call_ref` (a type index each),
+  `br_on_null` and `br_on_non_null` (a label each). All four are in the opcode table, decode
+  correctly, and run correctly — only the *assembler* did not know they take an immediate.
+
+  ⚠️ **Not one of the three symptoms said "the assembler does not know this instruction."**
+  `call_ref` folded produced a module the **decoder** rejected for a missing `end` (the operand shifted
+  every following byte); `call_ref` flat reported `UnknownInstr` about the *next* token; `br_on_null`
+  did the same, which is why `gc-linked-list.wat` had sat as an unexplained "1 of 534" separate from
+  #8 entirely. **One cause, three unrelated-looking bugs, in two separately-logged items.**
+
+  ⚠️ **Logged as "1 wasmtk file, undiagnosed"; it was worth 76 spec assertions** — §1.3 again, and the
+  reason is the same: a module that will not build takes its whole file's assertions into *skips*, and
+  the punch-list entry counted only the one file someone had happened to notice.
+
+  **The generalization — T10a's field-coverage sweep, now landed.** `Op::from_u8` makes the opcode
+  space enumerable, so a test walks all 256 single-byte opcodes and asserts: **if the decoder reads an
+  immediate for an op, the assembler must write one** (and the converse). The decoder is the right
+  oracle because it is the half that defines the binary format. Ops with bespoke emitters — block
+  types, `br_table`, `call_indirect`, `select_t`, memargs — are listed explicitly, so a *new* op is
+  neither generic nor special until someone classifies it.
+
+  ⚠️ **Mutation-verified — and the first attempt lied.** A `perl` substitution silently failed to
+  match, the test passed, and the obvious reading was "the sweep is decoration". Re-doing it with
+  `sed` **and grepping to confirm the line was gone** made it fail and name all four ops exactly.
+  **A no-op mutation and a worthless check produce the same observation** (§4.2a).
+
   ### T9a — Correctness defects (real bugs) `[◐]`
 
   **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ · **#4 ✅** ·
-  **#5 ✅** · **#6 ✅** · **#7 ✅** · #8, #9 open · **#11 ✅** · **#12 ◐ (binary half done;
+  **#5 ✅** · **#6 ✅** · **#7 ✅** · **#8 ✅** · #9 open · **#11 ✅** · **#12 ◐ (binary half done;
   the text-parser remainder moved to `wat.rs`)** · #10 not a defect ·
   **#13 ✅ (unlisted — the start function never ran)**.
   Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
@@ -869,7 +908,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 6 | ✅ **DONE 2026-08-08, in two halves — and the logged cause was WRONG.** Not a missing depth model: there was **no declared-subtype validation at all**. Half one: finality (the decoder read `0x50`/`0x4f` identically) + §3.4.5 structural matching. Half two: **type canonicalisation** — rec groups reduced to structural keys, `is_subtype` comparing canonical ids, and `call_indirect` no longer comparing signatures by raw bits. Together they caught **two assembler defects**: open types emitted as final, and every `(rec …)` group flattened (`0x4e` never emitted). | `validate.rs`, `module.rs`, `wat.rs`, `interp.rs` | `type-subtyping.wast` 36/44 → **62/13**; `type-equivalence` 7/10/3 → **10/2/0**; `ref_cast`/`ref_test` → 0 failures. Residual: **cross-module** identity, ~11, needing a `Store` type registry. |
   | 7 | ✅ **DONE 2026-08-08.** The byte offsets deferred at **T2**. `Instr.offset: u32` rides in existing padding (pinned by a `size_of` test); frames are built **on the way out** through `call_function`, not as a shadow stack; the frozen C ABI went live with **no ABI change**. ⚠️ The obvious `pc: &mut usize` plumbing **measured 3.6% slower** on the steady loop — a one-shot closure recovered it. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only (0 suite assertions, as predicted) — but tracing where an *instantiation* trap gets its frames is what uncovered #13. |
   | 13 | 🆕 ✅ **DONE 2026-08-08 — the start function never ran. SILENT WRONG OUTPUT.** §4.5.5 step 11. `Module::start` was decoded, validated, assembled and printed by the CLI; nothing executed it. A module initialized entirely by `(start $f)` returned defaults with no error at any stage. Fixed in `instantiate`, **after** the segments so it can observe them; a trap in it fails the instantiation. | `interp.rs` | **+12 assertions.** `start.wast` 8/7 → **15/0**, `start0.wast` 5/3 → **8/0**, `linking3.wast` 11/1 → **12/0**, `linking.wast` +1. **10 of them sat in files named for the feature for five releases** — see the lesson above. |
-  | 8 | **`reference-types.wat` → `UndefinedType`**, oracle says valid. Undiagnosed. | ? | 1 wasmtk file. Re-verified still failing 2026-08-06. |
+  | 8 | ✅ **DONE 2026-08-08 — the assembler did not know four instructions took immediates.** `immediate_arity` ended in `_ => 0` and the emitter in `_ => {}`, so `call_ref`, `return_call_ref`, `br_on_null` and `br_on_non_null` were emitted as **bare opcodes with their operand left in the token stream**. All four decode and run correctly; only the assembler was wrong. ⚠️ None of the three symptoms named the assembler — folded `call_ref` produced a module the *decoder* rejected for a missing `end`, flat `call_ref` and `br_on_null` reported `UnknownInstr` about the *next* token. A **field-coverage sweep** over all 256 single-byte opcodes (T10a's, now landed) asserts the decoder and assembler agree about which ops take immediates. | `wat.rs` | ⚠️ **Logged at "1 wasmtk file"; delivered 76 assertions** (§1.3 — the punch list counted the one file someone noticed, not the skips). `call_ref.wast` → **31/0/0**, `br_on_null.wast` → **7/0/0**, `ref_as_non_null.wast` → **5/0/0**, `unreached-valid.wast` → **10/0/0**, `return_call_ref.wast` 10/5/36 → 40/7/0. 🆕 It also fixed `gc-linked-list.wat`, the long-standing "1 of 534" logged *separately* — **the `.wat` corpus now assembles 534/534 for the first time**. |
   | 9 | **`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`**, oracle assembles **and runs** them — so this is our type-checker being wrong, not the input. | `validate.rs` | 2 wasmtk files. Re-verified still failing 2026-08-06. |
   | 10 | **`wasmrt_caller_get_memory` always returns `false`.** A durable handle must be tagged against a live store, and during a callback the store is mid-borrow. Callbacks use `wasmrt_caller_read`/`_write` instead — the shape the loaders actually need. | `capi/src/lib.rs` | None today. Revisit only if a loader needs the handle form. |
   | 11 | ✅ **DONE 2026-08-08.** Malformed modules were rejected at the wrong STAGE — during *validation* where the decoder should have refused them. Seven decode-stage checks landed (section order/uniqueness, section size, func/code count, bodies decoded at decode, const-expr encodings, the `end` terminator, the 2^32−1 locals ceiling). | `module.rs`, `opcode.rs`, `types.rs` | Was `binary-leb128.wast` 15 → **58/0/0, a file at 100%**. |
@@ -1067,11 +1106,25 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   against the pre-hunt baseline; every finding either fixed or logged in `known-issues.md` with its
   `file:line` and why it was left.
 
-  ### T10a — The EMITTER audit: forms reconstructed from partial facts *(added 2026-08-08)* `[ ]`
+  ### T10a — The EMITTER audit: forms reconstructed from partial facts *(added 2026-08-08)* `[◐]`
 
-  **A named sub-task because the same defect has now occurred three times in two passes, and each was
-  found by accident** — by some *other* check happening to start reading a field the emitter had
-  dropped. This is not a category from the five above; it is a specific mechanism with a specific audit.
+  ✅ **The opcode half landed 2026-08-08 with T9a#8, and it paid immediately.** The sweep below,
+  applied to the *instruction* table rather than to `ModuleBuild`, found **four instructions the
+  assembler did not know took immediates** (`call_ref`, `return_call_ref`, `br_on_null`,
+  `br_on_non_null`) — emitted as bare opcodes with their operand left in the token stream. That is a
+  **fourth instance** of this mechanism, and again nothing looked for it directly: it surfaced as
+  three unrelated-looking bugs across two separately-logged punch-list items. `Op::from_u8` makes the
+  opcode space enumerable, so the check walks all 256 single-byte opcodes and asserts the **decoder**
+  and the **assembler** agree about which ops take an immediate, in both directions. ⚠️ Expect the
+  prediction below ("more than three") to keep holding: it is now 4-for-4.
+
+  **Still open: the `ModuleBuild` half** — the round-trip property test and the field-coverage grep
+  described below, plus the shorthand review. Those cover *module structure*; the opcode sweep covers
+  only *instruction immediates*.
+
+  **A named sub-task because the same defect has now occurred four times, and each was found by
+  accident** — by some *other* check happening to start reading a field the emitter had dropped. This
+  is not a category from the five above; it is a specific mechanism with a specific audit.
 
   **The mechanism.** `wat.rs`'s parser records a set of facts about a form; the emitter then
   reconstructs the binary form from **a subset** of them, and the dropped fact turns out to be
@@ -1086,6 +1139,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 1 | Element-segment **reftype** (form 4 has no reftype field) | `funcref` hardcoded, so `(elem (ref func) …)` had its type rewritten | T8's `export_global` making `table.wast` buildable |
   | 2 | **Finality** — the parser saw `sub` vs `sub final` vs bare | keyed the wrapper on *the supertype's presence alone*, so `(sub (struct …))` emitted a **bare** comptype = `final` | the new §3.4.5 finality check reading the flag |
   | 3 | **Rec-group extent** — `(rec …)` boundaries | flattened to singleton groups; `0x4e` was emitted **nowhere** | type canonicalisation, which made group identity observable |
+  | 4 | **That an instruction HAS an immediate** — `call_ref`/`return_call_ref` (typeidx), `br_on_null`/`br_on_non_null` (labelidx) | a bare opcode, operand left in the token stream: folded `call_ref` shifted every following byte into an undecodable body, flat forms blamed the *next* token with `UnknownInstr` | T9a#8, chasing one `.wat` file — ✅ **now caught by the sweep** |
 
   **The audit, which must not be another read-through.** Two mechanical checks, either of which would
   have caught all three:

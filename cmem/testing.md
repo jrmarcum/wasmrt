@@ -18,16 +18,50 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, the text source character set) — **99.4%**
+## Spec-suite conformance — current (2026-08-08, T9a#8 assembler immediates) — **99.4%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | T9a#7 + start (08-08) | **charset (08-08)** |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | 61,987 | **62,037** |
-| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | 441 | **393** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | **2,245** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | **99.4%** of 62,430 |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | T9a#7 + start (08-08) | charset (08-08) | **T9a#8 (08-08)** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | 61,987 | 62,037 | **62,113** |
+| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | 441 | 393 | **385** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | 2,245 | **2,163** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | 99.4% | **99.4%** of 62,498 |
+
+### The thirteenth 08-08 column: T9a#8. **Logged at "1 file", delivered 76 assertions**
+
+**+76 passes, −8 failures, −82 skips.** Four files to zero: `call_ref.wast` 4/4/27 → **31/0/0**,
+`br_on_null.wast` 1/3/6 → **7/0/0**, `ref_as_non_null.wast` 1/1/4 → **5/0/0**, `unreached-valid.wast`
+1/2/9 → **10/0/0**; `return_call_ref.wast` 10/5/36 → 40/7/0. No file lost a pass. **438 tests.**
+
+🆕 **A new corpus measurement, and it is the one that mattered.** The `.wat` gate had only ever run
+*assemble* — 533/534. Running the full **assemble → decode → validate** round trip instead shows the
+real state: **534/534 assemble, 0 decode failures**, and the only 2 validate failures are the
+`39_JstyperMixed` pair (T9a#9). Before this pass the same round trip found the `call_ref` module
+undecodable — **"the assembler returned Ok" was never evidence, and the gate had been asserting only
+that.**
+
+**The defect:** `immediate_arity` ended in `_ => 0` and the emitter's match in `_ => {}`, so four
+instructions were emitted as **bare opcodes with their operand left in the token stream** —
+`call_ref`, `return_call_ref` (typeidx), `br_on_null`, `br_on_non_null` (labelidx). All four decode
+and execute correctly; only the assembler was wrong.
+
+⚠️ **None of the three symptoms named the assembler.** Folded `call_ref` shifted every following byte
+and produced a body the *decoder* rejected for a missing `end`; flat `call_ref` and `br_on_null` both
+reported `UnknownInstr` about the *next* token — which is why `gc-linked-list.wat` sat as an
+unexplained "1 of 534" logged **separately from #8**. One cause, three symptoms, two punch-list items.
+
+⚠️ **§1.3 again:** the entry read "1 wasmtk file, undiagnosed" because that is the one file someone
+noticed; the cost lived in the 82 skips of five spec files that could not build.
+
+**The generalization:** `Op::from_u8` makes the opcode space enumerable, so a test now walks all 256
+single-byte opcodes and asserts the **decoder** and **assembler** agree on which ops take an
+immediate, both directions, with bespoke-emitter ops listed explicitly. This is T10a's field-coverage
+sweep applied to instructions. ⚠️ **Mutation-verified — and the first attempt lied**: a `perl`
+substitution silently failed to match, the test passed, and the natural reading was "the sweep is
+decoration". `sed` plus a `grep` confirming the line was gone made it fail and name all four ops
+(§4.2a).
 
 ### The twelfth 08-08 column: the text format's source character set (§6.2/§6.3)
 
@@ -309,23 +343,30 @@ are library/reactor modules with no `_start` (the two CLIs disagree about what t
 are deliberate-throw tests where both runtimes print the value and then trap. Detail in
 `known-issues.md`.
 
-**`.wat` corpus — 534 files, assemble → decode → validate:**
+**`.wat` corpus — 534 files, assemble → decode → validate (2026-08-08, after T9a#8):**
 
 | stage | result |
 | --- | --- |
-| assembled | **532** |
-| validated | **529** |
-| failed | **2** (`ref.null $ConcreteType`) |
+| assembled | **534 / 534** — all of them, for the first time |
+| decoded | **534** (0 failures) |
+| validated | **532** |
+| failed | **2** — the `39_JstyperMixed` pair, at validation (T9a#9) |
+
+⚠️ **Run all three stages, not just `wat -o`.** Until T9a#8 this gate ran *assemble only* and read
+533/534, while the module `call_ref` produced was **undecodable** — the assembler returned `Ok` and the
+bytes were garbage. "Assembled without error" is not evidence about an emitter; it is evidence about
+the parser. The round trip is what turned one vague "1 wasmtk file" entry into a 76-assertion fix.
 
 **Method notes worth keeping.** Compare **stdout only** (`2>/dev/null`) — wasmrt writes diagnostics to
 stderr and the oracle writes them to stdout, so an unseparated diff reports differences that are not
-there. And give each file its **own** output path: reusing one `/tmp/out.wasm` across a 534-file loop hit
-Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
-re-run.
+there. And give each file its **own** output path: reusing one `out.wasm` across a 534-file loop hits
+Windows file locking and invents phantom failures — it did so again on 2026-08-08, reporting 6
+assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
+**A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-## Current test state (2026-08-08, the text source character set)
+## Current test state (2026-08-08, T9a#8 assembler immediates)
 
-**435 workspace tests, all green** (407 core + 28 capi), clippy clean on all four build surfaces; the
+**438 workspace tests, all green** (410 core + 28 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (28/28) pass. This pass added 15: six pinning the backtrace
 (three frames innermost-first, offsets that advance within a body, a caught exception leaving none
 behind), five pinning the start function (it runs, it runs AFTER the segments, a trap in it fails the

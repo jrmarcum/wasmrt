@@ -2592,6 +2592,13 @@ fn immediate_arity(op: crate::opcode::Op) -> usize {
         O::LocalGet | O::LocalSet | O::LocalTee => 1,
         O::GlobalGet | O::GlobalSet => 1,
         O::Call | O::RefFunc | O::Br | O::BrIf | O::Throw | O::Rethrow => 1,
+        // `call_ref x:typeidx` / `return_call_ref x:typeidx` (function-references). Their absence
+        // here made `immediate_arity` return 0, so the assembler emitted the opcode and left `$t`
+        // in the token stream — see the emitter arm for what that produced.
+        O::CallRef | O::ReturnCallRef => 1,
+        // `br_on_null l:labelidx` / `br_on_non_null l:labelidx` — the same omission, same family,
+        // found by the same sweep.
+        O::BrOnNull | O::BrOnNonNull => 1,
         O::TableGet | O::TableSet | O::TableSize | O::TableGrow | O::TableFill => 1,
         O::ElemDrop | O::DataDrop | O::RefNull => 1,
         O::MemorySize | O::MemoryGrow | O::MemoryFill => 1,
@@ -3087,7 +3094,7 @@ fn emit_op_with_immediates(
                 u64::from(resolve_by_name(ctx.func_names, imm(0)?)?),
             );
         }
-        O::Br | O::BrIf | O::Rethrow => {
+        O::Br | O::BrIf | O::Rethrow | O::BrOnNull | O::BrOnNonNull => {
             let l = ctx.resolve_label(imm(0)?)?;
             uleb(&mut ctx.out, u64::from(l));
         }
@@ -3224,7 +3231,19 @@ fn emit_op_with_immediates(
             };
             sleb(&mut ctx.out, code);
         }
-        _ => {} // no immediates
+        // `call_ref`/`return_call_ref` take a **type** index, not a function index — the callee is
+        // the `funcref` on the stack, and the immediate is the signature to check it against.
+        O::CallRef | O::ReturnCallRef => {
+            uleb(
+                &mut ctx.out,
+                u64::from(resolve_by_name(ctx.type_names, imm(0)?)?),
+            );
+        }
+        // Genuinely no immediates. ⚠️ This arm is why `call_ref` was silently wrong for so long: an
+        // op that *does* take an immediate and lacks a case above lands here, emits its opcode
+        // alone, and reports nothing. `emitter_covers_every_op_with_an_immediate` in the tests
+        // below now makes that a build-time failure instead of a malformed module.
+        _ => {}
     }
 
     // Loads/stores: an `align=`/`offset=` pair follows the opcode.
@@ -5317,5 +5336,120 @@ mod tests {
             r#"(module (func $f) (import "m" "t" (table 1 funcref (ref.func $f))))"#
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod emitter_coverage_tests {
+    use super::*;
+    use crate::opcode::{decode_body, Imm, Op};
+
+    /// Ops whose immediates the assembler emits through a **dedicated path** rather than the
+    /// generic `immediate_arity` + emitter-arm pair: block types, vectors, and memargs all need
+    /// bespoke parsing. Listing them here is the point of the sweep — an op is either generic, or
+    /// deliberately special, and a new one is neither until someone says so.
+    fn has_dedicated_emitter(op: Op) -> bool {
+        use Op as O;
+        matches!(
+            op,
+            O::Block
+                | O::Loop
+                | O::If
+                | O::TryLegacy
+                | O::TryTable
+                | O::CatchLegacy
+                | O::Delegate
+                | O::BrTable
+                | O::CallIndirect
+                | O::SelectT
+        ) || takes_memarg(op)
+    }
+
+    /// How many immediate bytes the **decoder** reads for `b`, or `None` if it will not decode in
+    /// isolation. Padding is zeros, which spell a valid index/labelidx/blocktype for every op that
+    /// takes one, followed by enough `end` bytes to close whatever it opened.
+    fn decoder_immediate(b: u8) -> Option<Imm> {
+        let mut body = vec![b];
+        body.extend_from_slice(&[0x00; 8]);
+        body.extend_from_slice(&[0x0b; 8]);
+        decode_body(&body).ok()?.first().map(|i| i.imm.clone())
+    }
+
+    /// ⚠️ **The sweep T10a asked for, and the one that would have caught T9a#8.**
+    ///
+    /// The assembler's `immediate_arity` fell through to `_ => 0` for any op nobody had listed, and
+    /// the emitter's match ended in `_ => {}`. So an op that genuinely takes an immediate was
+    /// emitted as a **bare opcode**, with its operand left in the token stream — silently. Three
+    /// instructions were in that state: `call_ref`, `return_call_ref` (a type index each) and
+    /// `br_on_null`/`br_on_non_null` (a label each).
+    ///
+    /// Neither failure mode announced itself as "the assembler does not know this instruction":
+    /// `call_ref` folded produced a module the *decoder* rejected for a missing `end`, `call_ref`
+    /// flat reported `UnknownInstr` about the *next* token, and `br_on_null` did the same. The
+    /// cause was one line away in all three cases and looked like three unrelated bugs.
+    ///
+    /// This asserts the invariant directly: **if the decoder reads an immediate for an op, the
+    /// assembler must know to write one.** The decoder is the right oracle because it is the half
+    /// that defines the binary format.
+    #[test]
+    fn the_assembler_writes_an_immediate_for_every_op_that_decodes_one() {
+        let mut missing = Vec::new();
+        for b in 0u8..=0xff {
+            let Some(op) = Op::from_u8(b) else { continue };
+            if has_dedicated_emitter(op) {
+                continue;
+            }
+            let Some(imm) = decoder_immediate(b) else { continue };
+            if imm != Imm::None && immediate_arity(op) == 0 {
+                missing.push((op.text_name(), b));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these ops decode an immediate but the assembler writes none, so it will emit a bare \
+             opcode and leave the operand in the token stream: {missing:?}"
+        );
+    }
+
+    /// The converse: an op the assembler expects an operand for, but the decoder reads none, would
+    /// swallow the following instruction's first token. Same class, opposite direction.
+    #[test]
+    fn the_assembler_expects_no_immediate_the_decoder_does_not_read() {
+        let mut extra = Vec::new();
+        for b in 0u8..=0xff {
+            let Some(op) = Op::from_u8(b) else { continue };
+            if has_dedicated_emitter(op) || has_optional_indices(op) {
+                continue;
+            }
+            let Some(imm) = decoder_immediate(b) else { continue };
+            if imm == Imm::None && immediate_arity(op) > 0 {
+                extra.push((op.text_name(), b));
+            }
+        }
+        assert!(extra.is_empty(), "assembler expects operands the decoder never reads: {extra:?}");
+    }
+
+    /// The three instructions the sweep found, end to end: assemble → decode → validate.
+    /// "Assembled without error" is not evidence — `call_ref` did that while emitting a body the
+    /// decoder could not read.
+    #[test]
+    fn call_ref_and_br_on_null_round_trip() {
+        let m = assemble(
+            br#"(module
+                  (type $i2i (func (param i32) (result i32)))
+                  (elem declare funcref (ref.func $inc))
+                  (func $inc (param i32) (result i32) (i32.add (local.get 0) (i32.const 1)))
+                  (func $hof (param $f (ref $i2i)) (result i32)
+                    (call_ref $i2i (i32.const 42) (local.get $f)))
+                  (func (export "caller") (result i32) (call $hof (ref.func $inc)))
+                  (func (export "onnull") (param $r (ref null $i2i)) (result i32)
+                    (block $b
+                      (drop (br_on_null $b (local.get $r)))
+                      (return (i32.const 1)))
+                    (i32.const 0)))"#,
+        )
+        .expect("must assemble");
+        let md = crate::module::decode(&m).expect("must decode");
+        crate::validate::validate(&md).expect("must validate");
     }
 }

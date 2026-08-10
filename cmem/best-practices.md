@@ -222,6 +222,20 @@ Delete the check, confirm the test fails, restore. Done for: the C-ABI store-tag
 routing, the sandbox `..` guard, and the cross-store `InstanceId` check. A test that passes both with
 and without the code it covers is not a test.
 
+### 4.2a Confirm the MUTATION applied before believing the mutation test
+
+Mutation-verifying the T9a#8 emitter sweep, a `perl -pi -e` substitution silently failed to match, the
+test passed, and the obvious reading was "the sweep is decoration" — the §4.1 finding, apparently
+confirmed. It was not: re-doing the mutation with `sed` and **grepping to confirm the line was gone**
+made the test fail and name all four affected ops exactly.
+
+A no-op mutation and a worthless check produce **the same observation**: an edit, and a green test.
+
+**Apply:** after mutating, `grep` for the thing you removed and assert it is gone. Only then read the
+test result. And note which direction this error runs — it manufactures false *"my check is useless"*
+verdicts, which cost a good check rather than shipping a bad one, but the wasted work is real and the
+temptation is to delete the check.
+
 ### 4.3 A guard placed one call-level away from the iteration it guards is NO check
 
 The type-use clause-order rule was first written in `parse_sig` and moved **one** assertion out of

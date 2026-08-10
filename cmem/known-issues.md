@@ -213,6 +213,51 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ T9a#8 DONE 2026-08-08 — the assembler did not know four instructions took immediates
+
+**Suite 62,037 / 393 / 2,245 → 62,113 / 385 / 2,163 — 99.4%.** +76 passes, −8 failures, **−82 skips**.
+`call_ref.wast` 4/4/27 → **31/0/0**, `br_on_null.wast` 1/3/6 → **7/0/0**, `ref_as_non_null.wast`
+1/1/4 → **5/0/0**, `unreached-valid.wast` 1/2/9 → **10/0/0**, `return_call_ref.wast` 10/5/36 → 40/7/0.
+No file lost a pass. 🆕 **The `.wat` corpus assembles 534/534 for the first time**, 0 decode failures.
+
+`immediate_arity` ended in `_ => 0` and the emitter's match in `_ => {}`. So four instructions —
+`call_ref` and `return_call_ref` (a **type** index each), `br_on_null` and `br_on_non_null` (a
+**label** each) — were emitted as a **bare opcode with the operand left in the token stream**. All
+four are in the opcode table, decode correctly and execute correctly; only the assembler was wrong.
+
+⚠️ **The three symptoms looked like three unrelated bugs, and none of them named the assembler:**
+
+| form | what happened | what it looked like |
+| --- | --- | --- |
+| `(call_ref $t …)` folded | the missing typeidx shifted every following byte | **decode** failure: "missing END" |
+| `call_ref $t` flat | `$t` was read as the next instruction | `UnknownInstr` — about `$t`, not `call_ref` |
+| `br_on_null $l` | same | `UnknownInstr`, filed as an unrelated "1 of 534" |
+
+That last one is the sharpest part: `gc-linked-list.wat` had been logged as a **separate** long-standing
+corpus gap. One cause, two punch-list items.
+
+⚠️ **Logged as "1 wasmtk file, undiagnosed"; worth 76 spec assertions** — `best-practices.md` §1.3
+again. The entry counted the one file someone had noticed; the cost was in the 82 skips of five spec
+files whose modules could not build.
+
+🆕 **The gate had been measuring the wrong thing.** The `.wat` corpus check ran `wat -o` and nothing
+more, reading 533/534 while the bytes `call_ref` produced were **undecodable**. **"The assembler
+returned Ok" is evidence about the parser, not the emitter.** The corpus gate is now
+assemble → decode → validate; see `testing.md`.
+
+**The generalization — T10a's field-coverage sweep, landed for opcodes.** `Op::from_u8` makes the
+opcode space enumerable, so a test walks all 256 single-byte opcodes and asserts that **if the decoder
+reads an immediate for an op, the assembler writes one** (and the converse). The decoder is the right
+oracle: it is the half that defines the binary format. Ops with bespoke emitters — block types,
+`br_table`, `call_indirect`, `select_t`, memargs — are listed explicitly, so a **new** op is neither
+generic nor special until someone classifies it. This is the **fourth** instance of the emitter
+mechanism T10a names, which predicted "expect more than three".
+
+⚠️ **Mutation-verified, and the first attempt lied.** A `perl` substitution silently failed to match,
+the test passed, and the natural reading was "the sweep is decoration" — the §4.1 finding, apparently
+confirmed. Re-doing it with `sed` **and grepping to confirm the line was gone** made it fail and name
+all four ops exactly. **A no-op mutation and a worthless check produce the same observation** (§4.2a).
+
 ## ✅ Fixed 2026-08-08 — the text format's source character set was not enforced (§6.2/§6.3)
 
 **Suite 61,987 / 441 / 2,247 → 62,037 / 393 / 2,245 — 99.4%.** +50 passes, −48 failures.
