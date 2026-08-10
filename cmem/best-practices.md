@@ -229,6 +229,17 @@ The C ABI tagged its value handles with the issuing store from T8; core's `Insta
 held the weaker of the two guarantees, and that asymmetry *was* the defect.** When one layer defends
 against something, ask why the other does not.
 
+**Second instance, 2026-08-08 — and it was in two runtimes at once.** `wasmrt wasi` validated before
+executing; `wasmrt run` did not, so it would execute an ill-typed module and print a plausible answer.
+The same split existed in `wazmrt`: its summarize and `.wast` paths validated, while **both** of its
+execute paths and its C ABI's `wasm_module_new` did not. In both projects the paths that *actually run
+code* were the ones not checking it — the exact inversion of what matters.
+
+**Apply:** enumerate the entry points, in a table, and check the property at every one. The bug is not
+usually "nobody does X"; it is "three of the four do X". Prefer one guard on a predicate the paths
+already share (`will_execute` in wazmrt's `run()`, which existed to gate pin verification) over N
+copies, so a path added later inherits it instead of having to remember.
+
 ### 3.5 The two-instance rule
 
 Store-index vs module-index conflation is **invisible with one instance per store**, because the two

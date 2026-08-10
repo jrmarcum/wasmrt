@@ -22,13 +22,36 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-## ◐ T9 IN PROGRESS (2026-08-08) — fourteen passes landed today, unreleased
+## ◐ T9 IN PROGRESS (2026-08-10) — fifteen passes landed, unreleased
 
 Working tree is **ahead of the published v0.9.0**. Suite **62,113 / 385 / 2,163 — 99.4%** of 62,498
-adjudicated; the **`.wat` corpus assembles 534/534 for the first time** with 0 decode failures;
-**442 tests** (414 core + 28 capi); clippy, all four surfaces, the C-ABI gate
+adjudicated; the **`.wat` corpus is a clean 532/532** through assemble→decode→validate;
+**446 tests** (414 core + 28 capi + 4 CLI); clippy, all four surfaces, the C-ABI gate
 (74/74 + `c_smoke`, now asserting real trap frames) and Miri (28/28) green. **No file lost a single
-pass** in any of the fourteen passes — the check that matters whenever skips convert into verdicts.
+pass** in any of the fifteen passes — the check that matters whenever skips convert into verdicts.
+
+### 2026-08-10 (fifteenth) — `wasmrt run` executed WITHOUT VALIDATING, and so did the oracle
+
+**Found by the owner questioning a claim, not by a test.** Resolving T9a#9 I wrote that "the oracle's
+execution path skips validation" as if it were wazmrt's peculiarity. Asked to justify it, the check
+that should have come first showed **wasmrt had the same hole**: `wasmrt run ill-typed.wasm f` printed
+`1` and exited **0**, while `wasmrt wasi` one function away refused the same bytes.
+
+⚠️ **The asymmetry was the bug** — the second instance of §3.4 (the first was the C ABI holding a
+defence core lacked at T9a#3). And it was in **both runtimes at once**: wazmrt's summarize and `.wast`
+paths validated while **both** execute paths and **`wasm_module_new`** did not.
+
+🔒 **Fixed concurrently in both repos, with a deliberate oracle re-baseline** to `wazmrt` —
+the first oracle movement since the 2026-07-27 freeze. wazmrt `zig build test` **489/493 in ALL FOUR
+modes** (the freeze record only ever claimed Debug + ReleaseSafe; ReleaseFast and ReleaseSmall are
+green and that gap in the record is now closed). wasmtk WASI **376/376 unaffected**; wasmrt's `.wat`
+corpus a clean **532/532**. The `39_JstyperMixed` fixture now gives **byte-identical stdout from both
+runtimes**. Severity is low for wasmrt — `forbid(unsafe_code)` bounds it to a wrong answer, and a
+type-confusion probe trapped cleanly — but wrong-answer is the class this project ranks worst.
+
+🚦 **Left open as an owner decision:** `Instance::new` still takes an unvalidated `Module` by design
+(wasmtime's compile/instantiate split). Whether a `Module` should be able to exist unvalidated at all
+is a breaking-API question for T10/T12.
 
 ### 2026-08-08 (fourteenth) — T9a#9 is **NOT a defect**. The right outcome was to change nothing
 

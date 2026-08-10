@@ -109,7 +109,7 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
         }
     };
     if let Err(e) = validate(&md) {
-        eprintln!("wasmrt: {path}: invalid module: {e}");
+        eprintln!("wasmrt: {path}: {e}");
         return ExitCode::FAILURE;
     }
 
@@ -361,6 +361,17 @@ fn run_export(rest: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // §4.5.1: instantiation is defined only for a **valid** module, so nothing executes before
+    // validation. This path used to skip it — `wasmrt run` would happily execute an ill-typed
+    // module and print a plausible answer, while `wasmrt wasi` next door refused the same bytes.
+    // An asymmetry between two entry points of one binary is a bug, not a style difference.
+    if let Err(e) = validate(&module) {
+        match wasmrt_core::validate::last_failure_func_index() {
+            Some(i) => eprintln!("wasmrt: {path}: {e} (in function {i})"),
+            None => eprintln!("wasmrt: {path}: {e}"),
+        }
+        return ExitCode::FAILURE;
+    }
     // Resolve the export's signature so args/results can be typed.
     let Some(sig) = module.exports.iter().find_map(|e| match &e.ty {
         Extern::Func(ft) if e.name == func => Some((e.index, ft.clone())),

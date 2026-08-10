@@ -359,14 +359,14 @@ are library/reactor modules with no `_start` (the two CLIs disagree about what t
 are deliberate-throw tests where both runtimes print the value and then trap. Detail in
 `known-issues.md`.
 
-**`.wat` corpus — 534 files, assemble → decode → validate (2026-08-08, after T9a#8):**
+**`.wat` corpus — 532 files, assemble → decode → validate (2026-08-10, after the validation-gap fix):**
 
 | stage | result |
 | --- | --- |
-| assembled | **534 / 534** — all of them, for the first time |
-| decoded | **534** (0 failures) |
+| assembled | **532 / 532** |
+| decoded | **532** (0 failures) |
 | validated | **532** |
-| failed | **2** — the `39_JstyperMixed` pair, and ✅ **they SHOULD fail**: byte-identical duplicates of one **stale, ill-typed** fixture. T9a#9 confirmed the oracle's own validator rejects it too. |
+| failed | **0 — a clean sweep at every stage** |
 
 ⚠️ **Run all three stages, not just `wat -o`.** Until T9a#8 this gate ran *assemble only* and read
 533/534, while the module `call_ref` produced was **undecodable** — the assembler returned `Ok` and the
@@ -382,7 +382,7 @@ assemble failures where there was 1, which is exactly long enough to start diagn
 
 ## Current test state (2026-08-08, T9a#9 resolved as a non-defect)
 
-**442 workspace tests, all green** (414 core + 28 capi), clippy clean on all four build surfaces; the
+**446 workspace tests, all green** (414 core + 28 capi + 4 CLI integration), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (28/28) pass. This pass added 15: six pinning the backtrace
 (three frames innermost-first, offsets that advance within a body, a caught exception leaving none
 behind), five pinning the start function (it runs, it runs AFTER the segments, a trap in it fails the

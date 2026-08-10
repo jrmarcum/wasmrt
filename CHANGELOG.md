@@ -16,6 +16,13 @@ measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt a
 
 ### Fixed
 
+- **`wasmrt run` now validates before executing.** It decoded and ran without type-checking, so an
+  ill-typed module would execute and print a plausible answer — while `wasmrt wasi` refused the same
+  bytes. §4.5.1 defines instantiation only for a valid module. `wasmrt_core` is `forbid(unsafe_code)`,
+  so the exposure was a wrong answer rather than memory unsafety. Note `Instance::new` still takes an
+  unvalidated `Module` **by design** (a wasmtime-style compile/instantiate split) — call
+  `validate::validate` first; this is now documented as a precondition.
+
 - **The start function now runs.** `(start $f)` was decoded, validated and reported by the CLI, but
   never executed — so a module whose initialization lived in its start function ran with every global
   at its declared default and no error reported anywhere. It now runs as the last step of

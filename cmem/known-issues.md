@@ -213,6 +213,60 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-10 — `wasmrt run` executed WITHOUT VALIDATING (and so did the oracle)
+
+**Found by the owner questioning a claim I made**, not by a test. Resolving T9a#9 I wrote that "the
+oracle's execution path skips validation" as though it were wazmrt's peculiarity. Asked to justify it,
+the check that should have come first showed **wasmrt had the same hole**:
+
+| entry point | before | now |
+| --- | --- | --- |
+| `wasmrt <file>` (summarize) | ✅ validates | ✅ |
+| `wasmrt wasi` | ✅ validates | ✅ |
+| **`wasmrt run`** | ❌ **executed unvalidated** | ✅ |
+| C ABI `wasmrt_module_new` | ✅ validates | ✅ |
+| Rust `Instance::new` / `Store::instantiate` | ⚠️ documented precondition | ⚠️ (unchanged, now documented properly) |
+
+`wasmrt run ill-typed.wasm f` printed `1` and exited **0**. §4.5.1 defines instantiation only for a
+*valid* module, so this was outside the spec — and `wasmrt wasi`, one function away, refused the same
+bytes. ⚠️ **The asymmetry was the bug**, exactly as with the T9a#3 `InstanceId` (where the C ABI held
+the defence core lacked). `best-practices.md` §3.4 now carries both instances.
+
+**Severity, honestly:** low for wasmrt. `forbid(unsafe_code)` means the failure mode is a wrong answer
+or a panic, never memory unsafety, and a type-confusion probe (`i32` into a `funcref` table, then
+`call_indirect`) trapped cleanly. It is the **wrong-answer** class that this project ranks worst, not a
+memory-safety one.
+
+**`Instance::new` still does not validate, deliberately.** That split matches wasmtime's
+compile/instantiate separation and keeps validation off the path for callers who already did it. It is
+now documented as a precondition in the strongest terms rather than a passing remark. 🚦 **Open design
+question for T10/T12:** whether a `Module` should be able to exist *unvalidated* at all — wasmtime's
+cannot. Type-level enforcement would be a breaking API change and is the owner's call.
+
+### The same defect in the oracle — fixed concurrently, and it was worse there
+
+wazmrt's summarize and `.wast` paths validated; **both** execute paths and **`wasm_module_new`** did
+not. Its own source already recorded part of the cost: an export index the decoder never cross-checks
+reached a `.?` and was *undefined data in ReleaseFast — a segfault from a 31-byte module*, patched
+defensively at that one site with the root cause left in place. Zig's ReleaseFast/ReleaseSmall remove
+the safety checks that make such a slip survivable, and the C ABI is the embedding surface, so that is
+where it mattered most.
+
+Fixed in `wazmrt@baf0a38`: one guard in `run()` on the existing **`will_execute`** predicate (so a
+future execute path inherits it), plus validation in `moduleFromBytes` — `wasm_module_new` is
+specified to return NULL for an invalid module.
+
+**Measured, both repos:** wazmrt `zig build test` **489/493 in all four modes** — Debug, ReleaseSafe,
+**ReleaseFast and ReleaseSmall** (the freeze record only ever claimed the first two; that gap in the
+record is now closed). wasmtk WASI corpus **376/376 unaffected**; wasmrt's `.wat` corpus is a **clean
+532/532 at every stage**; wasmrt 446 tests, clippy, four surfaces, C-ABI and Miri gates all green. The
+`39_JstyperMixed` fixture — the one that started this — now produces **byte-identical stdout from both
+runtimes**, on a module both validate.
+
+🔒 **Deliberate oracle drift, re-baselined in the same breath** to `wazmrt@baf0a38`
+(`scripts/wazmrt-baseline.txt`); `check-wazmrt.sh` reports NO DRIFT against the new baseline. This is
+the first oracle movement since the 2026-07-27 freeze, and the port matched it immediately.
+
 ## ✅ T9a#9 RESOLVED 2026-08-08 — **NOT a defect.** wasmrt is correct; the fixture is invalid
 
 **Suite unchanged, correctly.** The right outcome for this item was to change nothing about the

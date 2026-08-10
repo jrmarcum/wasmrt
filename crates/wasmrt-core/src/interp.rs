@@ -1055,6 +1055,20 @@ impl Instance {
 
     /// Instantiate a decoded module with no imports.
     ///
+    /// # Validation is the CALLER's responsibility — and it is not optional
+    ///
+    /// This takes a decoded [`Module`], not a *validated* one, and **does not validate it**.
+    /// §4.5.1 defines instantiation only for valid modules, so running an unvalidated one is
+    /// outside the spec: the interpreter's invariants (stack heights, operand types, index
+    /// ranges) are exactly what validation establishes. wasmrt is `forbid(unsafe_code)`, so the
+    /// worst case is a wrong answer or a panic rather than memory unsafety — but a wrong answer
+    /// is the failure mode this project ranks as its worst.
+    ///
+    /// **Call [`crate::validate::validate`] first.** The split is deliberate — it matches
+    /// wasmtime's compile/instantiate separation and keeps validation off the instantiation path
+    /// for callers who have already done it (the C ABI validates in `wasmrt_module_new`; the CLI
+    /// validates before every execute path). It is a precondition, not a suggestion.
+    ///
     /// # Errors
     /// Returns [`Trap::MissingImport`] if the module declares any import — use
     /// [`Instance::new_with_imports`] to supply them.

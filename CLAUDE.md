@@ -21,7 +21,7 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 **T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — fourteen passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,113 / 385 / 2,163 of 62,498),
-**442 workspace tests** (414 core + 28 capi), Miri 28/28, no file lost a pass in any pass. The `.wat`
+**446 workspace tests** (414 core + 28 capi + 4 CLI), Miri 28/28, no file lost a pass in any pass. The `.wat`
 corpus assembles **534/534** for the first time, with 0 decode failures. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
