@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — thirteen passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — fourteen passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,113 / 385 / 2,163 of 62,498),
-**438 workspace tests** (410 core + 28 capi), Miri 28/28, no file lost a pass in any pass. The `.wat`
+**442 workspace tests** (414 core + 28 capi), Miri 28/28, no file lost a pass in any pass. The `.wat`
 corpus assembles **534/534** for the first time, with 0 decode failures. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
@@ -144,7 +144,15 @@ the **fourth** instance of the emitter mechanism; T10a predicted "more than thre
 ⚠️ **Mutation-verified — and the first attempt LIED**: a `perl` substitution silently failed to match,
 the test passed, and that reads exactly like "my check is decoration". **Confirm the mutation applied
 before believing the mutation test.**
-**Still open in T9:** #9 (the last `.wat`-corpus failure), `func.wast` 8 (the withdrawn body-order
+**The fourteenth pass resolved T9a#9 as NOT A DEFECT — the right outcome was to change nothing.** The
+fixture is ill-typed (`if (result f64)` with both arms pushing i32, which `if.wast` makes an
+`assert_invalid`); the two files are **byte-identical duplicates** of one **stale** artifact
+(8 funcs/10 types vs the source binary's 14/13). ⚠️⚠️ **The logged premise was the error: "the oracle
+assembles AND RUNS them" is true, but `wazmrt <module> <export>` DOES NOT VALIDATE** — through its
+validating path the oracle reports `TypeMismatch` too, agreeing with wasmrt. **Cite the subcommand,
+not the tool.** What landed instead: validation failures now name the function
+(`validation FAILED in function 8`), since localizing this by hand is what the item actually cost.
+**T9a #1–#9 and #11 are now all closed. Still open in T9:** `func.wast` 8 (the withdrawn body-order
 rule + duplicate identifiers), `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.

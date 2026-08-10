@@ -148,6 +148,11 @@ pub fn validate(module: &Module) -> ValidateResult<()> {
 /// With [`Features::all`] every gate below is a no-op, which is why enabling this cost the
 /// spec-suite numbers nothing.
 pub fn validate_with_features(module: &Module, features: &Features) -> ValidateResult<()> {
+    // Cleared on ENTRY, not on success: every failure below this point that is not inside a
+    // function body must report "no location" rather than inherit the previous module's.
+    #[cfg(feature = "std")]
+    FAILED_IN_FUNC.with(|c| c.set(None));
+
     if module.functions.len() != module.code.len() {
         return Err(ValidateError::CountMismatch);
     }
@@ -305,11 +310,56 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
     }
 
     // Function bodies last, so `refs` is complete before any body's C.refs check.
-    for (&type_index, code) in module.functions.iter().zip(&module.code) {
+    for (n, (&type_index, code)) in module.functions.iter().zip(&module.code).enumerate() {
         let ft = module.func_sig(type_index).ok_or(ValidateError::UndefinedType)?;
-        validate_function(module, &ft, code, Some(&refs), features)?;
+        validate_function(module, &ft, code, Some(&refs), features).map_err(|e| {
+            // Attach WHICH function failed. A bare `TypeMismatch` for a 900-line module is a
+            // diagnosis problem, not a verdict problem: localizing T9a#9's fixture by hand — to
+            // defined function #6 of 19 — is what turned "our type-checker is wrong" into "the
+            // module is ill-typed and both validators agree".
+            located(e, module.imported_func_count() + n as u32)
+        })?;
     }
     Ok(())
+}
+
+// Where the last validation failure was, when it was inside a function body.
+//
+// A thread-local rather than a change to `ValidateError`: the error type is `Copy`, is matched
+// exhaustively in several places, and crosses the C ABI, so widening it to carry an index would be
+// a breaking change for a diagnostic. `validate` is not re-entrant across threads in any caller,
+// and a stale value can only make a *later* failure's location wrong, never a success look failed.
+#[cfg(feature = "std")]
+std::thread_local! {
+    static FAILED_IN_FUNC: core::cell::Cell<Option<u32>> = const { core::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "std")]
+fn located(e: ValidateError, func_index: u32) -> ValidateError {
+    FAILED_IN_FUNC.with(|c| c.set(Some(func_index)));
+    e
+}
+
+#[cfg(not(feature = "std"))]
+fn located(e: ValidateError, _func_index: u32) -> ValidateError {
+    e
+}
+
+/// The function index the most recent [`validate`] failure occurred in, or `None` if the failure
+/// was module-level (a bad import, a malformed type section) or if validation succeeded.
+///
+/// Valid only until the next `validate` call on this thread. `no_std` builds always return `None` —
+/// the index costs a thread-local, and a freestanding embedder has nowhere to print it.
+#[must_use]
+pub fn last_failure_func_index() -> Option<u32> {
+    #[cfg(feature = "std")]
+    {
+        FAILED_IN_FUNC.with(core::cell::Cell::get)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        None
+    }
 }
 
 /// Reject a value type whose proposal is disabled.
@@ -3333,5 +3383,75 @@ mod tests {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_location_tests {
+    use super::*;
+    use crate::module::decode;
+
+    fn md(src: &str) -> crate::module::Module {
+        decode(&crate::wat::assemble(src.as_bytes()).unwrap()).unwrap()
+    }
+
+    /// The index is in the **function index space** (imports included), which is the numbering the
+    /// CLI, `ref.func` and the name section all use — not the position within the code section.
+    #[test]
+    fn a_body_failure_reports_the_function_index_including_imports() {
+        let m = md(concat!(
+            r#"(module (import "e" "f" (func)) (func) "#,
+            r#"(func (result i32) (i64.const 1)))"#
+        ));
+        assert!(validate(&m).is_err());
+        // 1 import + the empty function + the bad one -> index 2.
+        assert_eq!(last_failure_func_index(), Some(2));
+    }
+
+    /// A module-level failure has no function to blame, and must say so rather than point at
+    /// whatever the previous module happened to leave behind.
+    #[test]
+    fn a_module_level_failure_reports_no_location() {
+        let bad_body = md(r#"(module (func (result i32) (i64.const 1)))"#);
+        assert!(validate(&bad_body).is_err());
+        assert_eq!(last_failure_func_index(), Some(0));
+
+        // Now a failure that is not in any body: a start function with the wrong signature.
+        let bad_start = md(r#"(module (func $s (param i32)) (start $s))"#);
+        assert!(validate(&bad_start).is_err());
+        assert_eq!(
+            last_failure_func_index(),
+            None,
+            "a module-level failure must not inherit the previous module's location"
+        );
+    }
+
+    /// And a success must not leave a location behind for the next caller to misread.
+    #[test]
+    fn success_clears_the_location() {
+        let bad = md(r#"(module (func (result i32) (i64.const 1)))"#);
+        assert!(validate(&bad).is_err());
+        assert!(last_failure_func_index().is_some());
+
+        let good = md(r#"(module (func (result i32) (i32.const 1)))"#);
+        assert!(validate(&good).is_ok());
+        assert_eq!(last_failure_func_index(), None);
+    }
+
+    /// ⚠️ **T9a#9's fixture is INVALID, and this pins why.** `if (result f64)` whose arms both push
+    /// `i32` is ill-typed (§3.3.5); the spec suite says so at `if.wast`'s
+    /// `type-then-value-num-vs-num`. The punch list recorded it as "our type-checker is wrong,
+    /// because the oracle assembles **and runs** them" — but the oracle's *execution* path does not
+    /// validate. Its **validator** reports `TypeMismatch` on this same module, exactly as wasmrt
+    /// does. Kept as a test so nobody re-opens it.
+    #[test]
+    fn the_t9a9_fixture_construct_is_genuinely_ill_typed() {
+        let m = md(concat!(
+            r#"(module (func (param f64 f64 f64) (result i32) "#,
+            r#"local.get 0 local.get 1 f64.ge "#,
+            r#"if (result f64) local.get 0 local.get 2 f64.le else i32.const 0 end "#,
+            r#"return))"#
+        ));
+        assert_eq!(validate(&m), Err(ValidateError::TypeMismatch));
     }
 }

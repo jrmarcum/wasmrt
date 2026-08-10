@@ -11,8 +11,8 @@ defects the list never had: a cross-store `InstanceId` that let a guest silently
 memory, and — found while wiring #7 — **the start function, which was decoded, validated and printed
 but never executed** (§4.5.5).
 
-**Still open in T9:** T9a **#9** (the last `.wat`-corpus failure), the text-parser remainder of
-**#12**, **T9e `pin`**, **T9f tail calls**. #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
+**Still open in T9:** the text-parser remainder of **#12** (`func.wast` 8), **T9e `pin`**,
+**T9f tail calls**. **All of T9a #1–#9 and #11 are now closed.** #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
 
 ### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
@@ -517,7 +517,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
      just plumbing; imported **tables** need the funcref encoding decided first, and that touches a
      recorded invariant. **Do not implement imported tables without it.**
 
-  **Still open in T9** (as of the thirteenth pass): T9a **#9**, the text-parser remainder of
+  **Still open in T9** (as of the fourteenth pass): the text-parser remainder of
   **#12** · **T9e `pin`** · **T9f tail calls**. #10 stays a non-issue by design. Note 2 above is
   now **resolved** — the funcref carries its owning instance and imported tables ship.
 
@@ -888,10 +888,46 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   `sed` **and grepping to confirm the line was gone** made it fail and name all four ops exactly.
   **A no-op mutation and a worthless check produce the same observation** (§4.2a).
 
+  ### ◐ Progress 2026-08-08 (fourteenth) — T9a#9 is NOT a defect. **The right outcome was to change nothing**
+
+  **Suite unchanged at 62,113 / 385 / 2,163 = 99.4%.** 442 tests (was 438) — all four new ones pin a
+  conclusion rather than a fix.
+
+  #9 read: *"`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`, oracle assembles **and runs**
+  them — so this is our type-checker being wrong, not the input."* Every observation in it was true.
+  The conclusion was wrong three times over:
+
+  1. **The module is genuinely ill-typed.** Defined function #6 is `if (result f64)` with **both arms
+     pushing `i32`** — §3.3.5, and `if.wast`'s `type-then-value-num-vs-num` is an `assert_invalid` for
+     precisely that shape. Our `if.wast` is at 0 failures, so wasmrt already enforces the rule.
+  2. ⚠️⚠️ **"The oracle runs them" was never evidence of validity.** `wazmrt <module> <export>` decodes
+     and executes **without validating**; `wazmrt <module>` summarizes **and validates**. Through the
+     second path the oracle reports `validation: FAILED — TypeMismatch` on the very same construct —
+     **it agrees with wasmrt**. Confirmed with a blatant control (`(func (result i32) i64.const 1)`):
+     the run path printed a result, the summarize path caught it.
+  3. **The fixture is stale and double-counted.** The two files are **byte-identical**, so it was one
+     fixture reported as two; and it has **8 functions / 10 types** where the source
+     `39_JstyperMixed.wasm` has **14 / 13** — it is not a round trip of that binary at all. The real
+     binary and the hand-written `.wat` both validate **OK**.
+
+  **What actually landed** — the diagnostic whose absence made this cost so much. `TypeMismatch` named
+  no location, so localizing the failure to one of nineteen bodies took a temporary probe. Validation
+  failures now carry the function index (`validation FAILED in function 8: …`), via a thread-local
+  rather than a change to `ValidateError` — the error type is `Copy`, matched exhaustively in several
+  places, and crosses the C ABI, so widening it for a diagnostic would be a breaking change. Cleared
+  on entry, so a module-level failure reports **no** location instead of inheriting the last one.
+  `no_std` returns `None`: it costs a thread-local and a freestanding embedder has nowhere to print it.
+
+  ⚠️ **The lesson is about citing a reference implementation: name the subcommand.** "The oracle
+  accepts it" is only evidence if you know which path you invoked, and a runtime that *executes* an
+  invalid module is over-permissive, not authoritative. A three-line reduction through both tools
+  settles it in a minute; this had been undiagnosed since T7. Recorded as §2.3a — the sibling of
+  §1.5a, which is the same error made about our own gate.
+
   ### T9a — Correctness defects (real bugs) `[◐]`
 
   **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ · **#4 ✅** ·
-  **#5 ✅** · **#6 ✅** · **#7 ✅** · **#8 ✅** · #9 open · **#11 ✅** · **#12 ◐ (binary half done;
+  **#5 ✅** · **#6 ✅** · **#7 ✅** · **#8 ✅** · **#9 ✅ (NOT a defect — the fixture is invalid)** · **#11 ✅** · **#12 ◐ (binary half done;
   the text-parser remainder moved to `wat.rs`)** · #10 not a defect ·
   **#13 ✅ (unlisted — the start function never ran)**.
   Measured moves: `br_table` 161 skips → 0 · `memory_size` 16 fails → 0 · `memory_grow` 2 → 0 ·
@@ -909,7 +945,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | 7 | ✅ **DONE 2026-08-08.** The byte offsets deferred at **T2**. `Instr.offset: u32` rides in existing padding (pinned by a `size_of` test); frames are built **on the way out** through `call_function`, not as a shadow stack; the frozen C ABI went live with **no ABI change**. ⚠️ The obvious `pc: &mut usize` plumbing **measured 3.6% slower** on the steady loop — a one-shot closure recovered it. | `opcode.rs`, `interp.rs`, `capi` | Diagnostics only (0 suite assertions, as predicted) — but tracing where an *instantiation* trap gets its frames is what uncovered #13. |
   | 13 | 🆕 ✅ **DONE 2026-08-08 — the start function never ran. SILENT WRONG OUTPUT.** §4.5.5 step 11. `Module::start` was decoded, validated, assembled and printed by the CLI; nothing executed it. A module initialized entirely by `(start $f)` returned defaults with no error at any stage. Fixed in `instantiate`, **after** the segments so it can observe them; a trap in it fails the instantiation. | `interp.rs` | **+12 assertions.** `start.wast` 8/7 → **15/0**, `start0.wast` 5/3 → **8/0**, `linking3.wast` 11/1 → **12/0**, `linking.wast` +1. **10 of them sat in files named for the feature for five releases** — see the lesson above. |
   | 8 | ✅ **DONE 2026-08-08 — the assembler did not know four instructions took immediates.** `immediate_arity` ended in `_ => 0` and the emitter in `_ => {}`, so `call_ref`, `return_call_ref`, `br_on_null` and `br_on_non_null` were emitted as **bare opcodes with their operand left in the token stream**. All four decode and run correctly; only the assembler was wrong. ⚠️ None of the three symptoms named the assembler — folded `call_ref` produced a module the *decoder* rejected for a missing `end`, flat `call_ref` and `br_on_null` reported `UnknownInstr` about the *next* token. A **field-coverage sweep** over all 256 single-byte opcodes (T10a's, now landed) asserts the decoder and assembler agree about which ops take immediates. | `wat.rs` | ⚠️ **Logged at "1 wasmtk file"; delivered 76 assertions** (§1.3 — the punch list counted the one file someone noticed, not the skips). `call_ref.wast` → **31/0/0**, `br_on_null.wast` → **7/0/0**, `ref_as_non_null.wast` → **5/0/0**, `unreached-valid.wast` → **10/0/0**, `return_call_ref.wast` 10/5/36 → 40/7/0. 🆕 It also fixed `gc-linked-list.wat`, the long-standing "1 of 534" logged *separately* — **the `.wat` corpus now assembles 534/534 for the first time**. |
-  | 9 | **`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`**, oracle assembles **and runs** them — so this is our type-checker being wrong, not the input. | `validate.rs` | 2 wasmtk files. Re-verified still failing 2026-08-06. |
+  | 9 | ✅ **RESOLVED 2026-08-08 — NOT A DEFECT. wasmrt is correct and the fixture is invalid.** The module contains `if (result f64)` whose **both arms push `i32`** — ill-typed by §3.3.5, and `if.wast`'s `type-then-value-num-vs-num` makes exactly that an `assert_invalid`. ⚠️ **The logged premise was the error**: "the oracle assembles *and runs* them" is true, but `wazmrt <module> <export>` **does not validate**. Through `wazmrt <module>`, its *validating* path, the oracle reports `validation: FAILED — TypeMismatch` — **agreeing with wasmrt exactly**. Also: the two files are **byte-identical duplicates** (one fixture counted twice) and **stale** — 8 functions / 10 types against the source binary's 14 / 13, so not a round trip of it at all. The real `39_JstyperMixed.wasm` and the hand-written `.wat` both validate **OK**. | *(no change needed)* | **0 assertions — the correct outcome was to change nothing.** A test pins the construct so it is not re-opened. See `best-practices.md` §2.3a. |
   | 10 | **`wasmrt_caller_get_memory` always returns `false`.** A durable handle must be tagged against a live store, and during a callback the store is mid-borrow. Callbacks use `wasmrt_caller_read`/`_write` instead — the shape the loaders actually need. | `capi/src/lib.rs` | None today. Revisit only if a loader needs the handle form. |
   | 11 | ✅ **DONE 2026-08-08.** Malformed modules were rejected at the wrong STAGE — during *validation* where the decoder should have refused them. Seven decode-stage checks landed (section order/uniqueness, section size, func/code count, bodies decoded at decode, const-expr encodings, the `end` terminator, the 2^32−1 locals ceiling). | `module.rs`, `opcode.rs`, `types.rs` | Was `binary-leb128.wast` 15 → **58/0/0, a file at 100%**. |
   | 12 | ◐ **Mostly DONE 2026-08-08 — and it was never "mixed symptoms".** Reading the actual failures showed #11 and #12 were **one theme in two halves**: wrong-stage rejection, and outright over-acceptance. `binary.wast` **128/88 → 208/8** (both copies). `load1.wast` was indeed explained by #3, as suspected. **What remains is a different cluster: the TEXT parser**, `func.wast` 21 — "unexpected token" 9, "inline function type" 3, "duplicate local" 3, "duplicate func" 1, 2 wrong results (`0x2a` where `0` expected), 2 malformed imports still accepted. | `wat.rs` (not `module.rs`) | ~78 → **~21, and they moved crate-module**. |

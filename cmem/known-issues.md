@@ -213,6 +213,68 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ T9a#9 RESOLVED 2026-08-08 — **NOT a defect.** wasmrt is correct; the fixture is invalid
+
+**Suite unchanged, correctly.** The right outcome for this item was to change nothing about the
+validator. 4 tests added, all pinning the conclusion so it is not re-opened.
+
+The entry read: *"`39_JstyperMixed.wasm.{rt,roundtrip}.wat` → `TypeMismatch`, oracle assembles **and
+runs** them — so this is our type-checker being wrong, not the input."* Every observation in it was
+true. The conclusion was wrong in three independent ways.
+
+**1. The module is genuinely ill-typed.** Defined function #6:
+
+```wat
+(func (param f64 f64 f64) (result i32)
+  local.get 0  local.get 1  f64.ge
+  if (result f64)                 ;; declared result: f64
+    local.get 0  local.get 2  f64.le   ;; pushes i32
+  else
+    i32.const 0                        ;; pushes i32
+  end
+  return)
+```
+
+Both arms produce `i32` against a declared `f64` — §3.3.5. The spec suite makes exactly this shape an
+`assert_invalid` ("type mismatch") at `if.wast`'s `type-then-value-num-vs-num`, and our `if.wast` is at
+**0 failures**, so wasmrt already enforced the rule correctly.
+
+**2. ⚠️⚠️ "The oracle runs them" was never evidence of validity.** `wazmrt <module> <export>` decodes
+and executes **without validating**; `wazmrt <module>` summarizes **and validates**. Run the same
+construct through the second path and the oracle says:
+
+```
+validation: FAILED — TypeMismatch
+```
+
+**The oracle agrees with wasmrt.** Confirmed with a blatant control — `(func (result i32) i64.const 1)`
+printed a result on the run path and was caught on the summarize path. So the premise recorded here
+since T7 was an artefact of which subcommand had been used.
+
+**3. The fixture is stale and double-counted.** The two files are **byte-identical**, so one fixture was
+being reported as two failures. It declares **8 functions / 10 types**; the source
+`39_JstyperMixed.wasm` has **14 / 13** — it is not a round trip of that binary at all, but of some
+older build. The real binary **and** the hand-written `39_JstyperMixed.wat` both validate **OK** in
+wasmrt.
+
+**What landed instead — the diagnostic whose absence is what this item actually cost.** `TypeMismatch`
+named no location, so pinning the failure to one of nineteen bodies needed a temporary probe.
+Validation failures now carry the function index:
+
+```
+validation FAILED in function 8: invalid module: TypeMismatch
+```
+
+Implemented as a thread-local (`validate::last_failure_func_index`) rather than by widening
+`ValidateError` — that type is `Copy`, is matched exhaustively in several places, and crosses the C
+ABI, so growing it for a diagnostic would be a breaking change. Cleared **on entry**, so a
+module-level failure reports *no* location rather than inheriting the previous module's. `no_std`
+returns `None`: it costs a thread-local, and a freestanding embedder has nowhere to print it.
+
+⚠️ **The lesson: cite the subcommand, not the tool.** A runtime that *executes* an invalid module is
+over-permissive, not authoritative. Recorded as `best-practices.md` §2.3a — the sibling of §1.5a,
+which is the same mistake made about one of our own gates.
+
 ## ✅ T9a#8 DONE 2026-08-08 — the assembler did not know four instructions took immediates
 
 **Suite 62,037 / 393 / 2,245 → 62,113 / 385 / 2,163 — 99.4%.** +76 passes, −8 failures, **−82 skips**.

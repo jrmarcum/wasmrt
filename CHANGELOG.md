@@ -39,6 +39,10 @@ measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt a
 
 ### Added
 
+- **Validation failures name the function they occurred in** — `validation FAILED in function 8: …`
+  rather than a bare verdict for a whole module. `wasmrt_core::validate::last_failure_func_index`
+  exposes it to Rust embedders; `no_std` builds return `None`.
+
 - **Trap backtraces.** A trap now reports the wasm call stack that produced it — function index, the
   byte offset of the trapping instruction (absolute from the start of the module, as `wasm-objdump`
   prints it), and the name from the name section when the guest carries one.

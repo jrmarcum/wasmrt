@@ -22,13 +22,42 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-## ◐ T9 IN PROGRESS (2026-08-08) — thirteen passes landed today, unreleased
+## ◐ T9 IN PROGRESS (2026-08-08) — fourteen passes landed today, unreleased
 
 Working tree is **ahead of the published v0.9.0**. Suite **62,113 / 385 / 2,163 — 99.4%** of 62,498
 adjudicated; the **`.wat` corpus assembles 534/534 for the first time** with 0 decode failures;
-**438 tests** (410 core + 28 capi); clippy, all four surfaces, the C-ABI gate
+**442 tests** (414 core + 28 capi); clippy, all four surfaces, the C-ABI gate
 (74/74 + `c_smoke`, now asserting real trap frames) and Miri (28/28) green. **No file lost a single
-pass** in any of the thirteen passes — the check that matters whenever skips convert into verdicts.
+pass** in any of the fourteen passes — the check that matters whenever skips convert into verdicts.
+
+### 2026-08-08 (fourteenth) — T9a#9 is **NOT a defect**. The right outcome was to change nothing
+
+**Suite unchanged at 62,113 / 385 / 2,163 — correctly.** 442 tests; the four new ones pin a conclusion
+rather than a fix. **T9a #1–#9 and #11 are now all closed.**
+
+#9 read: *"the oracle assembles **and runs** them, so this is our type-checker being wrong, not the
+input."* Every observation true; the conclusion wrong three ways:
+
+1. **The module is ill-typed.** `if (result f64)` with **both arms pushing i32** — §3.3.5, and
+   `if.wast`'s `type-then-value-num-vs-num` is an `assert_invalid` for exactly that shape.
+2. ⚠️⚠️ **"It runs" was never evidence of validity.** `wazmrt <module> <export>` executes **without
+   validating**; `wazmrt <module>` validates. Through that path the oracle reports
+   `validation: FAILED — TypeMismatch` — **agreeing with wasmrt**. Verified with a blatant control.
+3. **The fixture is stale and double-counted** — the two files are **byte-identical**, and it has
+   8 functions / 10 types against the source binary's 14 / 13, so it is not a round trip of it at all.
+   The real `.wasm` and the hand-written `.wat` both validate **OK**.
+
+**What landed instead:** validation failures now name the function
+(`validation FAILED in function 8: …`). `TypeMismatch` carried no location, so localizing this to
+body #6 of 19 needed a temporary probe — that absence is what the item really cost. Implemented as a
+thread-local rather than widening `ValidateError`, which is `Copy`, exhaustively matched, and crosses
+the C ABI; cleared on entry so a module-level failure reports **no** location instead of inheriting
+the last one.
+
+⚠️ **The lesson: cite the subcommand, not the tool.** "The oracle accepts it" is evidence only if you
+know which path you invoked, and a runtime that *executes* an invalid module is over-permissive, not
+authoritative. Recorded as [best-practices.md](best-practices.md) §2.3a — the sibling of §1.5a, which
+is the same mistake made about our own gate.
 
 ### 2026-08-08 (thirteenth) — T9a#8. **Logged at "1 file", delivered 76 assertions**
 
@@ -370,8 +399,7 @@ not start without baselines.
    imported *tables* need the funcref encoding decided first, and that touches a recorded invariant.
    **Do not implement imported tables without it.** Options are laid out in [known-issues.md](known-issues.md).
 
-**Still open in T9:** T9a **#9** (the last `.wat`-corpus failure), and #12's **text-parser**
-remainder (`func.wast` 8, in `wat.rs` not `module.rs`) · **T9e `pin`** (still a stub — a build performs **no** authenticity check) ·
+**Still open in T9:** #12's **text-parser** remainder (`func.wast` 8, in `wat.rs` not `module.rs`) · **T9e `pin`** (still a stub — a build performs **no** authenticity check) ·
 **T9f tail calls** (1.0 cannot be claimed without them). #4, #5, #6, #7 and #11 are **done**; the
 decision-gate above is **resolved** — the funcref carries its owning instance and imported tables ship.
 

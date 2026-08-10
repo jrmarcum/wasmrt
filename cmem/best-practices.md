@@ -144,6 +144,26 @@ text (there were none until T9a#7, two stages later).
 `security-model.md` recorded that Rust's `std` could do an atomic no-follow open. **It cannot** — there
 is no dir-relative open on any platform. The decision built on it had to be re-taken, not patched.
 
+### 2.3a "The oracle accepts it" is only evidence if you know WHICH PATH you invoked
+
+T9a#9 sat on the punch list for two releases as *"the oracle assembles **and runs** them, so this is
+our type-checker being wrong, not the input."* Every word of that observation was true. The conclusion
+was not.
+
+`wazmrt <module> <export>` **does not validate** — it decodes and runs. `wazmrt <module>` (no export)
+summarizes *and validates*. Put the same file through the second path and the oracle reports
+`validation: FAILED — TypeMismatch`, agreeing with wasmrt exactly. The module really was ill-typed —
+`if (result f64)` with both arms pushing `i32`, which `if.wast`'s `type-then-value-num-vs-num` makes
+an `assert_invalid`.
+
+So "it runs" was never evidence of validity; it was evidence that **one particular entry point skips
+the check you were asking about**. This is §1.5a again with the oracle in place of our own gate.
+
+**Apply:** when citing a reference implementation, name the subcommand. Before concluding "the oracle
+disagrees with us", find its *validating* path and re-run there — and check the reverse direction too:
+a runtime that executes an invalid module is over-permissive, not authoritative. A three-line
+reduction put through both tools settles it in a minute; this one had gone undiagnosed since T7.
+
 ### 2.4 Assume the numeric order of an enum is not the wire order
 
 Section ids: `DataCount` is **12** but must precede `Code` (**10**); `Tag` is **13** but belongs between

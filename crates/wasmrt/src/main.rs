@@ -506,6 +506,12 @@ fn print_summary(path: &str, m: &Module) {
         Err(ValidateError::UnsupportedValidation) => {
             println!("  validation SKIPPED (uses a construct the validator can't check yet)");
         }
-        Err(e) => println!("  validation FAILED: {e}"),
+        // Name the function when the failure was inside one. A bare `TypeMismatch` for a module
+        // with twenty bodies is a verdict without a diagnosis — localizing one by hand is what
+        // T9a#9 cost before this existed.
+        Err(e) => match wasmrt_core::validate::last_failure_func_index() {
+            Some(i) => println!("  validation FAILED in function {i}: {e}"),
+            None => println!("  validation FAILED: {e}"),
+        },
     }
 }

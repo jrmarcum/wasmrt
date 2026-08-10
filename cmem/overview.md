@@ -79,14 +79,14 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-- **T9 (0.10.0, IN PROGRESS)** — **thirteen passes landed 2026-08-07/08**, unreleased. Suite
-  **62,113 / 385 / 2,163 — 99.4%**, **438 tests** (410 core + 28 capi), Miri 28/28, and **no file lost a
+- **T9 (0.10.0, IN PROGRESS)** — **fourteen passes landed 2026-08-07/08**, unreleased. Suite
+  **62,113 / 385 / 2,163 — 99.4%**, **442 tests** (414 core + 28 capi), Miri 28/28, and **no file lost a
   pass in any pass**. The `.wat` corpus assembles **534/534** for the first time, with 0 decode
   failures on a full assemble→decode→validate round trip. The size and performance axes were **measured for the first time in the project's
   life**: cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady; CLI **621 KiB**, cdylib
   **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** with `wasm-opt -Oz`).
 
-  T9a **#4 through #8 and #11 are done**, along with most of #12 — imported memories *and* tables
+  T9a **#1–#9 and #11 are all closed** (#9 as a NON-defect: the fixture is ill-typed and the oracle's own validator agrees), along with most of #12 — imported memories *and* tables
   (a `funcref` now carries its owning instance), GC constant expressions, declared subtyping with type
   canonicalisation and a store-wide type registry, trap backtraces, and decoder strictness. **Eight
   defects no list had** were found on the way, and **not one of them by reading the punch-list**:

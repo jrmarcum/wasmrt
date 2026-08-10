@@ -29,6 +29,22 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 | skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | 2,245 | **2,163** |
 | **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | 99.4% | **99.4%** of 62,498 |
 
+### T9a#9 (2026-08-08) — no column, because the suite did not move, and should not have
+
+**NOT A DEFECT.** The fixture is an invalid module; wasmrt was right to reject it. #9 read "the oracle
+assembles **and runs** them, so this is our type-checker being wrong" — true observation, wrong
+conclusion, because `wazmrt <module> <export>` **does not validate**. Through `wazmrt <module>`, its
+validating path, the oracle reports `validation: FAILED — TypeMismatch`, **agreeing with wasmrt**.
+
+The module has `if (result f64)` with **both arms pushing i32** — `if.wast`'s
+`type-then-value-num-vs-num` is an `assert_invalid` for exactly that, and our `if.wast` is at 0
+failures. The two files are also **byte-identical duplicates** and **stale**: 8 functions / 10 types
+against the source binary's 14 / 13. The real `.wasm` and the hand-written `.wat` both validate OK.
+
+**What landed instead:** validation failures now name the function (`validation FAILED in function 8`).
+Localizing this one by hand, to body #6 of 19, is what the diagnostic's absence cost. 4 tests, one of
+which pins the construct so #9 is not re-opened. ⚠️ **Cite the subcommand, not the tool** — §2.3a.
+
 ### The thirteenth 08-08 column: T9a#8. **Logged at "1 file", delivered 76 assertions**
 
 **+76 passes, −8 failures, −82 skips.** Four files to zero: `call_ref.wast` 4/4/27 → **31/0/0**,
@@ -350,7 +366,7 @@ are deliberate-throw tests where both runtimes print the value and then trap. De
 | assembled | **534 / 534** — all of them, for the first time |
 | decoded | **534** (0 failures) |
 | validated | **532** |
-| failed | **2** — the `39_JstyperMixed` pair, at validation (T9a#9) |
+| failed | **2** — the `39_JstyperMixed` pair, and ✅ **they SHOULD fail**: byte-identical duplicates of one **stale, ill-typed** fixture. T9a#9 confirmed the oracle's own validator rejects it too. |
 
 ⚠️ **Run all three stages, not just `wat -o`.** Until T9a#8 this gate ran *assemble only* and read
 533/534, while the module `call_ref` produced was **undecodable** — the assembler returned `Ok` and the
@@ -364,9 +380,9 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-## Current test state (2026-08-08, T9a#8 assembler immediates)
+## Current test state (2026-08-08, T9a#9 resolved as a non-defect)
 
-**438 workspace tests, all green** (410 core + 28 capi), clippy clean on all four build surfaces; the
+**442 workspace tests, all green** (414 core + 28 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (28/28) pass. This pass added 15: six pinning the backtrace
 (three frames innermost-first, offsets that advance within a body, a caught exception leaving none
 behind), five pinning the start function (it runs, it runs AFTER the segments, a trap in it fails the
