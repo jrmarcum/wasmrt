@@ -382,7 +382,7 @@ assemble failures where there was 1, which is exactly long enough to start diagn
 
 ## Current test state (2026-08-08, T9a#9 resolved as a non-defect)
 
-**446 workspace tests, all green** (414 core + 28 capi + 4 CLI integration), clippy clean on all four build surfaces; the
+**450 workspace tests, all green** (418 core + 28 capi + 4 CLI integration), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (28/28) pass. This pass added 15: six pinning the backtrace
 (three frames innermost-first, offsets that advance within a body, a caught exception leaving none
 behind), five pinning the start function (it runs, it runs AFTER the segments, a trap in it fails the

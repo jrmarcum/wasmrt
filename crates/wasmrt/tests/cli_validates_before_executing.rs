@@ -45,9 +45,20 @@ fn run_refuses_an_invalid_module() {
         err.contains("invalid module"),
         "expected an invalidity diagnostic, got: {err}"
     );
-    // And it must say WHERE, which is the other half of what this cost to diagnose.
+    // And it must be PRECISE, in wasmtime's shape. wasmtime 47 on this exact module says:
+    //   Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64
+    // The offset is byte-for-byte the same number because both count from the start of the module.
     assert!(
-        err.contains("in function 0"),
+        err.contains("at offset 33"),
+        "the offset must match wasmtime's for the same module (33), got: {err}"
+    );
+    assert!(
+        err.contains("type mismatch: expected i32, found i64"),
+        "the wording must match wasmtime's, got: {err}"
+    );
+    // Ours adds the function index, which wasmtime does not print — a deliberate superset.
+    assert!(
+        err.contains("(function 0)"),
         "the diagnostic must name the offending function, got: {err}"
     );
 }

@@ -26,7 +26,7 @@ scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
 Working tree is **ahead of the published v0.9.0**. Suite **62,113 / 385 / 2,163 — 99.4%** of 62,498
 adjudicated; the **`.wat` corpus is a clean 532/532** through assemble→decode→validate;
-**446 tests** (414 core + 28 capi + 4 CLI); clippy, all four surfaces, the C-ABI gate
+**450 tests** (418 core + 28 capi + 4 CLI); clippy, all four surfaces, the C-ABI gate
 (74/74 + `c_smoke`, now asserting real trap frames) and Miri (28/28) green. **No file lost a single
 pass** in any of the fifteen passes — the check that matters whenever skips convert into verdicts.
 
@@ -49,9 +49,15 @@ corpus a clean **532/532**. The `39_JstyperMixed` fixture now gives **byte-ident
 runtimes**. Severity is low for wasmrt — `forbid(unsafe_code)` bounds it to a wrong answer, and a
 type-confusion probe trapped cleanly — but wrong-answer is the class this project ranks worst.
 
-🚦 **Left open as an owner decision:** `Instance::new` still takes an unvalidated `Module` by design
-(wasmtime's compile/instantiate split). Whether a `Module` should be able to exist unvalidated at all
-is a breaking-API question for T10/T12.
+✅ **The owner then resolved the open question by measuring wasmtime**, not by arguing the API: wasmtime
+47 refuses with `Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64`,
+so **wasmrt matches that action**. Our diagnostic now carries the **same byte offset** (from the start of
+the module — verified byte-identical on two modules, 33 and 61, both pinned as tests), the same wording,
+plus the function index wasmtime does not print. `Instance::new` keeps the compile/instantiate split,
+which is safe in practice because every shipped entry point validates. See
+[design-decisions.md](design-decisions.md). ⚠️ **Method note: when a decision is to be based on a
+reference implementation, RUN it** — three lines through the real binary settled in seconds what the API
+docs invite answering from memory.
 
 ### 2026-08-08 (fourteenth) — T9a#9 is **NOT a defect**. The right outcome was to change nothing
 

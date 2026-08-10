@@ -165,6 +165,48 @@ Choices made while porting; consistent with "boundary-faithful behavior, idiomat
   stack. Float rounding is bit-manipulation (no_std); **`sqrt` is `std`-gated** (the one no_std float gap).
 - **Versioning = port-progress ladder**, per-task release to crates.io (see [releasing.md](releasing.md)).
 
+## ✅ RESOLVED (owner, 2026-08-10) — an invalid module is REFUSED, with a wasmtime-shaped diagnostic
+
+**The question:** should a `Module` be able to exist **unvalidated** at all? Raised when `wasmrt run`
+turned out to execute without validating (`known-issues.md`).
+
+**The owner's rule for answering it: base it on what wasmtime actually does.** So it was measured
+against the real tool — wasmtime **47.0.2**, installed on this machine — rather than argued from the
+API surface:
+
+```
+$ wasmtime run --invoke f ill-typed.wasm
+  Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64
+```
+
+**The decision: match that action.** Refuse, and be that precise. Three properties, all now
+reproduced:
+
+| property | wasmtime 47 | wasmrt |
+| --- | --- | --- |
+| refuses before executing | yes | yes — every CLI path + the C ABI |
+| byte offset, from the start of the module | `at offset 33` | `at offset 33` — **byte-identical** |
+| expected vs found | `expected i32, found i64` | same wording |
+| which function | *(not printed)* | `(function 0)` — a deliberate superset |
+
+Verified on two modules against the live tool (offsets **33** and **61**), both pinned as tests, so a
+future refactor that changes the origin fails rather than silently diverging. Sharing wasmtime's origin
+is the point: the two tools' numbers are directly comparable on the same file, which they would not be
+if we counted from the body.
+
+**What was NOT changed, and why.** `Instance::new` still accepts a decoded-but-unvalidated `Module` —
+the compile/instantiate split. That is now safe in practice because **every shipped entry point
+validates** (all CLI paths, `wasmrt_module_new`), so the precondition is only reachable by a Rust
+embedder who skips `validate` deliberately, and it is documented as a precondition in the strongest
+terms. Making it *unrepresentable* would mean a validated-`Module` type — a breaking API change
+carrying real cost (double validation, or a second type through every signature) for a case no shipped
+surface can reach. Revisit at **T12** if the security review disagrees.
+
+⚠️ **Method note worth keeping:** the useful comparison was the tool's *observable behaviour*, not its
+API docs. Asking "what does wasmtime's `Module::new` do" invites answering from memory; running the
+binary on a three-line module answered it in seconds, gave the exact wording to match, and produced two
+numbers to assert against. **When a decision is to be based on a reference implementation, run it.**
+
 ## ✅ The four deferred decisions — ALL RESOLVED as of 2026-08-06 (kept for the *why*)
 
 These four were "raise before/at scaffolding." At the freeze the owner chose to **defer them as explicit
@@ -198,6 +240,7 @@ Each entry below records the answer and the reasoning, so none of them gets re-d
   3. **Memory: raw `uint8_t*` primary + bounds-checked `read`/`write`.** Zero-copy is what the loaders'
      hand-rolled Canonical ABI marshalling needs; the checked pair is there for embedders who would
      rather not reason about the invalidation rule.
+
   4. **Trap frames: ship the API shape now, real backtraces at T9.** `wasmrt_trap_frame_count` returns
      0 until byte offsets are recorded. Committing the shape now avoids a breaking ABI change later,
      and reporting nothing is better than reporting a plausible-looking wrong frame.

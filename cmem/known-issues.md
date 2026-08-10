@@ -239,9 +239,13 @@ memory-safety one.
 
 **`Instance::new` still does not validate, deliberately.** That split matches wasmtime's
 compile/instantiate separation and keeps validation off the path for callers who already did it. It is
-now documented as a precondition in the strongest terms rather than a passing remark. 🚦 **Open design
-question for T10/T12:** whether a `Module` should be able to exist *unvalidated* at all — wasmtime's
-cannot. Type-level enforcement would be a breaking API change and is the owner's call.
+now documented as a precondition in the strongest terms rather than a passing remark. ✅ **RESOLVED (owner, 2026-08-10) by measuring wasmtime rather than arguing the API.** wasmtime 47 on an
+ill-typed module: `Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64`.
+**wasmrt matches that action** — same byte offset (module-relative, verified byte-identical at 33 and 61
+against the live tool and pinned as tests), same wording, plus the function index wasmtime omits.
+`Instance::new` keeps the compile/instantiate split: it is safe in practice because every shipped entry
+point validates, and making it unrepresentable would cost a breaking API change for a case no shipped
+surface can reach. Revisit at T12 if the security review disagrees. See `design-decisions.md`.
 
 ### The same defect in the oracle — fixed concurrently, and it was worse there
 

@@ -16,8 +16,13 @@ measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt a
 
 ### Fixed
 
-- **`wasmrt run` now validates before executing.** It decoded and ran without type-checking, so an
-  ill-typed module would execute and print a plausible answer — while `wasmrt wasi` refused the same
+- **`wasmrt run` now validates before executing, and invalid-module reports match wasmtime.** For an
+  ill-typed module wasmrt now prints `invalid module at offset 33 (function 0): type mismatch: expected
+  i32, found i64` — the same byte offset (counted from the start of the module) and the same wording
+  wasmtime 47 uses, plus the function index, which wasmtime does not print.
+  `wasmrt_core::validate::last_failure_site()` exposes the offset and the two types to Rust embedders.
+  Previously `wasmrt run` decoded and executed without type-checking at all, so an ill-typed module
+  would run and print a plausible answer — while `wasmrt wasi`, one function away, refused the same
   bytes. §4.5.1 defines instantiation only for a valid module. `wasmrt_core` is `forbid(unsafe_code)`,
   so the exposure was a wrong answer rather than memory unsafety. Note `Instance::new` still takes an
   unvalidated `Module` **by design** (a wasmtime-style compile/instantiate split) — call

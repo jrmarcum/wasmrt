@@ -109,7 +109,7 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
         }
     };
     if let Err(e) = validate(&md) {
-        eprintln!("wasmrt: {path}: {e}");
+        eprintln!("wasmrt: {path}: {}", invalidity_report(&e));
         return ExitCode::FAILURE;
     }
 
@@ -165,6 +165,35 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Format an invalid-module report, **shaped to match wasmtime**.
+///
+/// wasmtime 47 on `(func (result i32) i64.const 1)`:
+///
+/// ```text
+/// Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64
+/// ```
+///
+/// So: the byte offset **in decimal**, from the start of the module — the same origin wasmtime uses,
+/// so the two tools' numbers are directly comparable on the same file — then the two types. The
+/// function index is ours to add: wasmtime does not print it, and it is what makes a twenty-body
+/// module tractable. Anything the validator did not record is simply omitted rather than guessed.
+fn invalidity_report(e: &ValidateError) -> String {
+    let site = wasmrt_core::validate::last_failure_site();
+    let mut s = String::from("invalid module");
+    if let Some(off) = site.offset {
+        s.push_str(&format!(" at offset {off}"));
+    }
+    if let Some(i) = site.func_index {
+        s.push_str(&format!(" (function {i})"));
+    }
+    match (site.expected, site.found) {
+        // Match wasmtime's wording exactly where we have the same facts.
+        (Some(exp), Some(found)) => s.push_str(&format!(": type mismatch: expected {exp:?}, found {found:?}")),
+        _ => s.push_str(&format!(": {e}")),
+    }
+    s
 }
 
 /// Print the trap's call stack, innermost first, to **stderr**.
@@ -366,10 +395,7 @@ fn run_export(rest: &[String]) -> ExitCode {
     // module and print a plausible answer, while `wasmrt wasi` next door refused the same bytes.
     // An asymmetry between two entry points of one binary is a bug, not a style difference.
     if let Err(e) = validate(&module) {
-        match wasmrt_core::validate::last_failure_func_index() {
-            Some(i) => eprintln!("wasmrt: {path}: {e} (in function {i})"),
-            None => eprintln!("wasmrt: {path}: {e}"),
-        }
+        eprintln!("wasmrt: {path}: {}", invalidity_report(&e));
         return ExitCode::FAILURE;
     }
     // Resolve the export's signature so args/results can be typed.
@@ -520,9 +546,6 @@ fn print_summary(path: &str, m: &Module) {
         // Name the function when the failure was inside one. A bare `TypeMismatch` for a module
         // with twenty bodies is a verdict without a diagnosis — localizing one by hand is what
         // T9a#9 cost before this existed.
-        Err(e) => match wasmrt_core::validate::last_failure_func_index() {
-            Some(i) => println!("  validation FAILED in function {i}: {e}"),
-            None => println!("  validation FAILED: {e}"),
-        },
+        Err(e) => println!("  validation FAILED: {}", invalidity_report(&e)),
     }
 }

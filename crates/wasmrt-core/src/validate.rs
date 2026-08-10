@@ -151,7 +151,7 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
     // Cleared on ENTRY, not on success: every failure below this point that is not inside a
     // function body must report "no location" rather than inherit the previous module's.
     #[cfg(feature = "std")]
-    FAILED_IN_FUNC.with(|c| c.set(None));
+    SITE.with(|c| c.set(FailureSite::default()));
 
     if module.functions.len() != module.code.len() {
         return Err(ValidateError::CountMismatch);
@@ -323,20 +323,48 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
     Ok(())
 }
 
-// Where the last validation failure was, when it was inside a function body.
-//
+/// Where the last validation failure was, and what it was about.
+///
+/// **Shaped to match wasmtime**, which is the standard this project holds itself to on diagnostics
+/// as well as behaviour. For the module `(func (result i32) i64.const 1)` wasmtime 47 says:
+///
+/// ```text
+/// Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64
+/// ```
+///
+/// So a useful report needs three things a bare error variant cannot carry: **where** in the module,
+/// **what was expected**, and **what was found**.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailureSite {
+    /// Index in the function index space (imports included), if the failure was inside a body.
+    pub func_index: Option<u32>,
+    /// Byte offset **from the start of the module** of the instruction that failed — the same
+    /// number, and the same origin, that wasmtime prints.
+    pub offset: Option<u32>,
+    /// For a type mismatch: what the instruction required, and what was actually on the stack.
+    pub expected: Option<V>,
+    pub found: Option<V>,
+}
+
 // A thread-local rather than a change to `ValidateError`: the error type is `Copy`, is matched
-// exhaustively in several places, and crosses the C ABI, so widening it to carry an index would be
+// exhaustively in several places, and crosses the C ABI, so widening it to carry a payload would be
 // a breaking change for a diagnostic. `validate` is not re-entrant across threads in any caller,
 // and a stale value can only make a *later* failure's location wrong, never a success look failed.
 #[cfg(feature = "std")]
 std::thread_local! {
-    static FAILED_IN_FUNC: core::cell::Cell<Option<u32>> = const { core::cell::Cell::new(None) };
+    static SITE: core::cell::Cell<FailureSite> = const { core::cell::Cell::new(FailureSite {
+        func_index: None, offset: None, expected: None, found: None,
+    }) };
 }
 
+/// Record which function a failure came from. Called as the error leaves the per-body loop.
 #[cfg(feature = "std")]
 fn located(e: ValidateError, func_index: u32) -> ValidateError {
-    FAILED_IN_FUNC.with(|c| c.set(Some(func_index)));
+    SITE.with(|c| {
+        let mut s = c.get();
+        s.func_index = Some(func_index);
+        c.set(s);
+    });
     e
 }
 
@@ -345,21 +373,61 @@ fn located(e: ValidateError, _func_index: u32) -> ValidateError {
     e
 }
 
-/// The function index the most recent [`validate`] failure occurred in, or `None` if the failure
-/// was module-level (a bad import, a malformed type section) or if validation succeeded.
+/// Record the absolute module offset of the instruction that failed.
 ///
-/// Valid only until the next `validate` call on this thread. `no_std` builds always return `None` —
-/// the index costs a thread-local, and a freestanding embedder has nowhere to print it.
+/// Set at the **innermost** point that knows it and never overwritten on the way out, so a nested
+/// helper's position wins over the enclosing instruction's — which is what makes the offset point at
+/// the operand that was actually wrong.
+#[cfg(feature = "std")]
+fn note_offset(offset: u32) {
+    SITE.with(|c| {
+        let mut s = c.get();
+        if s.offset.is_none() {
+            s.offset = Some(offset);
+        }
+        c.set(s);
+    });
+}
+
+#[cfg(not(feature = "std"))]
+fn note_offset(_offset: u32) {}
+
+/// Record the two types of a mismatch, at the one place that knows both.
+#[cfg(feature = "std")]
+fn note_types(expected: V, found: V) {
+    SITE.with(|c| {
+        let mut s = c.get();
+        s.expected = Some(expected);
+        s.found = Some(found);
+        c.set(s);
+    });
+}
+
+#[cfg(not(feature = "std"))]
+fn note_types(_expected: V, _found: V) {}
+
+/// Everything known about the most recent [`validate`] failure — see [`FailureSite`].
+///
+/// Valid only until the next `validate` call on this thread, and all-`None` after a success.
+/// `no_std` builds always report `None`s: the record costs a thread-local, and a freestanding
+/// embedder has nowhere to print it.
 #[must_use]
-pub fn last_failure_func_index() -> Option<u32> {
+pub fn last_failure_site() -> FailureSite {
     #[cfg(feature = "std")]
     {
-        FAILED_IN_FUNC.with(core::cell::Cell::get)
+        SITE.with(core::cell::Cell::get)
     }
     #[cfg(not(feature = "std"))]
     {
-        None
+        FailureSite::default()
     }
+}
+
+/// The function index the most recent [`validate`] failure occurred in — [`last_failure_site`]'s
+/// `func_index`, kept as its own function because that is the common case.
+#[must_use]
+pub fn last_failure_func_index() -> Option<u32> {
+    last_failure_site().func_index
 }
 
 /// Reject a value type whose proposal is disabled.
@@ -832,7 +900,12 @@ fn validate_function(
     // The whole body is an implicit block of type [] -> results.
     v.push_ctrl(FrameKind::Block, Vec::new(), ft.results.clone())?;
     for instr in instrs {
-        v.step(instr)?;
+        // On failure, stamp the absolute module offset of the instruction that failed:
+        // `Instr::offset` is body-relative (added at T9a#7) and `Code::body_offset` is the body's
+        // own position, so their sum is the number wasmtime prints as "at offset N".
+        v.step(instr).inspect_err(|_| {
+            note_offset(code.body_offset.saturating_add(instr.offset));
+        })?;
     }
     if !v.ctrls.is_empty() {
         return Err(ValidateError::ControlUnderflow); // missing `end`
@@ -916,6 +989,10 @@ impl<'a> FuncValidator<'a> {
         let actual = self.pop_val()?;
         if let StackType::Val(t) = actual {
             if !subtype_of(self.module, t, expect) {
+                // The one place that knows BOTH types, which is what makes "expected i32, found
+                // i64" possible at all — wasmtime's wording, captured here rather than
+                // reconstructed by a caller that no longer has the operand.
+                note_types(expect, t);
                 return Err(ValidateError::TypeMismatch);
             }
         }
@@ -3453,5 +3530,78 @@ mod failure_location_tests {
             r#"return))"#
         ));
         assert_eq!(validate(&m), Err(ValidateError::TypeMismatch));
+    }
+}
+
+#[cfg(test)]
+mod wasmtime_shaped_diagnostic_tests {
+    use super::*;
+    use crate::module::decode;
+
+    fn md(src: &str) -> crate::module::Module {
+        decode(&crate::wat::assemble(src.as_bytes()).unwrap()).unwrap()
+    }
+
+    /// 🔒 **Parity with wasmtime, checked against the real tool.** wasmtime 47.0.2 on this module:
+    ///
+    /// ```text
+    /// Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64
+    /// ```
+    ///
+    /// The offset is byte-identical because both count from the **start of the module**, so the two
+    /// tools' numbers are directly comparable on the same file — which is the whole point of
+    /// matching rather than inventing our own origin.
+    #[test]
+    fn the_offset_and_types_match_wasmtime_47() {
+        let m = md(r#"(module (func (export "f") (result i32) i64.const 1))"#);
+        assert_eq!(validate(&m), Err(ValidateError::TypeMismatch));
+
+        let site = last_failure_site();
+        assert_eq!(site.offset, Some(33), "wasmtime reports offset 33 for this module");
+        assert_eq!(site.expected, Some(V::I32));
+        assert_eq!(site.found, Some(V::I64));
+        assert_eq!(site.func_index, Some(0));
+    }
+
+    /// The second case checked against the real tool: wasmtime reports **offset 61**, and the
+    /// failing body is the third function. One data point could be a coincidence of encoding.
+    #[test]
+    fn the_offset_tracks_across_functions() {
+        let m = md(concat!(
+            r#"(module (func (export "a") (result i32) (i32.const 1))"#,
+            r#" (func (export "b") (result i32) (i32.const 2))"#,
+            r#" (func (export "c") (param f64) (result i32) (i32.const 1) (drop) (local.get 0)))"#
+        ));
+        assert_eq!(validate(&m), Err(ValidateError::TypeMismatch));
+
+        let site = last_failure_site();
+        assert_eq!(site.offset, Some(61), "wasmtime reports offset 61 for this module");
+        assert_eq!(site.func_index, Some(2));
+        assert_eq!((site.expected, site.found), (Some(V::I32), Some(V::F64)));
+    }
+
+    /// A success must leave nothing behind — the whole record, not just the function index. A stale
+    /// offset would make the *next* failure point at the wrong instruction, which is worse than
+    /// having no offset at all.
+    #[test]
+    fn success_clears_the_whole_record() {
+        let bad = md(r#"(module (func (result i32) (i64.const 1)))"#);
+        assert!(validate(&bad).is_err());
+        assert!(last_failure_site() != FailureSite::default());
+
+        let good = md(r#"(module (func (result i32) (i32.const 1)))"#);
+        assert!(validate(&good).is_ok());
+        assert_eq!(last_failure_site(), FailureSite::default());
+    }
+
+    /// A non-type-mismatch failure records where, and honestly reports no types rather than
+    /// inventing a pair — the CLI falls back to the plain error text in that case.
+    #[test]
+    fn a_non_type_failure_reports_no_types() {
+        let m = md(r#"(module (func (result i32) (i32.const 1) (i32.const 2)))"#);
+        assert!(validate(&m).is_err());
+        let site = last_failure_site();
+        assert_eq!((site.expected, site.found), (None, None));
+        assert_eq!(site.func_index, Some(0));
     }
 }
