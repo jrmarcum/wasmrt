@@ -139,6 +139,32 @@ had no gating, so they would have been silent no-ops), a name-keyed linker (core
 *positionally*), a store-attached WASI config (core builds WASI per module), and a promise of backtrace
 text (there were none until T9a#7, two stages later).
 
+### 2.2a A stated BENEFIT is a hypothesis about someone ELSE's code — go read theirs
+
+wazmrt chose to implement the **standard wasm-c-api** partly on this recorded payoff: *"wasmtime also
+implements wasm-c-api, so ports already on its C API are close to drop-in."* The intended consumer was
+always the `universalWasmLoader-*` projects — they are the layer meant to standardise imports across
+languages, and the runtime beneath them only ever had to serve them.
+
+**Nobody read the loader's source until wasmrt's T8 survey.** wasmtime ships **two** C surfaces —
+the standard `wasm.h` and its own richer `wasmtime.h` — and the loader uses the **`wasmtime_*`**
+store/context/linker model, not wasm-c-api at all. The payoff never existed.
+
+And the mismatch was structural, not cosmetic: **wasm-c-api's host callback gets no handle to the
+caller's memory**, which is the one thing essentially every loader host import needs. The chosen ABI
+could not do the consumer's core job.
+
+**Cost:** `wasm_c_api.zig` — 319 declared functions, the largest file in that project and the only one
+that hands raw ownership across a C boundary. Three whole audit findings (#20, #21, #22 — 180 missing
+symbols, then a double free, use-after-free, uninitialised refcount and leak) lived in it. wasmrt
+replaced the entire surface with ~74 functions and value handles.
+
+**Apply:** when a design rests on "consumer X already does Y", open X's source and grep for Y before
+the decision, not after the implementation. A benefit claimed on the consumer's behalf is exactly as
+much a hypothesis as a cost figure (§1.1) or a scope note (§1.1a) — and it is the one that quietly
+selects an architecture. ⚠️ The tell here was available from day one: the loader header is in a sibling
+repo, and reading it takes minutes.
+
 ### 2.3 A decision resting on a false premise must be re-derived, not defended
 
 `security-model.md` recorded that Rust's `std` could do an atomic no-follow open. **It cannot** — there
