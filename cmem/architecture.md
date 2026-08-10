@@ -122,9 +122,16 @@ data** rather than wazmrt's arena (frees on drop; no `deinit`).
   - `module` — decode (two-pass type section for rec-group forward refs); owned data model.
   - `opcode` — the **single shared opcode table + IR** feeding validate, interp, AND the assembler in
     reverse. Define once; never drift.
-  - `validate` — the spec §3 Appendix type-checker; `subtypeOf`; const-expr checks.
+  - `validate` — the spec §3 Appendix type-checker; `subtypeOf`; const-expr checks. Also
+    **`last_failure_site()`** — where the last failure was (function index, absolute module offset,
+    expected-vs-found types), carried in a thread-local rather than widened into `ValidateError`,
+    which is `Copy`, exhaustively matched, and crosses the C ABI. It is what makes the CLI report
+    match wasmtime's byte-for-byte; `no_std` returns all-`None`. See `design-decisions.md`.
   - `interp` — `Instance` (retains its `Module`) + the switch interpreter over untyped `u64` slots;
-    GC heap; host imports; trap backtrace.
+    GC heap; host imports; trap backtrace (`Store::backtrace()` / `frame_name()`, frames built on the
+    way OUT). ⚠️ `Instance::new` takes a decoded-but-**unvalidated** `Module` by design — the
+    wasmtime-style compile/instantiate split; every shipped entry point validates first
+    (`security-model.md`).
   - `sexpr` / `wat` / `wast` — the text toolchain (assembler + spec-testsuite runner).
   - `wasi` — WASI preview 1 (`wasi/mod.rs` process surface + `wasi/fs.rs` fd table, rights lattice and
     the sandbox resolver). The resolver walks **one component at a time**, accumulating a path rather
