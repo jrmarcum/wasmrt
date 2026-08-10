@@ -45,11 +45,22 @@ plant links in a read-only preopen. Fixed 2026-08-10 in `wazmrt@4a6d745`. Record
 **asymmetry** is the reusable finding, not the bug: see roadmap **T12x**, diff the two runtimes'
 security tables against each other.
 
-🚦 **Still open, and it is the owner's third requirement:** there is currently **no way to deny symlink
-creation while keeping other write rights** — `--dir` grants `ALL` (including `PATH_SYMLINK`),
-`--ro-dir` denies all writes. If the policy is "the runtime never creates links, only follows
-pre-existing ones", that wants its own switch (deny `PATH_SYMLINK`, keep create/write). Cheap to add;
-it is a **default-behaviour decision**, so it is the owner's call, not a silent change.
+✅ **DECIDED + SHIPPED (owner, 2026-08-10): symlink creation is DENIED BY DEFAULT.** *"Symlink creation
+during runtime for the purpose of running processes shall be illegal; creating symlinks for a program
+install situation should be legal."* So `--dir` now grants `READ_WRITE = ALL & !PATH_SYMLINK`, and
+`--allow-symlink` opts back in for installer-shaped work. Same in the oracle (`wazmrt@1a88b84`).
+
+The reasoning is worth keeping: **composing modules over shared linear memory is the STORE's job** —
+imported memories are genuinely shared since T9a#4 — so nothing in a normal run needs the filesystem to
+grow new links. Denying creation removes a guest-controlled primitive a **second process** could later
+repoint, which is exactly what makes the accepted TOCTOU residual survivable.
+
+⚠️ **Enforced at COMPILE TIME**, not by a test: every operand is a constant, so `const _: () =
+assert!(…)` makes a violation fail the **build** — including for any crate depending on this one.
+Mutation-verified: restoring `PATH_SYMLINK` to the default grant produces
+*"evaluation panicked: assertion failed"*. ⚠️ The policy governs **creation**; following a pre-existing
+link needs `PATH_OPEN`, which both grants keep, and that too is asserted — otherwise this change would
+silently become "break every guest that reads through a link the operator placed".
 
 ## 🔒 Validation is a SECURITY boundary, and every entry point must cross it (2026-08-10)
 

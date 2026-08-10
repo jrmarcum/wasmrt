@@ -52,10 +52,17 @@ struct Preopen {
 ///
 /// Parsing stops at the first non-flag, so a guest argument that happens to look like
 /// `--dir` is passed through to the guest rather than granting it access to anything.
-fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, &[String]), String> {
+fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, bool, &[String]), String> {
     let mut out = Vec::new();
+    let mut allow_symlink = false;
     let mut i = 0;
     while i < args.len() {
+        // A valueless flag, so it is handled before the ones that consume an argument.
+        if args[i] == "--allow-symlink" {
+            allow_symlink = true;
+            i += 1;
+            continue;
+        }
         let ro = match args[i].as_str() {
             "--dir" => false,
             "--ro-dir" => true,
@@ -71,7 +78,7 @@ fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, &[String]), String> 
         out.push(Preopen { host, guest, read_only: ro });
         i += 2;
     }
-    Ok((out, &args[i..]))
+    Ok((out, allow_symlink, &args[i..]))
 }
 
 /// `wasmrt wasi <file.wasm> [args...]` — run a WASI preview-1 program's `_start`.
@@ -81,7 +88,7 @@ fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, &[String]), String> 
 fn run_wasi_module(rest: &[String]) -> ExitCode {
     // Preopens come first, so everything after the module path is the guest's own argv and
     // is never mistaken for a host flag.
-    let (dirs, rest) = match take_dir_flags(rest) {
+    let (dirs, allow_symlink, rest) = match take_dir_flags(rest) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("wasmrt: {e}");
@@ -90,7 +97,7 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
     };
     let Some(path) = rest.first() else {
         eprintln!(
-            "wasmrt: usage: wasmrt wasi [--dir <host>[::<guest>]] [--ro-dir …] <file.wasm> [args...]"
+            "wasmrt: usage: wasmrt wasi [--dir <host>[::<guest>]] [--ro-dir …] [--allow-symlink] <file.wasm> [args...]"
         );
         return ExitCode::FAILURE;
     };
@@ -125,10 +132,15 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
     // **The guest reaches nothing it was not explicitly granted.** With no `--dir`, every
     // path call returns BADF; there is no implicit cwd preopen.
     for p in &dirs {
+        // 🔒 Read-write does NOT include planting symlinks unless `--allow-symlink` asked for it:
+        // a workload run has no need to create links, and denying it removes a guest-controlled
+        // primitive a second process could later repoint. Following an EXISTING link is unaffected.
         let rights = if p.read_only {
             wasmrt_core::wasi::fs::rights::READ_ONLY
-        } else {
+        } else if allow_symlink {
             wasmrt_core::wasi::fs::rights::ALL
+        } else {
+            wasmrt_core::wasi::fs::rights::READ_WRITE
         };
         if let Err(e) = ctx.preopen_dir(std::path::Path::new(&p.host), &p.guest, rights) {
             eprintln!("wasmrt: cannot preopen {}: errno {e}", p.host);
@@ -362,7 +374,8 @@ fn print_help() {
          `wasi` covers stdio, args, environ, clocks, random, proc_exit and the sandboxed\n\
          filesystem. A guest reaches ONLY what you preopen:\n    \
            --dir <host>[::<guest>]     grant read-write access to a directory\n    \
-           --ro-dir <host>[::<guest>]  grant read-only access (propagates to the subtree)\n\
+           --ro-dir <host>[::<guest>]  grant read-only access (propagates to the subtree)
+    --allow-symlink             let the guest CREATE symlinks (off by default)\n\
          With no --dir, every path call returns BADF — there is no implicit cwd.",
         wasmrt_core::VERSION
     );

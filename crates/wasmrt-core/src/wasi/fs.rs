@@ -112,6 +112,22 @@ pub mod rights {
     /// directory's *inheriting* rights, so read-only **propagates** down the subtree —
     /// nothing opened beneath a read-only preopen can write either.
     pub const READ_ONLY: u64 = ALL & !WRITE_MASK;
+
+    /// **The default for a read-write preopen (`--dir`): everything except planting symlinks.**
+    ///
+    /// 🔒 **Owner policy, 2026-08-10.** A guest that is *running a workload* has no business creating
+    /// symlinks: composing modules over shared linear memory is the **store's** job (imported
+    /// memories are genuinely shared), so nothing in a normal run needs the filesystem to grow new
+    /// links. Denying it removes a guest-controlled primitive that a *second* process could later
+    /// repoint — which matters precisely because the mid-run swap (TOCTOU) is the residual this
+    /// project has accepted and documented.
+    ///
+    /// Installer-shaped workloads legitimately need it, so it is **opt-in** (`--allow-symlink`),
+    /// not unavailable. Deny-by-default with an explicit escape hatch, rather than
+    /// grant-by-default with a warning nobody reads.
+    ///
+    /// Following a **pre-existing** link is unaffected: this right governs *creation* only.
+    pub const READ_WRITE: u64 = ALL & !PATH_SYMLINK;
 }
 
 /// `oflags` for `path_open`.
@@ -1448,6 +1464,40 @@ pub fn path_rename_or_link(
     }
 }
 
+// ---- Symlink-creation policy, enforced at COMPILE TIME -----------------------------------
+//
+// 🔒 **Owner policy, 2026-08-10: a workload run may not plant symlinks.** Composing modules over
+// shared linear memory is the *store's* job — imported memories are genuinely shared — so nothing in
+// a normal run needs the filesystem to grow new links. Denying creation removes a guest-controlled
+// primitive that a *second* process could later repoint, which matters precisely because the mid-run
+// swap (TOCTOU) is the residual this project has accepted rather than closed. Installer-shaped work
+// legitimately needs it, so it is opt-in (`--allow-symlink`), not unavailable.
+//
+// These are `const` assertions rather than `#[test]`s deliberately: every operand is a compile-time
+// constant, so a violation should fail the **build**, not wait for someone to run the suite. It also
+// means the policy cannot be broken by a crate that depends on this one without noticing.
+
+/// `--dir` must not grant symlink creation.
+const _: () = assert!(rights::READ_WRITE & rights::PATH_SYMLINK == 0);
+
+/// ...but it is a **one-bit narrowing** of `ALL`, not a different capability set — otherwise this
+/// would quietly take away something real guests depend on.
+const _: () = assert!(rights::ALL & !rights::READ_WRITE == rights::PATH_SYMLINK);
+
+/// The installer case stays expressible: `--allow-symlink` grants `ALL`, which includes it.
+const _: () = assert!(rights::ALL & rights::PATH_SYMLINK != 0);
+
+/// Read-only was already stricter and must stay so — it denies creation for a **second, independent**
+/// reason, namely that `PATH_SYMLINK` is in `WRITE_MASK`.
+const _: () = assert!(rights::READ_ONLY & rights::PATH_SYMLINK == 0);
+const _: () = assert!(rights::WRITE_MASK & rights::PATH_SYMLINK != 0);
+
+/// ⚠️ The policy governs **creation**, not traversal. Following a pre-existing in-sandbox link needs
+/// `PATH_OPEN`, which both grants keep — otherwise "deny symlink creation" would silently become
+/// "break every guest that reads through a link the operator placed", a far larger change.
+const _: () = assert!(rights::READ_WRITE & rights::PATH_OPEN != 0);
+const _: () = assert!(rights::READ_ONLY & rights::PATH_OPEN != 0);
+
 /// A scratch directory that cleans itself up. No `tempfile` dependency — the zero-dep
 /// decision applies to dev-dependencies too.
 #[cfg(test)]
@@ -1717,3 +1767,5 @@ mod tests {
         assert!(t.get(-1).is_none(), "a negative fd is not a slot");
     }
 }
+
+

@@ -446,14 +446,18 @@ being copied rather than understood.
 It discards *all* uncommitted work in that file. Doing this to drop a debug probe destroyed a completed
 canonicalisation implementation, which then had to be rewritten. Delete the added block, or stash.
 
-### 8.1a Do not run `perl -pi -e` with a replacement containing `$`
+### 8.1a Do not run `perl -pi -e` with a replacement containing `$` or `@`
 
 In a Perl replacement, `$'` is the **postmatch variable** — everything after the match. A one-line
 substitution meant to add an enum variant documented as ``` `id ::= '$' idchar+` ``` instead spliced
 the entire remainder of the file into the middle of the enum, ~100 junk lines. Rust is full of `$`
 (macros, and any prose about `.wat` identifiers), so this is not a rare shape.
 
-**Apply:** use the `Edit` tool for any replacement text containing `$`, `@`, or a backslash. When a
+**Apply:** use the `Edit` tool for any replacement text containing `$`, `@`, or a backslash. **`@` bites
+as often as `$`** and did so three more times in one session: `@as(u64, 0)` became `(u64, 0)` in a Zig
+test, and two commit hashes written `wazmrt@4a6d745` lost the `@4`/`@1` and shipped as `wazmrta6d745`.
+Each was caught by a build error or a re-read — but a mangled hash in a doc is exactly the kind of thing
+that is not caught. When a
 bulk edit *is* right, prefer a pattern with none of them. And if this does go wrong, **repair — do not
 `git checkout`** (§8.1): the corruption was a contiguous, identifiable span, and splicing it out
 preserved the rest of the pass.

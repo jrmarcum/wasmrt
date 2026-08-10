@@ -49,6 +49,13 @@ measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt a
   conversion, so two different ones could collide. Well-formed `.wat` is unaffected: the 534-file
   corpus assembles exactly as before.
 
+- 🔒 **`--dir` no longer lets a guest CREATE symlinks.** A workload run has no need to plant links —
+  composing modules over shared memory is the store's job — and denying it removes a guest-controlled
+  primitive that another process could later repoint. Pass **`--allow-symlink`** for installer-shaped
+  workloads that genuinely need it. **Following a pre-existing link is unaffected**; this governs
+  creation only. `--ro-dir` denied it already. Library embedders are unchanged: `preopen_dir` takes an
+  explicit rights mask, and the new `rights::READ_WRITE` is the CLI's default.
+
 ### Added
 
 - **Validation failures name the function they occurred in** — `validation FAILED in function 8: …`
