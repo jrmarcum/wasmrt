@@ -1337,9 +1337,14 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   - `symlink traversal: in-sandbox links follow, escaping links refused (#17/4.3)`
   - `symlink resolver fuzz: no adversarial topology reaches outside the preopen`
 
-  Both bail with `error.SkipZigTest` when the host refuses to create a symlink, and **this host does**:
-  `New-Item -ItemType SymbolicLink` fails with *"Administrator privilege required"*. Windows needs
-  Developer Mode or elevation.
+  ⚠️⚠️ **CORRECTED — the cause is exFAT, not privilege, and the properties ARE verified.** Developer
+  Mode is already enabled here; the Zig error is `INVALID_DEVICE_REQUEST`, not access-denied.
+  `std.testing.tmpDir` puts its scratch under `.zig-cache/tmp` **relative to the CWD**, and the **D:
+  drive is exFAT** — no reparse points. **From an NTFS cwd: `zig build test` is 493/493 with ZERO
+  skips and `zig build test-security` is 3/3 green.** So "489/493, 4 skipped", carried in the freeze
+  record since 2026-07-27, is an **environment artifact, not a code property**. Same root cause as
+  `zig build`'s "error: Unexpected" on D: and cargo's hard-link warnings: exFAT has neither reparse
+  points nor hard links. **One filesystem, three symptoms, none of them code.**
 
   **These are the sandbox-escape tests.** The skip is honest — with no link there is nothing to
   traverse — but the effect is that **the escape properties are unverified in this environment**, which
@@ -1347,8 +1352,20 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   notes one case is covered on Windows another way (`examples/wasi_symlink_traversal.zig`, the
   absolute-target canary), so the coverage is partial, not absent.
 
-  **Action before T12:** enable Developer Mode (or run the suite elevated once) and confirm all four
-  turn into passes; if any then *fails*, that is a real finding the skip has been hiding. wasmrt's own
+  ⚠️ **Do NOT read the skip as "the escape was refused, so it passed."** The reading is natural — these
+  ARE negative tests, and inside them `refused(openErrno(…))` genuinely means "failing to open is the
+  success condition". But the skip fires during **fixture setup**, at `pre.symLink(…) catch { return
+  error.SkipZigTest; }`, **before a single assertion runs**: nothing was refused by the runtime, the
+  HOST refused the test harness a symlink, and the resolver was never invoked. Two facts settle it —
+  the first assertion expects **`errno.success`** (an in-sandbox link must be FOLLOWED, so "refusal =
+  pass" is not even true of the whole test), and the skip returns before `Wasi.init`, so no wasi call
+  happens at all. **A skip here means zero of the three properties were checked, not that they held.**
+
+  ✅ **Action, now known:** run the oracle suite from an **NTFS** working directory, and use
+  `zig build test-security` — the gate added 2026-08-10 that makes a skip a FAILURE, so an unverified
+  sandbox is red rather than averaged into a green summary. wasmrt's own sandbox tests were never
+  affected: `Scratch::new` uses `std::env::temp_dir()`, which is on C: (NTFS), so they have been
+  running all along. wasmrt's own
   sandbox tests should get the same treatment — its resolver is the one place the port knowingly
   diverges (`std` has no dir-relative open, `security-model.md`).
 
