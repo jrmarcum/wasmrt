@@ -1328,6 +1328,26 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   already existed to gate pin verification, so validation hung off it and a future execute path
   inherits it. `best-practices.md` §3.4 carries the generalization.
 
+  ### T12x — DIFF THE TWO RUNTIMES' SECURITY TABLES AGAINST EACH OTHER *(added 2026-08-10)* `[ ]`
+
+  ⚠️ **Found the hard way, twice in one day.** Both defects were "the property holds in one
+  implementation and not the other, and nothing compared them":
+
+  | property | wasmrt | wazmrt (before) |
+  | --- | --- | --- |
+  | `wasmrt run` / execute paths validate | ❌ then ✅ | ❌ then ✅ |
+  | `PATH_SYMLINK` exists, is in the write mask, and gates `path_symlink` | ✅ all along | ❌ **bit 24 did not exist** — `--ro-dir` did not strip it, and the handler demanded `path_open` |
+
+  The second was a real authority breach: **a guest could plant symlinks inside a read-only preopen**,
+  and wazmrt's own read-only test passed throughout because `ro & write_mask == 0` is trivially true
+  for a right that is **not in the mask**.
+
+  **The task:** mechanically diff the two runtimes' security-relevant tables — the WASI **rights bit
+  definitions**, the **write mask**, which right each `path_*` handler demands, the `oflags`/`fdflags`
+  sets, and the resource ceilings. Any row present in one and absent in the other is either a port gap
+  or an oracle gap, and today it was both directions. **Two implementations of the same spec are a free
+  differential oracle; not using them against each other is the waste.**
+
   ### T12y — The oracle's sandbox-escape tests DO NOT RUN on this machine `[ ]`
 
   ⚠️ **Found while answering "are the 4 skipped tests meant to be skipped?" — they are conditional, and

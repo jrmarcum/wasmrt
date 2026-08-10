@@ -27,6 +27,30 @@ ABI. Full scope in [roadmap.md](roadmap.md) (T12a–f).
 
 Neither is a vulnerability on its own; both are surfaces, and T12 decides what to do about them.
 
+## ✅ wasmrt gates symlink CREATION correctly — the oracle did not (2026-08-10)
+
+The owner's requirement: *"we do not want the wasm runner creating symlinks at runtime; links should
+exist before the run; and a bad actor must not swap one mid-run."* Where each part stands:
+
+| requirement | wasmrt |
+| --- | --- |
+| a guest cannot plant an **escaping** link | ✅ absolute and lexically-climbing targets refused **at creation** (`NOTCAPABLE`), independently of the follow-time check |
+| symlink creation is a **write** right | ✅ `PATH_SYMLINK` is in `WRITE_MASK`, so **`--ro-dir` strips it** |
+| pre-existing in-sandbox links still work | ✅ followed normally; the escape check is on the target, not on links as such |
+| no mid-run swap by a third party | ⚠️ **the known TOCTOU residual** — see below |
+
+⚠️ **The oracle had a hole here and wasmrt did not.** wazmrt had **no `path_symlink` right at all**
+(bit 24 missing), so `--ro-dir` never stripped it and its handler demanded `path_open` — a guest could
+plant links in a read-only preopen. Fixed 2026-08-10 in `wazmrt@4a6d745`. Recorded here because the
+**asymmetry** is the reusable finding, not the bug: see roadmap **T12x**, diff the two runtimes'
+security tables against each other.
+
+🚦 **Still open, and it is the owner's third requirement:** there is currently **no way to deny symlink
+creation while keeping other write rights** — `--dir` grants `ALL` (including `PATH_SYMLINK`),
+`--ro-dir` denies all writes. If the policy is "the runtime never creates links, only follows
+pre-existing ones", that wants its own switch (deny `PATH_SYMLINK`, keep create/write). Cheap to add;
+it is a **default-behaviour decision**, so it is the owner's call, not a silent change.
+
 ## 🔒 Validation is a SECURITY boundary, and every entry point must cross it (2026-08-10)
 
 **Validation is what establishes the invariants the interpreter assumes** — stack heights, operand
