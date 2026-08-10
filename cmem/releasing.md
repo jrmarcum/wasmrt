@@ -58,6 +58,11 @@ owner does 7–9.
 
 1. **Task is DONE**: its parity/conformance gate passes, `cargo test`/`clippy` green on all surfaces,
    no regressions vs the frozen oracle.
+1b. **The shipped binary is STANDALONE.** Copy `wasmrt.exe` to an empty directory and run it with
+   `PATH` reduced to the system directories; it must print its version, not exit 127. `objdump -p`
+   should list only `KERNEL32`, `ntdll`, `bcryptprimitives` and `api-ms-win-*`. ⚠️ This is a real step,
+   not a formality — the CLI silently needed a **toolchain** DLL (`libunwind.dll`) until 2026-08-10,
+   and every dev-box test passed the whole time. See the distribution manifest below.
 2. **Update the public trackers:**
    - `ROADMAP.md` — flip the stage row to ✅ and check off every use-case the release makes real.
    - `CHANGELOG.md` — move `Unreleased` items into a new `[x.y.z]` section (Keep a Changelog format).
@@ -86,6 +91,44 @@ owner does 7–9.
    the GitHub Release automatically** — no manual `gh release create`. (The workflow uses the built-in
    `GITHUB_TOKEN`; no secret needed. It **fails loudly** if the CHANGELOG has no `## [X.Y.Z]` section, so
    step 2 must already be committed — which the pre-publish gate guarantees.)
+
+## 📦 Distribution manifest — exactly which files a user needs (2026-08-10)
+
+**Measured on a clean `PATH`**, not read off the build files: each binary was copied to an empty
+directory and run with `PATH=C:\Windows\system32;C:\Windows`. That is the only way to tell a real
+dependency from one the dev box happens to satisfy.
+
+| you are shipping | files a user needs | not needed |
+| --- | --- | --- |
+| **the CLI** | `wasmrt.exe` — **one file** | — |
+| **the C ABI, dynamic** | `wasmrt_capi.dll` + `include/wasmrt.h` | `libwasmrt_capi.dll.a` (import lib: needed to **link**, not to run) |
+| **the C ABI, static** | `libwasmrt_capi.a` + `include/wasmrt.h` | — |
+| **the freestanding engine** | the `wasm32-unknown-unknown` `.wasm` | — |
+
+⚠️ **`libwasmrt_capi.a` is ~22 MB and that is NOT shipped size.** A Rust `.a` carries crate metadata;
+only the code the consumer actually links lands in their binary. Do not quote it as a size figure — the
+honest numbers are the CLI and the cdylib (see `testing.md` / T9b).
+
+### 🔒 The gotcha this manifest exists to prevent
+
+Before 2026-08-10, `wasmrt.exe` was **not standalone**: it imported **`libunwind.dll`**, supplied by the
+mingw-llvm toolchain rather than by Windows. On a dev box it resolves off `PATH`; on a user's machine
+the process died before `main` with **exit 127, "cannot open shared object file"** — no output, no
+diagnostic worth the name.
+
+Fixed by pinning `-C target-feature=+crt-static` for the host triple in **`.cargo/config.toml`**, so it
+cannot regress depending on who types the build command. Cost ~33 KiB on the CLI (650.5 → 684.0);
+`wasmrt_capi.dll` gets the same treatment. Remaining imports are Windows-provided only: `KERNEL32`,
+`ntdll`, `bcryptprimitives`, and the `api-ms-win-crt-*` Universal CRT set (Windows 10+).
+
+**The lesson, worth applying to any artifact:** *"it runs here"* is not evidence that it ships. Copy the
+binary somewhere empty, strip `PATH` to the system directories, and run it. `objdump -p <exe>` lists the
+imports — anything not `KERNEL32`/`ntdll`/`api-ms-win-*`/`bcrypt*` is a file you are also shipping,
+whether you meant to or not.
+
+*(The oracle is clean here by construction: `wazmrt.exe` and `wazmrt.dll` import only `ntdll` and
+`KERNEL32`. ⚠️ Do not ship `wazmrt.pdb` — 3.6 MB of debug symbols, and the largest file in its
+`zig-out`.)*
 
 ## Tooling
 

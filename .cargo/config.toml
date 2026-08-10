@@ -1,0 +1,32 @@
+# Cargo configuration for wasmrt.
+#
+# ## Why `crt-static` on the Windows gnullvm host
+#
+# 🔒 **A shipped binary must not need a file from the build toolchain.** Without this, `wasmrt.exe`
+# imports **`libunwind.dll`**, which is supplied by the mingw-llvm toolchain — not by Windows. On a
+# developer box it resolves off `PATH` and everything looks fine; on a user's machine the process dies
+# before `main` with:
+#
+# ```
+# error while loading shared libraries: cannot open shared object file   (exit 127)
+# ```
+#
+# Measured, not assumed: `wasmrt.exe` was copied to an empty directory and run with `PATH` set to
+# `C:\Windows\system32;C:\Windows` only. Without this flag it exits **127**; with it, it prints its
+# version. The remaining imports are then Windows-provided only — `KERNEL32`, `ntdll`,
+# `bcryptprimitives`, and the `api-ms-win-crt-*` Universal CRT set (present on Windows 10+).
+#
+# **Cost: ~33 KiB** (650.5 → 684.0 KiB), against the project's "small" axis — accepted, because a
+# second file to distribute is worse than 5% on the one binary, and a *missing* second file is worse
+# than both. It also drops `libunwind.dll` from `wasmrt_capi.dll`, so C embedders get the same benefit.
+#
+# ⚠️ **Scoped to the host triple deliberately.** As a blanket `[build] rustflags` it would also apply to
+# `wasm32-unknown-unknown`, where a CRT flag is meaningless, and it would silently override any
+# `RUSTFLAGS` the environment sets. Keep it target-scoped.
+#
+# The release profile already sets `panic = "abort"`, so nothing here *wants* an unwinder; the
+# dependency was an artifact of the target, which is exactly the kind of thing that regresses unnoticed
+# if it is left to whoever types the build command. See `cmem/releasing.md` for the file-by-file
+# distribution manifest this guarantees.
+[target.x86_64-pc-windows-gnullvm]
+rustflags = ["-C", "target-feature=+crt-static"]
