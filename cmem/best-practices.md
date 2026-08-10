@@ -79,6 +79,23 @@ was +2). **Run `wasmrt wast <dir> -v` on both sides when diffing per-file.**
 The direction of that flaw was *false alarm*, never *false all-clear*. Work out which direction your
 tooling can lie in; one of them is survivable and the other is not.
 
+### 1.5a A gate that runs one stage of a pipeline is evidence about that stage ONLY
+
+The `.wat` corpus gate ran `wasmrt wat <file> -o out` and counted exit codes: **533/534**. It had been
+quoted for months as evidence that the text toolchain was sound. It was not — it was evidence that the
+**parser** accepted 533 files. Meanwhile the bytes the *emitter* produced for `call_ref` were
+**undecodable**, and the gate could not see it, because it never decoded anything.
+
+Re-running the same corpus as **assemble → decode → validate** immediately showed the real state, and
+turned a punch-list entry logged as "1 wasmtk file, undiagnosed" into a 76-assertion fix.
+
+**"The tool returned Ok" is a claim about the half of the tool that runs before it returns.**
+
+**Apply:** for any pipeline (assemble → decode → validate → run), a gate must traverse **every** stage
+whose output the next stage consumes. When you inherit a gate, ask what it actually executes, not what
+it is named. `wat -o /dev/null` and `wat -o out && decode out` differ by one defect class, and it is
+the class this project keeps finding (see §3.2).
+
 ### 1.6 Benchmarks: same-session A/B/A, and say when it is noise
 
 Run-to-run spread is several percent and a single session drifted **~10%**. Report "unchanged within
@@ -205,6 +222,27 @@ link time. wasmrt was refusing malformed binaries *at validation* — the module
 looked broken, but the stage was wrong and the spec suite says so with `assert_malformed`. Fixing the
 stage was worth ~100 assertions and closed real over-acceptance alongside it.
 
+### 3.7 The stage that REPORTS a failure is usually not the stage that caused it
+
+T9a#8 was one defect in the **assembler** — four instructions emitted without their immediate. It was
+reported, variously, as:
+
+- a **decoder** error (`missing END`) — because the absent operand shifted every following byte;
+- `UnknownInstr` naming the **next token**, `$t`, rather than `call_ref`;
+- the same `UnknownInstr` in a different file, which got logged as an **unrelated** corpus gap.
+
+So one cause produced three symptoms, filed as two separate punch-list items, and every symptom pointed
+away from the assembler. It had been undiagnosed since T6.
+
+The general shape: a component that emits a *stream* fails by shifting everything downstream, so the
+first thing to notice is whoever reads the stream next. Off-by-one and missing-field defects in an
+encoder are systematically misattributed to its decoder.
+
+**Apply:** when an error names a position or a token, ask what wrote the bytes just before it, not just
+what read them. And when two entries on a punch list have the same *message* in different files, treat
+them as one hypothesis rather than two items — the identical-numbers tell of §1.2 applies to identical
+messages too.
+
 ---
 
 ## 4. Checks and gates
@@ -274,8 +312,9 @@ anything but a newline. Fixing "all four" would have rejected valid `.wat`, and 
 separated them was reading the production rather than pattern-matching on "control character = bad".
 
 The corresponding gate: when tightening a *parser*, the measurement that matters is not the suite but
-the **corpus of things that must still parse** — 533/534 `.wat` files, checked on both sides. A
-tightening that improves the suite and drops a corpus file has not made the parser more correct.
+the **corpus of things that must still parse** — the 534-file `.wat` corpus, checked on both sides, and
+**round-tripped through decode**, not merely assembled (§1.5a). A tightening that improves the suite and
+drops a corpus file has not made the parser more correct.
 
 **Apply:** for each rule you are about to add, quote the production it comes from. A rule you cannot
 cite is a guess, and half the guesses here were wrong. Then pin the *negative* case with a test — this
