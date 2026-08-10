@@ -22,6 +22,15 @@ measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt a
   instantiation (§4.5.5), after the data and element segments so it can observe them; a trap in it
   fails the instantiation.
 
+### Changed
+
+- **The text format is now strict about its source character set** (§6.2/§6.3). Control characters
+  and `DEL` are rejected outside comments, source must be valid UTF-8, a raw control byte in a string
+  must be written as an escape (`"\01"`, which is unchanged), and `$` must name something. Previously
+  all of these were accepted — and a malformed identifier was silently **renamed** by a lossy UTF-8
+  conversion, so two different ones could collide. Well-formed `.wat` is unaffected: the 534-file
+  corpus assembles exactly as before.
+
 ### Added
 
 - **Trap backtraces.** A trap now reports the wasm call stack that produced it — function index, the

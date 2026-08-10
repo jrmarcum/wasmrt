@@ -72,7 +72,7 @@ Checked off as each capability lands and passes its gate.
 | --- | --- | --- |
 | Assemble `.wat` → `.wasm` | ✅ | 0.7 |
 | Run `.wast` spec scripts | ✅ | 0.7 |
-| Pass the official WebAssembly spec testsuite | 🚧 99.3% | 0.7 |
+| Pass the official WebAssembly spec testsuite | 🚧 99.4% | 0.7 |
 
 ### WASI & the CLI
 | Use case | Status | Lands in |

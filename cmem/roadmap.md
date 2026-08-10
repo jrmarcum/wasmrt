@@ -802,6 +802,53 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   only running it finds out. **Before diagnosing a file's failures, spend one minute asking whether its
   headline feature works end to end.**
 
+  ### ◐ Progress 2026-08-08 (twelfth) — the text format's source character set (§6.2/§6.3)
+
+  **61,987/441/2,247 → 62,037 / 393 / 2,245 = 99.4%.** +50 passes, −48 failures, and 2 assertions
+  became adjudicable. **`id.wast` reached 6/0/1 — a file at zero failures**; `annotations.wast`
+  12/51 → **56/8**. No file lost a pass; the `.wat` corpus held at **533/534**, which is the check
+  that matters when *tightening* a parser. 435 tests.
+
+  **How this got picked is the point.** The remaining punch-list items were #8 (1 file), #9 (2 files)
+  and `func.wast` 8. Surveying the failures by *cause* instead — §1.2 — put text-assembler errors at
+  the top by a wide margin (`BadNumber` 63, `BadForm` 49, `BadValType` 18, `BadModuleField` 16), and
+  the single worst file was `annotations.wast` at 51, which **T9g had written off as an untargeted
+  proposal**.
+
+  ⚠️ **That scope note was wrong in the way §1.1 describes, applied to scope rather than cost.** Four
+  one-line probes, none containing an annotation, were all accepted:
+
+  ```
+  (module (func $a\x01b))    control character in an identifier   -- not an idchar
+  (module (func $a\xffb))    invalid UTF-8 in an identifier       -- source is Unicode
+  (module (data "\x01"))     raw control byte in a string         -- stringchar needs c >= U+20
+  (module (func) ;;\x01 )    control character in a comment       -- LEGAL, linechar allows it
+  ```
+
+  Three defects, one non-defect. **`lexer` accepted them all**, so the gap was generic and the file
+  that exposed it merely happened to be the proposal's. The confirmation is `id.wast`: nothing to do
+  with annotations, 5 failures, now zero.
+
+  What landed, all in `sexpr.rs`:
+  - **`idchar` enforcement in `parse_atom`.** It consumed any non-delimiter byte and then ran
+    `from_utf8_lossy` — 🆕 **which did not merely over-accept, it silently rewrote**: `$a\xffb` and
+    `$a\xfeb` both became `$a\u{FFFD}b`, so two distinct identifiers collided on one name. Restricting
+    to `idchar` makes the slice ASCII by construction, so the conversion cannot lose anything.
+  - **`stringchar` (§6.3.3)** — a raw byte `< U+20` or `== U+7F` in a string is malformed; those
+    bytes reach a data segment through **escapes**, which a test pins so the rule cannot break
+    `(data "\00…")`.
+  - **UTF-8 validity for raw non-ASCII in strings** — `"héllo"` is legal, a lone `\xff` is not.
+  - **`id ::= '$' idchar+`** — a bare `$`, `$""` and `$ "a"` all name nothing. The quoted form carried
+    the *same* `from_utf8_lossy` rewrite, so `$"\ef"` was accepted **and renamed**.
+  - **The charset rule reaches inside a skipped annotation.** Ignoring what an annotation *says* is
+    what the proposal requires; exempting its bytes from being source is not.
+
+  ⚠️ **The comment case was measured and left alone.** `linechar ::= c:char (if c ≠ U+0A)` admits any
+  character but a newline, so a control byte in a comment is legal — one probe of the four was not a
+  defect, and a test now pins that it stays accepted. **Tightening what the grammar permits is the
+  same error as accepting what it forbids**, and the only thing separating them was reading the
+  production.
+
   ### T9a — Correctness defects (real bugs) `[◐]`
 
   **Status 2026-08-08:** #1 ✅ (plus 3 unlisted defects it uncovered) · #2 ✅ · #3 ✅ · **#4 ✅** ·
@@ -964,9 +1011,21 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   cold start measured A/B/A, since this adds work at instantiation.
 
   ### T9g — Scope confirmations (NOT bugs — record, do not "fix") `[ ]`
+
+  ⚠️ **2026-08-08 — this list had the same flaw §1.1 warns about, one level up: a scope note is a
+  hypothesis about a CAUSE.** It read "`annotations` **51** — a proposal wasmrt does not target", and
+  that was true of the *file* and false of **44 of its 51 assertions**, which were generic §6.2/§6.3
+  lexer rules that apply to every `.wat` wasmrt reads. Probing it took four one-line files and
+  disproved it in a minute: `(module (func $a\x01b))`, `$a\xffb` and `(data "\x01")` were all accepted
+  and contain no annotation. **`id.wast` — which has nothing to do with annotations — went 0/5 to
+  6/0/1 on the same fix**, which is the proof the cause was generic. Before writing off a cluster by
+  the name of the file it sits in, check whether the *defect* is scoped the way the *file* is.
+
   - **Out of scope by recorded invariant — leave these failing:** 64-bit **tables**
     (`table_copy64` 22, `table_init64` 93 skips, `table_fill64` 70 skips, `float_memory64` 84 skips),
-    and the untargeted proposals `annotations` **51**, `custom-descriptors`
+    and the untargeted proposals `annotations` **8 remaining** (was 51; the 43 generic lexer ones are
+    fixed — what is left is genuinely annotation semantics: 7 × "empty annotation id" and one
+    annotation-id UTF-8 case), `custom-descriptors`
     (`br_on_cast_desc_eq`/`_fail` 98 each, `ref_cast_desc_eq` 94, its own `binary.wast` 44),
     `exact`/`exact-casts` (18 + 108), `custom-page-sizes` (21 + 18), `memory64-imports` 20,
     `wide-arithmetic` 108. **Together these are the bulk of the residual** — the in-scope remainder is

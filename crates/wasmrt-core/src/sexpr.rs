@@ -88,6 +88,81 @@ pub enum ParseErrorKind {
     /// A character that starts no value and that trivia-skipping does not consume — today
     /// only a lone `;` (`;;` and `(;` are trivia; a bare `;` is not valid `.wat`).
     UnexpectedChar,
+    /// A byte that may not appear in `.wat` **source** at all (§6.2).
+    ///
+    /// Outside strings and comments the source character set is **printable ASCII** — a
+    /// control character, `DEL`, or any non-ASCII byte is malformed, not merely unexpected.
+    /// Inside a string, `stringchar` additionally requires `c ≥ U+20 ∧ c ≠ U+7F`, so a raw
+    /// control byte must be written as an escape.
+    IllegalCharacter,
+    /// A non-ASCII byte sequence in a string literal that is not valid UTF-8. Source text is
+    /// Unicode; arbitrary bytes reach a data segment through **escapes**, not raw. Also raised
+    /// for a quoted identifier whose escapes do not spell a valid name.
+    MalformedUtf8,
+    /// `id ::= '$' idchar+` — a bare `$`, or the quoted form `$""`, names nothing.
+    EmptyIdentifier,
+}
+
+/// Is this byte an `idchar` (§6.2.2)?
+///
+/// The set is closed and entirely ASCII, which is what lets [`Parser::parse_atom`] build its
+/// `String` without a lossy conversion. Notably absent: space, `(`, `)`, `"`, `;`, `,`, `[`,
+/// `]`, `{`, `}` — and every byte outside `0x21..=0x7E`.
+const fn is_idchar(c: u8) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'<'
+                | b'='
+                | b'>'
+                | b'?'
+                | b'@'
+                | b'\\'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+/// May this byte appear in source outside a string or comment?
+///
+/// Printable ASCII, plus the four whitespace forms §6.2.3 allows (`space` and
+/// `format ::= U+09 | U+0A | U+0D`). `annotations.wast` is an exact statement of this set: of the
+/// 33 control bytes it enumerates, precisely `\09`, `\0a`, `\0d` and `\20` are *not* asserted
+/// malformed.
+///
+/// Wider than [`is_idchar`] on purpose: `,`, `;`, `[`, `]`, `{` and `}` begin *reserved* tokens,
+/// which are legal source that simply means nothing — an annotation body may contain them, and the
+/// proposal's own test module does.
+const fn is_source_char(c: u8) -> bool {
+    c.is_ascii_graphic() || matches!(c, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Length in bytes of the UTF-8 sequence a lead byte introduces, or `None` if it is not a legal
+/// lead byte (a continuation byte, or one of the values UTF-8 never uses).
+const fn utf8_len(lead: u8) -> Option<usize> {
+    match lead {
+        0xc2..=0xdf => Some(2),
+        0xe0..=0xef => Some(3),
+        0xf0..=0xf4 => Some(4),
+        // 0x80..=0xbf are continuations; 0xc0/0xc1 are overlong two-byte forms; 0xf5.. is past
+        // the last code point. `from_utf8` would reject all of them, but rejecting here gives
+        // the honest error rather than an out-of-range slice.
+        _ => None,
+    }
 }
 
 impl fmt::Display for ParseError {
@@ -112,10 +187,10 @@ pub fn parse_all(src: &[u8]) -> Result<Vec<Sexpr>> {
         depth: 0,
     };
     let mut forms = Vec::new();
-    p.skip_trivia();
+    p.skip_trivia()?;
     while p.pos < src.len() {
         forms.push(p.parse_value()?);
-        p.skip_trivia();
+        p.skip_trivia()?;
     }
     Ok(forms)
 }
@@ -138,7 +213,7 @@ impl Parser<'_> {
         self.src.get(self.pos + ahead).copied().unwrap_or(0)
     }
 
-    fn skip_trivia(&mut self) {
+    fn skip_trivia(&mut self) -> Result<()> {
         while self.pos < self.src.len() {
             let c = self.src[self.pos];
             if matches!(c, b' ' | b'\t' | b'\r' | b'\n') {
@@ -163,15 +238,16 @@ impl Parser<'_> {
                     }
                 }
             } else if c == b'(' && self.peek(1) == b'@' {
-                self.skip_annotation();
+                self.skip_annotation()?;
             } else {
                 break;
             }
         }
+        Ok(())
     }
 
     fn parse_value(&mut self) -> Result<Sexpr> {
-        self.skip_trivia();
+        self.skip_trivia()?;
         if self.pos >= self.src.len() {
             return Err(self.err(ParseErrorKind::UnexpectedEof));
         }
@@ -188,7 +264,7 @@ impl Parser<'_> {
             // advancing `pos`, and the parse loops would append empty atoms forever.
             b';' => Err(self.err(ParseErrorKind::UnexpectedChar)),
             _ => {
-                let at = self.parse_atom();
+                let at = self.parse_atom()?;
                 // Belt-and-braces: no delimiter added to `parse_atom` in future may
                 // reintroduce a zero-progress loop.
                 if at.is_empty() {
@@ -202,11 +278,26 @@ impl Parser<'_> {
                 if (at == "$" || at == "@") && self.src.get(self.pos) == Some(&b'"') {
                     let s = self.parse_string()?;
                     self.require_delimiter()?;
+                    // `id ::= '$' idchar+` — the quoted spelling still has to name something.
+                    if s.is_empty() {
+                        return Err(self.err(ParseErrorKind::EmptyIdentifier));
+                    }
+                    // An identifier is a **name**, so it must be valid UTF-8. This was
+                    // `from_utf8_lossy`, the same silent rewrite `parse_atom` carried: `$"\ef"`
+                    // became `$\u{FFFD}`, so a malformed identifier was accepted *and* renamed,
+                    // and two different bad escapes collided on one name.
+                    let Ok(text) = core::str::from_utf8(&s) else {
+                        return Err(self.err(ParseErrorKind::MalformedUtf8));
+                    };
                     let mut name = at;
-                    name.push_str(&String::from_utf8_lossy(&s));
+                    name.push_str(text);
                     return Ok(Sexpr::Atom(name));
                 }
                 self.require_delimiter()?;
+                // A bare `$` names nothing — `(func $)` and `(func $ "a")` are both malformed.
+                if at == "$" {
+                    return Err(self.err(ParseErrorKind::EmptyIdentifier));
+                }
                 Ok(Sexpr::Atom(at))
             }
         }
@@ -220,7 +311,7 @@ impl Parser<'_> {
         self.pos += 1; // consume '('
         let mut items = Vec::new();
         loop {
-            self.skip_trivia();
+            self.skip_trivia()?;
             if self.pos >= self.src.len() {
                 return Err(self.err(ParseErrorKind::UnterminatedList));
             }
@@ -244,7 +335,7 @@ impl Parser<'_> {
     ///
     /// Strings **and comments** are tracked, because a `)` inside either does not close the
     /// annotation — `(@a ;; bla)` and `(@a (; ) ;))` both appear in the proposal's own tests.
-    fn skip_annotation(&mut self) {
+    fn skip_annotation(&mut self) -> Result<()> {
         self.pos += 2; // consume `(@`
         let mut depth = 1usize;
         while self.pos < self.src.len() && depth > 0 {
@@ -285,9 +376,16 @@ impl Parser<'_> {
                     depth -= 1;
                     self.pos += 1;
                 }
+                // Skipping an annotation is not the same as not reading it. The proposal says an
+                // unrecognized annotation must be **ignored**, not that its bytes stop being
+                // source: `(@a \00)` is malformed, and the source character set is the reason.
+                c if !is_source_char(c) => {
+                    return Err(self.err(ParseErrorKind::IllegalCharacter));
+                }
                 _ => self.pos += 1,
             }
         }
+        Ok(())
     }
 
     /// A token must end at whitespace, a parenthesis, a comment, or end-of-input.
@@ -307,15 +405,35 @@ impl Parser<'_> {
     /// An atom runs to the next delimiter. Source is not required to be UTF-8 overall, but
     /// an atom that is not valid UTF-8 cannot be a keyword or identifier, so it is
     /// lossily converted — the assembler will reject it by name anyway.
-    fn parse_atom(&mut self) -> String {
+    /// Scan one atom (§6.2.2 — a keyword, `id`, number, or `key=value`).
+    ///
+    /// Every byte must be an `idchar`. It used to consume anything that was not a delimiter and
+    /// then run `from_utf8_lossy`, which was wrong twice over: it accepted control characters and
+    /// non-ASCII that the source character set forbids, and the lossy conversion **silently
+    /// rewrote** what it accepted — `$a\xffb` and `$a\xfeb` both became `$a\u{FFFD}b`, so two
+    /// distinct identifiers collided on one name. Restricting to `idchar` makes the slice ASCII by
+    /// construction, so the conversion cannot lose anything.
+    fn parse_atom(&mut self) -> Result<String> {
         let start = self.pos;
         while self.pos < self.src.len() {
-            match self.src[self.pos] {
-                b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b';' | b'"' => break,
-                _ => self.pos += 1,
+            let c = self.src[self.pos];
+            if matches!(c, b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b';' | b'"') {
+                break;
             }
+            if !is_idchar(c) {
+                // A printable non-`idchar` (`,`, `[`, `{`, …) merely ends the atom — it begins a
+                // *reserved* token, which `require_delimiter` will reject in context. A byte
+                // outside the source character set is malformed wherever it appears.
+                if !is_source_char(c) {
+                    return Err(self.err(ParseErrorKind::IllegalCharacter));
+                }
+                break;
+            }
+            self.pos += 1;
         }
-        String::from_utf8_lossy(&self.src[start..self.pos]).into_owned()
+        // ASCII by construction, so this cannot fail; `unwrap_or_default` keeps the promise
+        // without a panic path in a parser that must stay total on hostile input.
+        Ok(String::from_utf8(self.src[start..self.pos].to_vec()).unwrap_or_default())
     }
 
     fn parse_string(&mut self) -> Result<Vec<u8>> {
@@ -328,6 +446,33 @@ impl Parser<'_> {
                 return Ok(buf);
             }
             if c != b'\\' {
+                // §6.3.3 `stringchar ::= c:char  (if c ≥ U+20 ∧ c ≠ U+7F ∧ c ≠ '"' ∧ c ≠ '\')`.
+                // A control byte or DEL must be written as an escape; raw, it is malformed.
+                if c < 0x20 || c == 0x7f {
+                    self.pos -= 1;
+                    return Err(self.err(ParseErrorKind::IllegalCharacter));
+                }
+                // Source text is Unicode, so a byte ≥ 0x80 is only legal as part of a valid UTF-8
+                // sequence — `"héllo"` is fine, a lone `\xff` is not. Arbitrary bytes reach a data
+                // segment through escapes (`"\ff"`), which is the branch below.
+                if c >= 0x80 {
+                    let len = utf8_len(c).ok_or_else(|| {
+                        self.pos -= 1;
+                        self.err(ParseErrorKind::MalformedUtf8)
+                    })?;
+                    let start = self.pos - 1;
+                    let end = start + len;
+                    let seq = self.src.get(start..end).filter(|s| {
+                        core::str::from_utf8(s).is_ok()
+                    });
+                    let Some(seq) = seq else {
+                        self.pos = start;
+                        return Err(self.err(ParseErrorKind::MalformedUtf8));
+                    };
+                    buf.extend_from_slice(seq);
+                    self.pos = end;
+                    continue;
+                }
                 buf.push(c);
                 continue;
             }
@@ -555,5 +700,97 @@ mod tests {
             parse("(a) )").unwrap_err().kind,
             ParseErrorKind::UnexpectedParen
         );
+    }
+}
+
+#[cfg(test)]
+mod source_charset_tests {
+    use super::*;
+
+    fn err(src: &[u8]) -> ParseErrorKind {
+        parse_all(src).expect_err("should be malformed").kind
+    }
+
+    /// §6.2 — the source character set outside strings and comments is printable ASCII plus the
+    /// four whitespace forms. These were all **accepted** before, and none of them involves an
+    /// annotation: the defect was generic, the file that caught it was not.
+    #[test]
+    fn a_control_character_in_an_atom_is_malformed() {
+        assert_eq!(err(b"(module (func $a\x01b))"), ParseErrorKind::IllegalCharacter);
+        assert_eq!(err(b"(module (func $a\x7fb))"), ParseErrorKind::IllegalCharacter);
+    }
+
+    /// Non-ASCII is not an `idchar`, however well-formed its UTF-8 — `(@a Heiße)` is the suite's
+    /// case, and it is an *illegal character*, not a UTF-8 problem.
+    #[test]
+    fn a_non_ascii_atom_is_malformed() {
+        assert_eq!(err("(module (func $Heiße))".as_bytes()), ParseErrorKind::IllegalCharacter);
+    }
+
+    /// The whitespace exceptions must keep working — this is the half a tightening breaks.
+    #[test]
+    fn tab_newline_and_carriage_return_stay_legal() {
+        parse_all(b"(module\t(func)\r\n(func))").unwrap();
+        parse_all(b"(module (@a \t\r\n x) (func))").unwrap();
+    }
+
+    /// §6.3.3 `stringchar` requires `c >= U+20 && c != U+7F`: a control byte must be **escaped**.
+    /// The escape must still work, or this rule would break every `(data "\00…")` in the corpus.
+    #[test]
+    fn a_raw_control_byte_in_a_string_is_malformed_but_the_escape_is_not() {
+        assert_eq!(err(b"(module (data \"\x01\"))"), ParseErrorKind::IllegalCharacter);
+        assert_eq!(err(b"(module (data \"\x7f\"))"), ParseErrorKind::IllegalCharacter);
+        let ok = parse_all(br#"(module (data "\01\7f\ff"))"#).unwrap();
+        assert!(!ok.is_empty(), "escaped control bytes must still assemble");
+    }
+
+    /// Raw non-ASCII in a string is legal when it is valid UTF-8 and malformed when it is not.
+    /// Arbitrary bytes reach a data segment through escapes, which the test above pins.
+    #[test]
+    fn a_string_takes_valid_utf8_raw_and_rejects_the_rest() {
+        parse_all("(module (data \"héllo ☃\"))".as_bytes()).unwrap();
+        assert_eq!(err(b"(module (data \"\xff\"))"), ParseErrorKind::MalformedUtf8);
+        // A truncated sequence: a valid lead byte with no continuation.
+        assert_eq!(err(b"(module (data \"\xe0\"))"), ParseErrorKind::MalformedUtf8);
+        // A bare continuation byte.
+        assert_eq!(err(b"(module (data \"\x80\"))"), ParseErrorKind::MalformedUtf8);
+    }
+
+    /// `id ::= '$' idchar+`. All three spellings of "nothing" are malformed.
+    #[test]
+    fn an_empty_identifier_is_malformed() {
+        assert_eq!(err(b"(module (func $))"), ParseErrorKind::EmptyIdentifier);
+        assert_eq!(err(b"(module (func $\"\"))"), ParseErrorKind::EmptyIdentifier);
+        assert_eq!(err(b"(module (func $ \"a\"))"), ParseErrorKind::EmptyIdentifier);
+    }
+
+    /// A quoted identifier is a **name**, so it must be valid UTF-8. This was `from_utf8_lossy`,
+    /// which accepted it *and renamed it* — `$"\ef"` became `$\u{FFFD}`, so two different bad
+    /// escapes produced the same identifier. Silent rewriting, not just over-acceptance.
+    #[test]
+    fn a_quoted_identifier_must_be_valid_utf8() {
+        assert_eq!(err(br#"(module (func $"\ef"))"#), ParseErrorKind::MalformedUtf8);
+        // The legitimate use of the quoted form still works.
+        parse_all("(module (func $\"a b\") (func $\"héllo\"))".as_bytes()).unwrap();
+    }
+
+    /// The rule must reach **inside** an annotation. Skipping an annotation means ignoring what it
+    /// says, not exempting its bytes from being source — which is where 44 of these live.
+    #[test]
+    fn the_charset_rule_applies_inside_a_skipped_annotation() {
+        assert_eq!(err(b"(module (@a \x00))"), ParseErrorKind::IllegalCharacter);
+        assert_eq!(err(b"(module (@a \x7f))"), ParseErrorKind::IllegalCharacter);
+        assert_eq!(err(b"(module (@a \xff))"), ParseErrorKind::IllegalCharacter);
+        // ...but a well-formed annotation is still skipped whole, including its odd tokens.
+        parse_all(br#"(module (@a , ; ] [ }} }x{ ({) ,{{};}] ;) (func))"#).unwrap();
+    }
+
+    /// Comments are deliberately NOT tightened: `linechar ::= c:char (if c != U+0A)` admits
+    /// anything but a newline, so a control byte in a comment is legal and must stay accepted.
+    /// Recorded because it was the one probe of four that turned out not to be a defect.
+    #[test]
+    fn a_control_character_in_a_comment_stays_legal() {
+        parse_all(b"(module (func) ;; \x01 note\n)").unwrap();
+        parse_all(b"(module (func) (; \x01 note ;))").unwrap();
     }
 }

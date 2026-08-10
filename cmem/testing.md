@@ -18,16 +18,44 @@ The port's **definition of done = full Rust↔oracle parity on both targets** (n
 - **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
   item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
 
-## Spec-suite conformance — current (2026-08-08, T9a#7 + the start function) — **99.3%**
+## Spec-suite conformance — current (2026-08-08, the text source character set) — **99.4%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | **T9a#7 + start (08-08)** |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | **61,987** |
-| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | **441** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | **2,247** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | **99.3%** of 62,428 |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | T9a#7 + start (08-08) | **charset (08-08)** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | 61,987 | **62,037** |
+| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | 441 | **393** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | **2,245** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | **99.4%** of 62,430 |
+
+### The twelfth 08-08 column: the text format's source character set (§6.2/§6.3)
+
+**+50 passes, −48 failures**, 2 assertions newly adjudicable. **`id.wast` reached 6/0/1 — a file at zero
+failures**; `annotations.wast` 12/51 → **56/8**. No file lost a pass, and **the `.wat` corpus held at
+533/534** — the measurement that matters when *tightening* a parser, since the suite alone would reward
+a rule that rejects valid input. **435 tests.**
+
+**The pick came from surveying by cause, not from the punch list.** The open items were #8 (1 file),
+#9 (2 files) and `func.wast` 8; grouping all 441 failures by message put text-assembler errors far
+ahead (`BadNumber` 63, `BadForm` 49, `BadValType` 18, `BadModuleField` 16), with `annotations.wast` at
+51 the single worst file — **and T9g had written it off as an untargeted proposal.**
+
+⚠️ **The scope note was wrong the way §1.1 says cost figures are wrong.** Four one-line probes, none
+containing an annotation, were all accepted: a control character in an identifier, invalid UTF-8 in an
+identifier, and a raw control byte in a string. So ~44 of the 51 were **generic §6.2/§6.3 lexer rules**
+that apply to every `.wat` file. The confirmation is `id.wast` — unrelated to annotations, 5 failures,
+now zero. See `best-practices.md` §1.1a.
+
+🆕 **`from_utf8_lossy` in the lexer was not merely over-accepting — it silently RENAMED.** `$a\xffb`
+and `$a\xfeb` both became `$a\u{FFFD}b`, so two distinct identifiers collided on one name; the quoted
+form `$"…"` carried the same bug. Restricting atoms to `idchar` makes the slice ASCII by construction,
+so the conversion cannot lose anything.
+
+⚠️ **The fourth probe was NOT a defect and was left alone**: `linechar ::= c:char (if c ≠ U+0A)` admits
+any character but a newline, so a control byte in a comment is legal. A test now pins that it stays
+accepted — **tightening what the grammar permits is the same error as accepting what it forbids**
+(§4.6a).
 
 ### The eleventh 08-08 column: T9a#7 trap backtraces — and the start function, which never ran
 
@@ -243,9 +271,10 @@ runner also distinguishes **"nothing defines this import"** (a real unlinkable v
 cannot back this kind"** (a gap → skip); collapsing the two, as `BuildErr::Unresolved` did, is precisely
 what made `assert_unlinkable` unimplementable.
 
-Worst remaining files (2026-08-08, after the subtyping pass): `annotations` 51 (a proposal wasmrt does not
-target), `memory64-imports` 26 (out of scope), `type-subtyping` 23, `func` 21,
-`custom-page-sizes-invalid` 20. **All 284 files parse (0 unparseable).**
+Worst remaining files (2026-08-08, after the charset pass): `memory64-imports` 26 (out of scope),
+`table_copy64` 22 (out of scope), `custom-page-sizes-invalid` 20, `exact` 17. ⚠️ `annotations` was top
+of this list at 51 and is now **8** — see the twelfth column above for why "out of scope" was the wrong
+reading of it. **All 284 files parse (0 unparseable).**
 
 **The largest IN-SCOPE cluster left is type canonicalisation** — ~40 assertions across `type-subtyping`,
 `type-rec` and `type-equivalence`, every one the same cause: wasmrt compares concrete types by **index**,
@@ -294,9 +323,9 @@ there. And give each file its **own** output path: reusing one `/tmp/out.wasm` a
 Windows file locking and produced 4 phantom failures in the first run. Numbers above are from the clean
 re-run.
 
-## Current test state (2026-08-08, T9a#7 + the start function)
+## Current test state (2026-08-08, the text source character set)
 
-**426 workspace tests, all green** (398 core + 28 capi), clippy clean on all four build surfaces; the
+**435 workspace tests, all green** (407 core + 28 capi), clippy clean on all four build surfaces; the
 C-ABI gate (74/74 + `c_smoke`) and Miri (28/28) pass. This pass added 15: six pinning the backtrace
 (three frames innermost-first, offsets that advance within a body, a caught exception leaving none
 behind), five pinning the start function (it runs, it runs AFTER the segments, a trap in it fails the

@@ -213,6 +213,50 @@ Seven regression tests in `wat.rs`, including one asserting the `0x40` marker is
   issuing store and are **checked on use**, so a stale or foreign handle is rejected rather than
   followed. Mutation-verified, and exercised by a Miri lifecycle fuzz.
 
+## ✅ Fixed 2026-08-08 — the text format's source character set was not enforced (§6.2/§6.3)
+
+**Suite 61,987 / 441 / 2,247 → 62,037 / 393 / 2,245 — 99.4%.** +50 passes, −48 failures.
+**`id.wast` 0/5/2 → 6/0/1 — a file at zero failures**; `annotations.wast` 12/51 → **56/8**. No file
+lost a pass, and the `.wat` corpus held at **533/534** — the check that matters when tightening a
+parser, because the suite alone rewards a rule that rejects valid input.
+
+The lexer's `parse_atom` consumed **any** byte that was not a delimiter, and `parse_string` took any
+byte raw. So all of this assembled:
+
+```wat
+(module (func $a\x01b))    ;; control character in an identifier -- not an idchar
+(module (func $a\xffb))    ;; invalid UTF-8 -- source text is Unicode
+(module (data "\x01"))     ;; raw control byte -- stringchar requires c >= U+20
+(module (func $))          ;; empty identifier -- id ::= '$' idchar+
+```
+
+🆕 **And `from_utf8_lossy` did not merely over-accept, it silently RENAMED.** `$a\xffb` and `$a\xfeb`
+both became `$a\u{FFFD}b`, so two distinct (malformed) identifiers collided on a single name. The
+quoted form `$"…"` carried the same conversion, so `$"\ef"` was accepted *and* renamed. Restricting
+atoms to `idchar` makes the slice ASCII by construction, so the conversion cannot lose anything —
+the fix removes the lossy call rather than checking around it.
+
+What is enforced now, all in `sexpr.rs`: `idchar` in atoms; `stringchar` (`c >= U+20 && c != U+7F`)
+in string literals, with escapes still delivering arbitrary bytes; UTF-8 validity for raw non-ASCII
+in strings; `id ::= '$' idchar+` for all three spellings of an empty identifier; and the character
+rule **inside a skipped annotation**, since ignoring what an annotation *says* is what the proposal
+requires, not exempting its bytes from being source.
+
+⚠️ **A fourth probe looked identical and was NOT a defect.** `linechar ::= c:char (if c ≠ U+0A)` admits
+any character but a newline, so a control byte inside a `;;` comment is **legal**; a test now pins that
+it stays accepted. Fixing "all four" would have rejected valid `.wat`, and the only thing separating
+them was reading the production instead of pattern-matching on "control character = bad".
+
+⚠️⚠️ **THE FINDING IS ABOUT A SCOPE NOTE.** T9g had these 51 assertions under *scope confirmations —
+NOT bugs, record, do not "fix"*, as `annotations`, an untargeted proposal. That was true of the **file**
+and false of **44 of its assertions**. A logged *cost* gets re-measured because `best-practices.md`
+§1.1 says so; a *scope* note reads as settled, is filed under "not a bug", and so nobody returns to it
+— which makes it the more dangerous of the two. **The proof it was generic is `id.wast`**, which has
+nothing to do with annotations and went from 5 failures to zero on the same fix. Recorded as §1.1a.
+
+What genuinely remains annotation-scoped, and stays out of scope: 7 × "empty annotation id" and one
+annotation-id UTF-8 case — 8 assertions, down from 51.
+
 ## ✅ Fixed 2026-08-08 — THE START FUNCTION NEVER RAN (silent wrong output)
 
 **Suite 61,975 / 453 / 2,247 → 61,987 / 441 / 2,247 — 99.3%.** +12 passes, −12 failures, nothing

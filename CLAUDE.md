@@ -18,10 +18,10 @@ review the new wazmrt commits, decide whether the port must follow, then re-base
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — eleven passes landed 2026-08-08, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — twelve passes landed 2026-08-08, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.3%** (61,987 / 441 / 2,247 of 62,428),
-**426 workspace tests** (398 core + 28 capi), Miri 28/28, no file lost a pass in any pass. **T9b/T9c/T9d done, so all three success axes carry a real
+**embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,037 / 393 / 2,245 of 62,430),
+**435 workspace tests** (407 core + 28 capi), Miri 28/28, no file lost a pass in any pass. **T9b/T9c/T9d done, so all three success axes carry a real
 measurement** — cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady, CLI **621 KiB** / cdylib
 **493.5 KiB** / freestanding `wasm32` engine **158.1 KiB** (137.5 KiB with `wasm-opt -Oz`).
 **2026-08-08: T9a#4's memory half landed** (owner chose option 2 — imported **memories** link and are
@@ -111,6 +111,19 @@ been paid invisibly. 🆕 Asking where an *instantiation* trap gets its frames l
 printed by the CLI — worth **+12 assertions**, 10 of them sitting in files named `start.wast` and
 `start0.wast` for five releases. ⚠️⚠️ **A feature can be fully decoded, validated and printed and still
 never execute; before diagnosing a file's failures, check that the feature it is NAMED for works.**
+**The twelfth pass enforced the TEXT FORMAT'S SOURCE CHARACTER SET** (§6.2/§6.3) — and its finding is
+about a **scope note**, not a bug. T9g had `annotations` **51** filed under *scope confirmations — NOT
+bugs, do not "fix"*. True of the **file**; false of **44 of its 51 assertions**, which were generic
+lexer rules applying to every `.wat` wasmrt reads. Four one-line probes, **none containing an
+annotation**, were all accepted: a control character in an identifier, invalid UTF-8 in an identifier,
+a raw control byte in a string. ⚠️⚠️ **A SCOPE note is a hypothesis about a cause too — and it is the
+one nobody re-measures, because it is filed under "not a bug".** The proof the cause was generic is
+`id.wast`, unrelated to annotations: **5 failures → 0**. 🆕 It also found `from_utf8_lossy` in the
+lexer **silently RENAMING** malformed identifiers — `$a\xffb` and `$a\xfeb` both became `$a\u{FFFD}b`,
+so two distinct identifiers collided on one name. ⚠️ **One probe of the four was NOT a defect and was
+left alone** — `linechar` admits any character but a newline, so a control byte in a *comment* is
+legal, and a test pins that it stays accepted: **tightening what the grammar permits is the same error
+as accepting what it forbids.**
 **Still open in T9:** #8, #9, `func.wast` 8 (the withdrawn body-order rule + duplicate identifiers),
 `pin`, **tail calls**.
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),

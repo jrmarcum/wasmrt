@@ -24,6 +24,31 @@ independent fixes. (b) T9a#11 and #12 were logged as separate items with differe
 **Apply:** re-measure before starting any punch-list item. A cost figure assigned by reading a file for
 "the first construct that looks unsupported" is invention. Do not bank predicted value.
 
+### 1.1a A SCOPE note is a hypothesis about a cause too — and it is the one nobody re-measures
+
+T9g listed "`annotations` **51** — a proposal wasmrt does not target" under *scope confirmations
+(NOT bugs — record, do not "fix")*. True of the file. False of **44 of its 51 assertions**, which
+were generic §6.2/§6.3 lexer rules applying to every `.wat` wasmrt reads.
+
+Disproving it took four one-line files and about a minute — none of them containing an annotation:
+
+```
+(module (func $a\x01b))    accepted; \x01 is not an idchar
+(module (func $a\xffb))    accepted; source text must be valid UTF-8
+(module (data "\x01"))     accepted; stringchar requires c >= U+20
+(module (func) ;;\x01 )    accepted — and CORRECTLY: linechar allows it
+```
+
+The proof it was generic is `id.wast`, which has nothing to do with annotations and went from 5
+failures to **zero** on the same fix.
+
+A cost figure gets re-measured because §1.1 says so. A *scope* note reads as settled — it is filed
+under "not a bug", so nobody returns to it. That makes it the more dangerous of the two.
+
+**Apply:** a scope note names a **file** or a **proposal**; a defect has a **cause**. Before writing a
+cluster off, spend the minute it takes to reproduce it *outside* the thing you scoped out. If it
+reproduces, the scope note is about the tests, not about the bug.
+
 ### 1.2 Survey the measurement, don't just read the entry
 
 The roadmap said the remaining text-parser work was "`func.wast` 21". Surveying the worst in-scope files
@@ -118,7 +143,7 @@ one. That is why `SectionId::order()` is a table.
 dropped table initializers; element-segment form 4 rewriting a segment's type; `br_table`'s missing
 label vector; `(data "a""b")` concatenating; `Op::MemorySize` reading another instance's memory; a
 repeated section silently replacing the first; a cross-store `InstanceId` sharing the wrong memory; the
-assembler emitting open types as final and flattening rec groups; **the start function never running**.
+assembler emitting open types as final and flattening rec groups; **the start function never running**; **`from_utf8_lossy` in the lexer silently renaming malformed identifiers** so two distinct ones collided.
 
 **Apply:** when hunting, weight this class above everything else. Ask "what would a wrong answer look
 like?" before "what would an error look like?"
@@ -227,6 +252,22 @@ Two undecidable comparisons, opposite calls, both measured:
 
 Decide from what happens when you are wrong, then measure both ways if you can.
 
+### 4.6a Tightening what the grammar PERMITS is the same error as accepting what it forbids
+
+Four probes of the lexer's character handling all looked like defects; **three were**. The fourth — a
+control byte inside a `;;` comment — is legal, because `linechar ::= c:char (if c ≠ U+0A)` admits
+anything but a newline. Fixing "all four" would have rejected valid `.wat`, and the only thing that
+separated them was reading the production rather than pattern-matching on "control character = bad".
+
+The corresponding gate: when tightening a *parser*, the measurement that matters is not the suite but
+the **corpus of things that must still parse** — 533/534 `.wat` files, checked on both sides. A
+tightening that improves the suite and drops a corpus file has not made the parser more correct.
+
+**Apply:** for each rule you are about to add, quote the production it comes from. A rule you cannot
+cite is a guess, and half the guesses here were wrong. Then pin the *negative* case with a test — this
+pass has one asserting a control byte in a comment stays accepted, so a later "cleanup" cannot quietly
+extend the rule to where it does not belong.
+
 ### 4.7 Prefer a hard `Err(Unsupported*)` over silent-wrong
 
 Standing since T4. An unhandled input that emits a stub or a placeholder is the worst category in the
@@ -320,6 +361,18 @@ being copied rather than understood.
 
 It discards *all* uncommitted work in that file. Doing this to drop a debug probe destroyed a completed
 canonicalisation implementation, which then had to be rewritten. Delete the added block, or stash.
+
+### 8.1a Do not run `perl -pi -e` with a replacement containing `$`
+
+In a Perl replacement, `$'` is the **postmatch variable** — everything after the match. A one-line
+substitution meant to add an enum variant documented as ``` `id ::= '$' idchar+` ``` instead spliced
+the entire remainder of the file into the middle of the enum, ~100 junk lines. Rust is full of `$`
+(macros, and any prose about `.wat` identifiers), so this is not a rare shape.
+
+**Apply:** use the `Edit` tool for any replacement text containing `$`, `@`, or a backslash. When a
+bulk edit *is* right, prefer a pattern with none of them. And if this does go wrong, **repair — do not
+`git checkout`** (§8.1): the corruption was a contiguous, identifiable span, and splicing it out
+preserved the rest of the pass.
 
 ### 8.2 Report faithfully, including the direction of an error
 
