@@ -1,15 +1,25 @@
 # Roadmap
 
-## Status (2026-08-08) — PORT phase; gate OPEN, oracle FROZEN. **T0–T8 DONE; T9 IN PROGRESS.**
+## Status (2026-08-10) — PORT phase; gate OPEN, oracle **RE-BASELINED**. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **61,987 / 441 / 2,247 — 99.3%**
-of 62,428 adjudicated, **426 workspace tests** (398 core + 28 capi), Miri **28/28**. T9's first pass
-landed T9a #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
-**T9d (licensing/docs)**. **2026-08-08 landed eight further passes**, closing T9a **#4 (both halves,
-via a funcref that carries its owning instance), #5, #6, #7, #11** and most of **#12**, plus four
-defects the list never had: a cross-store `InstanceId` that let a guest silently share the wrong
-memory, and — found while wiring #7 — **the start function, which was decoded, validated and printed
-but never executed** (§4.5.5).
+**Current tree (unreleased, ahead of the published v0.9.0):** suite **62,113 / 385 / 2,163 — 99.4%**
+of 62,498 adjudicated, **450 workspace tests** (418 core + 28 capi + 4 CLI), Miri **28/28**. The
+532-file `.wat` corpus is a **clean 532/532** through assemble→decode→validate. T9's first pass landed
+T9a #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
+**T9d (licensing/docs)**. **Fourteen further passes have landed**, closing T9a **#4 (both halves, via a
+funcref that carries its owning instance), #5, #6, #7, #8, #9, #11** and most of **#12**, plus defects
+the list never had: a cross-store `InstanceId` that let a guest silently share the wrong memory, and —
+found while wiring #7 — **the start function, which was decoded, validated and printed but never
+executed** (§4.5.5).
+
+🔒 **The oracle is no longer at its original freeze.** `wazmrt` moved twice on 2026-08-10, both
+owner-authorized and both re-baselined deliberately; `scripts/wazmrt-baseline.txt` now pins
+**`wazmrt@6b7795a`** and `check-wazmrt.sh` reports NO DRIFT. The cause was a defect **both** runtimes
+shared: the CLI paths that *execute* did not validate first, while the paths that merely *inspect* did.
+Fixed in both, along with the diagnostic — an invalid module now reports the byte offset, the function
+and expected-vs-found, **matched byte-for-byte against wasmtime 47.0.2**.
+⚠️ **The 489/493 "4 skipped" in the oracle's suite is NOT unqualified** — those four are the symlink
+sandbox-escape tests, which self-skip because this host denies native symlink creation. See **T12y**.
 
 **Still open in T9:** the text-parser remainder of **#12** (`func.wast` 8), **T9e `pin`**,
 **T9f tail calls**. **All of T9a #1–#9 and #11 are now closed.** #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
@@ -887,6 +897,55 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   match, the test passed, and the obvious reading was "the sweep is decoration". Re-doing it with
   `sed` **and grepping to confirm the line was gone** made it fail and name all four ops exactly.
   **A no-op mutation and a worthless check produce the same observation** (§4.2a).
+
+  ### ◐ Progress 2026-08-10 (fifteenth) — `wasmrt run` executed WITHOUT VALIDATING. **Both runtimes did**
+
+  **Suite unchanged at 62,113 / 385 / 2,163 = 99.4%.** 450 tests (was 442). No conformance movement is
+  the correct outcome: the spec suite cannot reach a CLI entry point.
+
+  ⚠️⚠️ **Found by the owner questioning a claim, not by a test.** Resolving T9a#9 I wrote that "the
+  oracle's execution path skips validation" as though it were wazmrt's peculiarity. Asked to justify it,
+  the check that should have come first showed **wasmrt had the same hole**:
+
+  | entry point | before | now |
+  | --- | --- | --- |
+  | `wasmrt <file>` (summarize) | ✅ | ✅ |
+  | `wasmrt wasi` | ✅ | ✅ |
+  | **`wasmrt run`** | ❌ **executed unvalidated** | ✅ |
+  | C ABI `wasmrt_module_new` | ✅ | ✅ |
+  | Rust `Instance::new` | ⚠️ documented precondition | ⚠️ by design, documented properly |
+
+  `wasmrt run ill-typed.wasm f` printed `1` and exited **0**. §4.5.1 defines instantiation only for a
+  *valid* module. **The asymmetry was the bug** — second instance of `best-practices.md` §3.4, after the
+  C ABI holding a store tag core lacked at T9a#3. Severity is bounded by `forbid(unsafe_code)` to a
+  wrong answer, never memory unsafety (a type-confusion probe trapped cleanly) — but wrong-answer is the
+  class this project ranks worst.
+
+  **The oracle had it worse, and was fixed concurrently** (`wazmrt@baf0a38`): its summarize and `.wast`
+  paths validated while **both** execute paths *and* `wasm_module_new` did not. Its own source recorded
+  part of the cost — an export index reaching a `.?` was *undefined data in ReleaseFast, a segfault from
+  a 31-byte module* — patched defensively at the one site noticed, root cause left in place. Zig's
+  ReleaseFast/ReleaseSmall remove the checks that make such a slip survivable, and the C ABI is the
+  embedding surface, so that is where it mattered most.
+
+  **Then the diagnostic, decided by measuring wasmtime rather than arguing the API** (`wazmrt@6b7795a`
+  + wasmrt). The owner's rule: base it on what wasmtime does. wasmtime 47.0.2 refuses with
+  `Invalid input WebAssembly code at offset 33: type mismatch: expected i32, found i64` — so both
+  runtimes now match that action. **The offset is byte-identical across all three tools** because all
+  three count from the start of the module; verified side by side on two modules (offsets **33** and
+  **61**) and pinned as tests. Implemented as a side channel in both, not a widened error type: in Rust
+  because `ValidateError` is `Copy`, exhaustively matched and crosses the C ABI; in Zig because an error
+  set **cannot** carry a payload at all. `Instr.offset` (free padding, T9a#7) paid for its second
+  feature here; wazmrt derives the offset by re-decoding one body on the cold path instead, the same
+  trick `Instance.frameOffset` already used.
+
+  ⚠️ **Method lesson, now in `design-decisions.md`: when a decision is to be based on a reference
+  implementation, RUN it.** "What does wasmtime's `Module::new` do" invites answering from memory; three
+  lines through the real binary settled it in seconds *and* produced two numbers to assert against.
+
+  🚦 Two T12 items came out of this — **T12z** (sweep an invariant across every entry point, because the
+  bug is never "nobody does X" but "three of the four do X") and **T12y** (the oracle's sandbox-escape
+  tests do not run on this host).
 
   ### ◐ Progress 2026-08-08 (fourteenth) — T9a#9 is NOT a defect. **The right outcome was to change nothing**
 

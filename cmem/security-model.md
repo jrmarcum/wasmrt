@@ -27,6 +27,43 @@ ABI. Full scope in [roadmap.md](roadmap.md) (T12a–f).
 
 Neither is a vulnerability on its own; both are surfaces, and T12 decides what to do about them.
 
+## 🔒 Validation is a SECURITY boundary, and every entry point must cross it (2026-08-10)
+
+**Validation is what establishes the invariants the interpreter assumes** — stack heights, operand
+types, index ranges. §4.5.1 defines instantiation only for a *valid* module, so running an unvalidated
+one is outside the spec, and every defensive check downstream is being asked to hold a line validation
+was supposed to have held already.
+
+⚠️ **`wasmrt run` did not validate.** It decoded and executed, so an ill-typed module ran and printed a
+plausible answer with exit 0 — while `wasmrt wasi`, one function away, refused the same bytes. The
+oracle was worse: **both** of wazmrt's execute paths *and* its C ABI `wasm_module_new` skipped it. Fixed
+in both repos 2026-08-10.
+
+**Current state — the property, checked at every entry point** (which is the method, not the
+afterthought; see roadmap **T12z**):
+
+| entry point | validates before executing? |
+| --- | --- |
+| `wasmrt <file>` (summarize — never executes) | ✅ reports a verdict |
+| `wasmrt run` | ✅ *(was ❌)* |
+| `wasmrt wasi` | ✅ |
+| C ABI `wasmrt_module_new` | ✅ |
+| Rust `Instance::new` / `Store::instantiate` | ⚠️ **documented precondition, by design** |
+
+**Why the Rust API is the deliberate exception.** It mirrors wasmtime's compile/instantiate split and
+keeps validation off the path for callers who already did it. That is safe *in practice* because every
+**shipped** entry point validates, so reaching an unvalidated instantiation requires an embedder to skip
+`validate::validate` on purpose. 🚦 **Whether a `Module` should be able to exist unvalidated at all is
+recorded as an open question for T12** (`design-decisions.md`): making it unrepresentable means a
+validated-`Module` type — a breaking API change, and a real cost, for a case no shipped surface reaches.
+
+**Severity bound, stated honestly.** `forbid(unsafe_code)` means the worst case here is a wrong answer or
+a panic, never memory corruption — a type-confusion probe (an `i32` into a `funcref` table, then
+`call_indirect`) trapped cleanly. wazmrt has no such bound: Zig's ReleaseFast/ReleaseSmall remove the
+safety checks, and its own source records this class reaching *a segfault from a 31-byte module*. **The
+same missing check is a different severity in the two languages**, which is worth remembering whenever a
+finding is carried across the port boundary.
+
 ## Two new authority controls at T8 / v0.9.0 (2026-08-06) — reachable from C
 
 Both are **new capability wazmrt does not have**, and both are enforced where they cannot be bypassed:
