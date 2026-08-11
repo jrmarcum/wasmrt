@@ -63,6 +63,24 @@ while the oracle defined success:
 you rather than the thing the consumer uses.** The `.wat` corpus gate ran `wat -o` and called it
 verified; the size axis measures three artifacts and skips the default one.
 
+### 🎯 T11's headline experiment — rsxtk on wasmtime vs rsxtk on wasmrt (added 2026-08-11)
+
+`rsxtk` (`D:\Programs\_ProgramExamples\Example_Programs\Rust\rsxtk`, v0.4.4, one 463-line `main.rs`) runs
+on **wasmtime 40.0.1 + wasmtime-wasi 40.0.1** today, over a **narrow** surface that wasmrt already covers
+in full — see [loaders.md](loaders.md) for the call-site table. It is therefore a **real, buildable
+head-to-head**, not a synthetic benchmark: same host program, same modules, one dependency swapped.
+
+**The owner has decided `.cwasm` will not be the default** (plain `.wasm`, for cross-platform
+compatibility), which is the condition that makes the comparison favourable *and* fair to run: with the
+AOT cache off, wasmtime pays Cranelift compile cost per run — wasmrt's cold-start regime — while wasmrt's
+accepted weakness (hot loops, ceded to a JIT) loses its head start. **Measure it; do not assert it, and
+do not put it in the README until it has been run.**
+
+Two things to fix in rsxtk while there, both found by reading it: the `component-model` feature is
+enabled in `Cargo.toml` and **used nowhere in `src/`** (dead cost, and it makes wasmrt look like it is
+missing a requirement it is not), and the `.cwasm` path reaches native code through **`unsafe
+Module::deserialize_file`**, which cannot validate what it loads.
+
 ## Superseded status block (opened 2026-07-27, last amended 2026-08-05) — kept for the freeze record
 
 *(Mixed dates by accretion: it starts at the freeze and was amended through T7. The **current** status is

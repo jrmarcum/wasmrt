@@ -1,8 +1,24 @@
 # Licensing
 
 **License = `MIT OR Apache-2.0`** (dual, at the consumer's option) — the WebAssembly/Rust ecosystem
-standard, and what the source project `wazmrt` uses. Carry it over verbatim. The compliance ledger is
+standard, and what the originating project `wazmrt` uses. Carry it over verbatim. The compliance ledger is
 `third_party/LICENSES.md`; this file records the *why* + strategy.
+
+## 🔒 Provenance survives the oracle's retirement (2026-08-11)
+
+The `wazmrt` oracle was retired as a gate on 2026-08-11 ([design-decisions.md](design-decisions.md)) and
+the two runtimes now compete for the same inclusion slots. **Nothing in this file changes.** wasmrt is
+derived from wazmrt in design, and that history is real whatever the two projects' relationship becomes:
+
+- Both are **Jon Marcum's own work under the same dual MIT/Apache licence**, so there is **no
+  third-party obligation** — no notice to preserve, no attribution owed to anyone else, no ledger entry.
+- The attribution below **stays anyway**, because it is accurate. *Retiring a gate is not rewriting where
+  the work came from.*
+- `scripts/wazmrt-provenance.txt` records which wazmrt commits the port was developed against. It is a
+  historical record; **nothing reads it**, and it is not a licence artifact.
+- ⚠️ The **Component Ledger stays EMPTY** — wasmrt is 100% original Rust. That was true when wazmrt was
+  the oracle and is unaffected by the split. Adopting *anyone's* code, wazmrt's included, still triggers
+  the Adoption Checklist and a ledger entry.
 
 ## Files (mimic wazmrt) — **all four exist since the T0 scaffold**, verified 2026-08-06
 

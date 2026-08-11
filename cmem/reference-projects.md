@@ -5,6 +5,29 @@ inventory + the Adoption Checklist** live in `third_party/LICENSES.md` (the comp
 this file records evaluation intent. **wasmrt is 100% original Rust** (the wazmrt port is the owner's own
 code) — nothing is adopted; adopting any of these triggers the checklist + a ledger entry.
 
+## 🔒 `wazmrt` is now a COMPETITOR, not the oracle (owner, 2026-08-11)
+
+Through T9 the Zig runtime `wazmrt` was wasmrt's frozen reference oracle. **That is retired**
+([design-decisions.md](design-decisions.md)). The two runtimes are now **independent entrants** for
+inclusion in **wasmtk** and the **universalWasmLoader-\*** runtimes, decided on the smallest and fastest
+binary; **`rsxtk` takes wasmrt by default** through the native Rust interface.
+
+Its place in *this* file therefore changes: wazmrt is a **runtime to benchmark against**, in the same
+column as wasm3 and WAMR, and no longer a source of answers. ⚠️ **Reading its design for ideas is now the
+thing the "wasmtime's SHAPE, our code" rule was written to constrain, aimed at a rival** — and it is
+running its own size/self-ownership program for the same contest, so its current head reflects *its*
+constraints, not ours. **Benchmark it; do not follow it.**
+
+⚠️ Provenance is untouched: wasmrt is derived from wazmrt in design, both are the owner's under the same
+dual MIT/Apache licence, and [licensing.md](licensing.md)'s attribution stays. `scripts/wazmrt-provenance.txt`
+records which commits the port was developed against.
+
+| Runtime to benchmark against | Why | Status |
+|---|---|---|
+| **wazmrt** (Zig) | the direct rival for the same two inclusion slots | ⬜ **never compared on this machine** |
+| **wasm3**, **WAMR** | the small-interpreter bar wasmrt aims to beat on size | ⬜ **never compared** — needs their binaries, not estimates |
+| **wasmtime** | the feature-parity target and the runtime being replaced | partially: used as the correctness reference; **not** size/speed compared |
+
 | Project | License (SPDX) | Why it's interesting for wasmrt |
 |---|---|---|
 | **wasmtime** | Apache-2.0 WITH LLVM-exception | **The feature-parity target** — "run what wasmtime runs" (criterion (a)) — and the runtime wasmrt **replaces** under the loaders. Its `wasmtime_*` C API **shaped** `wasmrt.h` (shipped at T8 / v0.9.0): store/context/linker/typed-val model, caller-based host callbacks. **Shape only — no code, no symbols, no headers were taken**; the names are ours and the handle model deliberately differs (checked value handles, not refcounted objects). **Three shape-borrows to date** — the header (T8), the **shared store** (T7b), and the **engine-level type registry** for cross-module type identity (T9h, approved 2026-08-08). See the 🔒 *"wasmtime's SHAPE, our code"* rule in [design-decisions.md](design-decisions.md); the **Component Ledger stays empty** because no code is adopted, and each borrow visibly diverges where wasmrt's constraints differ. |

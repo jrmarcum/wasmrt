@@ -1,10 +1,21 @@
 # Security Model
 
-wasmrt carries over wazmrt's security design **to replicate**, not to reinvent. Authoritative source:
-`../../wazmrt/cmem/security-model.md`; port detail in `docs/port/05-wasi-cli-pin.md` +
-`docs/port/06-build-docs-licensing.md`. Two orthogonal properties, both required: **Authority** (what a
-running guest may touch — BUILT in wazmrt) and **Authenticity** (is this the code I approved — pin BUILT,
-signatures design-only).
+🔒 **THIS FILE IS THE AUTHORITATIVE SOURCE (2026-08-11).** It previously deferred to
+`../../wazmrt/cmem/security-model.md`; that pointer is **retired** along with the oracle
+([design-decisions.md](design-decisions.md)) — wazmrt is a competitor now, and its security posture is
+neither binding on wasmrt nor a safe thing to inherit unread. Port detail remains in
+`docs/port/05-wasi-cli-pin.md` + `docs/port/06-build-docs-licensing.md`.
+
+Two orthogonal properties, both required: **Authority** (what a running guest may touch — BUILT) and
+**Authenticity** (is this the code I approved — **`pin` is still a STUB**; a build performs *no*
+authenticity check, signatures design-only). ⚠️ Do not read "Authenticity" as implemented anywhere in
+this file.
+
+⚠️ **The record below already shows why inheriting was the wrong posture:** on 2026-08-10 wasmrt gated
+symlink *creation* correctly and wazmrt had **no `path_symlink` right at all**, so its `--ro-dir` never
+stripped it — a guest could plant links in a read-only preopen. Replicating "the authoritative source"
+faithfully would have replicated the hole. **T12x** exists to diff the two runtimes' security tables
+*as independent implementations*, which is the useful form of the comparison.
 
 ## 🔎 A dedicated adversarial review is scheduled: **T12 (0.13.0)** — owner, 2026-08-06
 

@@ -19,11 +19,36 @@ them will produce work that helps neither:
 
 | consumer | artifact | what "small and fast" means there |
 | --- | --- | --- |
-| **rsxtk** (default, native) | `wasmrt-core` **rlib** | what LTO leaves in *rsxtk's* final binary — dead-code elimination across the crate boundary, generic bloat, and whether unused subsystems (WAT assembler, `.wast` runner, WASI) actually drop out. Calls are direct: **no FFI cost to shave**. |
+| **rsxtk** (default, native) | `wasmrt-core` **rlib** | what LTO leaves in *rsxtk's* final binary — dead-code elimination across the crate boundary, generic bloat, and whether unused subsystems (WAT assembler, `.wast` runner, WASI) actually drop out. Calls are direct: **no FFI cost to shave**. rsxtk already builds `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`, so those levers are live. |
 | **wasmtk**, **universalWasmLoader-\*** | `wasmrt_capi` **cdylib** + `wasmrt.h` | the shipped **493.5 KiB** on disk, plus per-call FFI overhead at the C boundary. Nothing is dead-code-eliminated here — every exported symbol is reachable by definition. |
 
 The practical consequence: a size win in the cdylib may be invisible to rsxtk, and an rlib win may not
 show up in the cdylib at all. **Measure the artifact the consumer actually links.**
+
+**What wasmrt is actually displacing in rsxtk** (read 2026-08-11, detail in [loaders.md](loaders.md)):
+`wasmtime` 40.0.1 + `wasmtime-wasi` 40.0.1, across a **narrow** surface — `Engine`/`Store`/`Module`/
+`Linker`/`Val`/`ValType`, `WasiCtxBuilder` + `p1`, `preopened_dir`, `I32Exit`, and `wat::parse_bytes`.
+All of it has a wasmrt equivalent today. rsxtk's `wasmprinter` and `walrus` deps are **toolkit** functions
+(printing and rewriting modules), not engine functions — they stay whichever runtime wins, and are **not
+wasmrt scope**.
+
+### 🎯 The strongest competitive argument found so far: `.cwasm` is being dropped
+
+The owner has decided **`.cwasm` will not be the default — plain `.wasm` will, for cross-platform
+compatibility.** rsxtk today precompiles to a `.cwasm` cache and reloads it through **`unsafe
+Module::deserialize_file`**. That decision plays directly to what wasmrt is:
+
+- a `.cwasm` is **target-specific machine code**, bound to the host ISA *and* the exact wasmtime version;
+- deserializing one is `unsafe` because it **cannot be validated** — a stale or tampered cache file is
+  arbitrary native code execution. wasmrt is `forbid(unsafe_code)` in core with **no deserialize path**;
+- an interpreter has **no AOT artifact at all** — no cache, no invalidation, no version-tied file. The
+  whole precompile/cache/mtime/deserialize apparatus disappears.
+
+⚠️ **And the honest other half:** with `.cwasm` off, **wasmtime pays its Cranelift compile cost on every
+run**, which is exactly the cold-start regime wasmrt is built to win — while wasmrt's accepted weakness
+(sustained hot loops, ceded to a JIT) is the regime that no longer gets an AOT head start. **That is a
+hypothesis with a clear experiment, not a claim: rsxtk-on-wasmtime vs rsxtk-on-wasmrt, same machine, same
+modules, cwasm disabled.** Logged for T11. **Do not put it in the README until it has been run.**
 
 **Correctness anchors externally** now — the official spec testsuite, wasmtime's observable behaviour,
 and the wasmtk WASI corpus. Those were always the harder test; the oracle was scaffolding.

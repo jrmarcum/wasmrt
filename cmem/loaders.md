@@ -1,8 +1,89 @@
-# Loaders — the consumers that drive `wasmrt.h`
+# Consumers — who links wasmrt, and through which surface
 
 wasmrt's reason to exist: be the engine the **`universalWasmLoader-*`** projects run on, replacing
 wasmtime. Full survey: `docs/port/07-loaders-api.md` + `docs/port/08-loader-survey-consolidated.md`.
 Loaders live at `../../GithubProjects/universalWasmLoader` (10 language loaders).
+
+## 🔒 TWO consumer surfaces, not one (owner, 2026-08-11)
+
+Until now this file assumed every consumer arrives through `wasmrt.h`. That is no longer true, and the
+distinction is **load-bearing for the size and speed work** — the two surfaces have different levers, so
+a win in one can be invisible in the other (`vision.md`).
+
+| consumer | links | surface | notes |
+| --- | --- | --- | --- |
+| **`rsxtk`** | `wasmrt-core` **rlib** | **native Rust API** — no C ABI, no cdylib, no FFI | 🆕 **Takes wasmrt BY DEFAULT** (owner). Rust-to-Rust, so calls are direct and the C ABI is not in the path at all. |
+| **`wasmtk`**, **`universalWasmLoader-*`** | `wasmrt_capi` cdylib / staticlib | **`wasmrt.h`** (~38 fns, below) | wasmrt is an **entrant competing for inclusion** here, judged on smallest + fastest binary — not a foregone conclusion. |
+
+⚠️ **What this changes for optimization work:** for rsxtk the number that matters is *what LTO leaves in
+rsxtk's final binary* — cross-crate dead-code elimination, generic bloat, and whether unused subsystems
+(the WAT assembler, the `.wast` runner, WASI) actually drop out when unused. For the C consumers it is
+the **shipped 493.5 KiB cdylib** plus per-call boundary overhead, and **nothing** is dead-code-eliminated
+because every exported symbol is reachable by definition. ⚠️ **The rlib figure has never been measured**,
+which means the *default* consumer's artifact is the one with no number on it — logged as T11 work.
+
+## `rsxtk` — READ, not assumed (2026-08-11)
+
+**`D:\Programs\_ProgramExamples\Example_Programs\Rust\rsxtk`** — v0.4.4, MIT/Apache, edition 2024,
+`github.com/jrmarcum/rsxtk`. *"A high-performance Rust WASM Toolkit for managing and running WASI
+scripts, WAT, and WASM modules."* **One source file, `src/main.rs`, 463 lines.** Release profile:
+`lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`, `opt-level = 3`.
+
+**It runs on `wasmtime` 40.0.1 today** (`default-features = false`, features `cranelift`, `runtime`,
+`component-model`) plus `wasmtime-wasi` 40.0.1 (`p1`). **wasmrt's job is to replace those two.**
+
+The engine surface it actually touches is **narrow** — this is the whole of it:
+
+| rsxtk uses | wasmrt equivalent | status |
+| --- | --- | --- |
+| `Engine`, `Store`, `Module`, `Linker`, `Val`, `ValType` | `interp::{Instance, Store, Value}`, `module::Module`, `validate` | ✅ present |
+| `Config`, `OptLevel`, `cranelift_opt_level` | — | n/a: **no JIT to configure** |
+| `wasmtime_wasi::WasiCtxBuilder`, `p1::{self, WasiP1Ctx}` | `wasi::WasiCtx`, `wasi::link` | ✅ present |
+| `preopened_dir(.., DirPerms::all(), FilePerms::all())` | `WasiCtx::preopen_dir(.., rights)` | ✅ present — and **stricter by default** (symlink *creation* denied unless opted in) |
+| `wasmtime_wasi::I32Exit` downcast | `shared.borrow().exit_code()` | ✅ present |
+| `wat::parse_bytes` (the `wat` crate) | `wasmrt_core::wat::assemble` | ✅ present — corpus 533/533 |
+| `wasmprinter::print_bytes` (wasm → wat) | — | ❌ **wasmrt has no printer** |
+| `walrus::Module::from_buffer` (×2, module rewriting) | — | ❌ **wasmrt has no rewriter** |
+
+⚠️ **The two ❌ rows are NOT blockers and must not be treated as scope.** `wasmprinter` and `walrus` are
+*toolkit* functions — printing and rewriting modules for rsxtk's own subcommands — not engine functions.
+They stay as rsxtk dependencies whichever runtime wins. Only `wasmtime` + `wasmtime-wasi` are in play.
+
+🆕 **`component-model` is enabled in rsxtk's `Cargo.toml` and NOT used anywhere in `src/`** — zero
+component APIs, verified by grep. It is a dead feature flag paying compile time and binary size for
+nothing. **This matters because it looks like a blocker and is not:** wasmrt excludes the component model
+by owner decision (`vision.md` — WASI stays preview 1), so an unread `Cargo.toml` would suggest rsxtk
+needs something wasmrt will never have. It doesn't. *Worth telling the rsxtk owner regardless.*
+
+### 🔒 `.cwasm` will NOT be the default — plain `.wasm` will, for cross-platform compatibility (owner, 2026-08-11)
+
+rsxtk currently leans on `.cwasm` hard: `engine.precompile_module()` writes a `<stem>.cwasm` into a cache
+keyed by mtime, and loads it back through **`unsafe { Module::deserialize_file(..) }`** (plus a `"cwasm"`
+extension arm). The owner is demoting that path.
+
+**This is a decision that favours wasmrt, and the reasoning generalizes:**
+
+- A `.cwasm` is **target-specific machine code** — bound to the host ISA *and* to the exact wasmtime
+  version that produced it. It is the opposite of a portable artifact, which is precisely the owner's
+  stated reason for dropping it.
+- `Module::deserialize_file` is **`unsafe` for a real reason**: wasmtime cannot validate precompiled code,
+  so a tampered or stale cache file is arbitrary native code execution. wasmrt is
+  `#![forbid(unsafe_code)]` in core and has **no deserialize path to attack**.
+- **wasmrt is an interpreter, so there is no AOT artifact at all** — no cache directory, no invalidation
+  logic, no version-tied file, no `unsafe`. It runs the portable `.wasm` on every platform identically.
+  The whole `precompile → cache → mtime-check → deserialize` apparatus (≈50 lines of rsxtk) simply
+  disappears.
+- ⚠️ **The honest cost, which wasmrt must own:** without a JIT, sustained hot loops are slower — that
+  tradeoff is accepted in `vision.md` ("win short-lived / native-FFI, not hot loops"). But once `.cwasm`
+  is not the default, **wasmtime pays its compile cost on every run too**, which is exactly the
+  cold-start regime wasmrt is built to win (4.48 ms at 48 KB). **This should be measured, not asserted**
+  — rsxtk-on-wasmtime vs rsxtk-on-wasmrt, same machine, same modules, cwasm disabled. Logged for T11.
+
+⚠️ **Method note:** this section replaced one that said rsxtk "has not been inspected — its requirements
+are unknown", written minutes earlier because `../rsxtk` was not a sibling directory. Reading the actual
+463 lines took one command and produced a dead feature flag, two non-blockers correctly identified as
+non-scope, and a measurable competitive argument. *`best-practices.md` §2.3 — run it, don't recall it —
+applies to consumers as much as to reference implementations.*
 
 ## Architecture (reconciles the "canonical ABI" language)
 
