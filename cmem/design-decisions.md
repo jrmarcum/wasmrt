@@ -3,11 +3,49 @@
 Load-bearing decisions for the `wasmrt` port. **Do not silently revert these.** Detail + rationale:
 `docs/port/` (esp. `00-synthesis.md`, `06-build-docs-licensing.md`).
 
+## 🔒 The oracle is RETIRED — wasmrt stands alone (owner, 2026-08-11)
+
+**wasmrt no longer refers back to the `wazmrt` repo.** Through T9 wazmrt was a frozen oracle and
+`scripts/check-wazmrt.sh` watched it for drift; that script is **deleted** and its baseline is kept only
+as `scripts/wazmrt-provenance.txt`, a historical record nothing reads.
+
+Why, precisely: **the two runtimes are now independent entrants** competing for inclusion in **wasmtk**
+and the **universalWasmLoader-\*** runtimes, decided on **the smallest and fastest binary**. `rsxtk`
+takes wasmrt by default through the native Rust interface. wazmrt is simultaneously running its own
+size/self-ownership program for the same contest — so its head is a **competitor's** design, and
+"following the oracle" would now mean adopting the choices of the thing wasmrt must beat.
+
+What replaces it, and why this is a **stronger** anchor rather than a weaker one:
+
+- **Correctness** → the official spec testsuite (62,498 adjudicated assertions), **wasmtime's observable
+  behaviour** (already the reference for invalid-module diagnostics, matched byte-for-byte), and the
+  wasmtk WASI corpus. The oracle was never the hardest of these; it was the most convenient.
+- **Completion** → `1.0.0` no longer means "parity with wazmrt". It means every in-scope proposal
+  implemented, conformance at its achievable ceiling, the C ABI stable, and the size/speed numbers
+  measured and defended (`releasing.md`, `ROADMAP.md`).
+- **Selection** → the three axes in `vision.md` are no longer aspirations with a footnote; **fast and
+  small are now the gate.** See the ⚠️ there: three gaps that were acceptable footnotes are now the
+  critical path, chief among them that **nobody has ever measured what rsxtk actually links.**
+
+⚠️ **The one thing NOT retired is provenance.** wasmrt is derived from wazmrt in design and both are the
+owner's under the same dual MIT/Apache licence, so there is no third-party obligation — but the history
+is real and `licensing.md`'s attribution stays. *Retiring a gate is not rewriting where the work came
+from.*
+
+⚠️ **A caveat this project has paid for twice:** wazmrt's punch-list entries are no longer evidence about
+wasmrt. Two T9 items ("the oracle runs this, so our type-checker is wrong") turned out to rest on a
+misread of what the oracle's subcommand did — `best-practices.md` §2.3a. With the oracle gone, that
+whole class of false lead goes with it; do not reintroduce it by reasoning about what wazmrt "would do".
+
 ## Port-level decisions (owner, 2026-07-17)
 
+*Historical framing — these were the decisions that governed the port. The oracle-parity clauses are
+superseded by the section above; the engineering choices they produced stand.*
+
 - **Boundary-faithful, idiomatic Rust.** The observable behavior/outputs and the `wasmrt.h` contract
-  are fixed (verified by Rust↔oracle parity); internals are idiomatic Rust (ownership, enums,
-  `Result`), not a Zig transliteration. File/module structure mirrors wazmrt for reviewability.
+  are fixed (verified by Rust↔oracle parity **through T9; since 2026-08-11 by the spec testsuite and
+  wasmtime**); internals are idiomatic Rust (ownership, enums, `Result`), not a Zig transliteration.
+  File/module structure mirrors wazmrt for reviewability.
 - 🔒 **"wasmtime's SHAPE, our code" — the standing rule, reaffirmed by the owner 2026-08-08.** Where
   wasmtime has already solved a structural problem, wasmrt adopts the **architecture** and writes its own
   implementation: no code, no symbols, no headers, no data structures transcribed. Three applications so

@@ -111,8 +111,10 @@ On Windows, use the `x86_64-pc-windows-gnullvm` toolchain host (LLVM-MinGW + UCR
 
 ## Versioning
 
-wasmrt uses a **port-progress** scheme: `0.x` releases each land a parity-gated stage, and **`1.0.0`
-means full parity** with the frozen wazmrt oracle. The number reflects what genuinely runs today.
+wasmrt uses a **progress** scheme: `0.x` releases each land a gated stage, and **`1.0.0` means complete
+on wasmrt's own terms** — every in-scope proposal implemented, conformance at its achievable ceiling, the
+C ABI stable, and the size and speed numbers measured and defended. The number reflects what genuinely
+runs today, verified against the official spec testsuite.
 
 ## License
 

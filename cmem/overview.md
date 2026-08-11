@@ -1,27 +1,38 @@
 # Overview
 
-`wasmrt` is an **idiomatic-Rust WebAssembly runtime**, a port of the Zig runtime **`wazmrt`** (sibling
-repo `../wazmrt`). Same north star as wazmrt — **blazingly fast** on cold-start + boundary, **smallest
-possible binary**, and **itself compilable to `wasm32`** so it can be embedded inside another wasm host
-— but written to **replace wasmtime** as the native engine beneath the owner's `universalWasmLoader-*`
-projects (see [loaders.md](loaders.md)).
+`wasmrt` is an **idiomatic-Rust WebAssembly runtime** — **blazingly fast** on cold-start + boundary,
+**smallest possible binary**, and **itself compilable to `wasm32`** so it can be embedded inside another
+wasm host — written to **replace wasmtime** as the native engine beneath the owner's
+`universalWasmLoader-*` projects (see [loaders.md](loaders.md)). It began as a port of the Zig runtime
+**`wazmrt`** (sibling repo `../wazmrt`).
 
-## The oracle
+## 🔒 What wasmrt is for now (owner, 2026-08-11) — the oracle is retired
 
-The **passing `wazmrt` Zig build is the reference oracle**, now **frozen** at `wazmrt@dadc727`
-(2026-07-27; `scripts/wazmrt-baseline.txt`). wasmrt reproduces its behavior/outputs (byte-for-byte at
-the boundary) for every feature wazmrt implements — which, at the freeze, is **every wasm proposal
-wasmrt targets except the tail-call proposal** (`return_call`/`return_call_indirect`). SIMD,
-multi-memory, threads/atomics, memory64, exception handling, and full WasmGC are all in the oracle now.
-Only tail calls have no wazmrt oracle → conform those against **wasmtime + the official spec testsuite**
-(see [testing.md](testing.md), [design-decisions.md](design-decisions.md)). Full deep-read of wazmrt is
-in `docs/port/00-synthesis.md` (+ 6 subsystem maps).
+**wasmrt no longer refers back to the `wazmrt` repo.** The two runtimes are **independent entrants**
+competing for inclusion in **wasmtk** and the **universalWasmLoader-\*** runtimes, decided on **the
+smallest and fastest binary**. **`rsxtk` takes wasmrt by default** through the native Rust interface.
+wazmrt is running its own size program for the same contest, so its head is a *competitor's* design.
 
-## Status (2026-08-06) — PORT phase; **assemble → decode → validate → run → WASI → embed-from-C all working**
+**Correctness anchors externally**: the official spec testsuite (62,498 adjudicated assertions),
+**wasmtime's observable behaviour** (already matched byte-for-byte on invalid-module diagnostics), and
+the wasmtk WASI corpus. Those were always the harder tests — the oracle was the convenient one, and tail
+calls, the one feature it never covered, were always planned this way.
 
-The oracle is frozen (`wazmrt@dadc727`, `zig build test` 489/493 green) and the port is underway,
-released stage-by-stage to crates.io (see [releasing.md](releasing.md)). Scope at the freeze:
-**memory64 is in**; the oracle covers everything wasmrt targets **except tail calls**.
+⚠️ **This re-weights everything left.** *Canonical* was the gate while the oracle defined success; **fast
+and small are the gate now**, which promotes three T11 items from footnote to critical path — the
+unattributed ~5% steady regression, the fact that **the rlib `rsxtk` links has never been measured**, and
+the absence of a same-machine comparison against any competing runtime. See [vision.md](vision.md).
+
+*Historical: the oracle was frozen at `wazmrt@dadc727` (2026-07-27) and re-pinned six times under owner
+authorization; `scripts/check-wazmrt.sh` watched it for drift and is now deleted, its baseline kept as
+`scripts/wazmrt-provenance.txt`. Provenance and attribution are unaffected ([licensing.md](licensing.md)).
+The wazmrt deep-read is still in `docs/port/00-synthesis.md` (+ 6 subsystem maps) as engineering
+reference.*
+
+## Status (2026-08-11) — **assemble → decode → validate → run → WASI → embed-from-C all working**
+
+Released stage-by-stage to crates.io (see [releasing.md](releasing.md)). **memory64 is in scope**; **tail
+calls are the one unimplemented scope item.**
 
 **Done — T0–T8, all PUBLISHED (v0.1.0 → v0.9.0; latest release commit `a7abd83`, tag `v0.9.0`):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four

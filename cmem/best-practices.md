@@ -307,7 +307,8 @@ oracle accepted `.wat` on its run path from its own first release. The assembler
 executable, one function away, reachable only as a separate `wasmrt wat` step.
 
 Nothing caught it, and nothing **could** have: every gate this project runs compares *answers* on inputs
-both runtimes accept — the spec suite, the `.wat` corpus, the WASI corpus, `check-wazmrt.sh`. A feature
+both runtimes accept — the spec suite, the `.wat` corpus, the WASI corpus, and (while it existed) the
+oracle drift monitor. A feature
 one runtime simply does not offer produces no differing answer to diff. It is invisible in exactly the
 way §3.1's silent-wrong-output is invisible, for the opposite reason: not a wrong answer, but **no
 answer at all, on an input nobody in the harness ever hands it**.
@@ -322,10 +323,19 @@ days that came from an owner question rather than a test** (§2.3's validation g
 That is not luck twice; it is a category the harness structurally cannot reach, because a test is
 written from the same mental model as the code, and a missing capability is a hole in that model.
 
-**Apply:** periodically enumerate what the oracle's CLI *accepts* — its subcommands, its file types, its
-flags — as a table, and check the port entry by entry. Same shape as the §3.4 remedy (enumerate the
-entry points, don't reason about them), applied to the outside of the tool rather than the inside.
-Cheap, and it is the only thing that finds this class.
+**Apply:** periodically enumerate what a *reference* runtime **accepts** — its subcommands, file types and
+flags — as a table, and check wasmrt entry by entry. Same shape as the §3.4 remedy (enumerate the entry
+points, don't reason about them), applied to the outside of the tool rather than the inside. Cheap, and
+it is the only thing that finds this class.
+
+⚠️ **Since 2026-08-11 the reference for this is `wasmtime`, not `wazmrt`** — the oracle is retired and
+wazmrt is a competitor (`design-decisions.md`). That does not weaken the check: wasmtime's CLI is the
+larger surface, and §2.3's rule applies to it too — **run the binary, do not enumerate from memory.**
+
+**The same question asked of the size axis** finds the open instance of this today: every recorded size
+figure (CLI, cdylib, freestanding wasm32) is for an artifact `rsxtk` — the *default* consumer — does not
+link. Measuring what is in front of you rather than what the consumer uses is this section's mistake
+wearing different clothes.
 
 ---
 

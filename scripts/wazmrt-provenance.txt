@@ -1,3 +1,21 @@
+# RETIRED 2026-08-11 (owner) -- wasmrt no longer tracks the wazmrt oracle.
+#
+# This file was the drift monitor's baseline; scripts/check-wazmrt.sh compared wazmrt's HEAD against
+# it and reported movement. That job is over. The two runtimes are now INDEPENDENT COMPETITORS for
+# inclusion in wasmtk and the universalWasmLoader-* runtimes, judged on the smallest and fastest
+# binary; rsxtk takes wasmrt by default through the native Rust interface. wazmrt is under its own
+# size/self-ownership program for the same contest, so following its head would mean following a
+# competitor's design choices -- the opposite of what the contest rewards.
+#
+# The file is KEPT, unchanged below, as a PROVENANCE record: it names the exact wazmrt commit the
+# port was developed against, and why each deliberate re-baseline happened. Nothing reads it
+# automatically any more. Both projects are the same owner under the same dual MIT/Apache licence,
+# so no third-party attribution obligation turns on it.
+#
+# Correctness is now anchored on external references that were always the harder test anyway: the
+# official spec testsuite (62,498 adjudicated assertions), wasmtime's observable behaviour, and the
+# wasmtk WASI corpus. See cmem/design-decisions.md and cmem/roadmap.md.
+
 BASELINE_HEAD=83ee9e0d62813c811db4c9d93993f5fb13799fa6
 BASELINE_SUBJ=83ee9e0 2026-08-10 18:20:09 -0400 docs: the wasm-c-api payoff was falsified — record where the intent slipped
 BASELINE_DATE=2026-08-10 18:20:09 -0400

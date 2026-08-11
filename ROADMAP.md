@@ -13,13 +13,22 @@ today — not what's promised.
 The destination is fixed and known (the completed wazmrt). The version number measures **how far the
 Rust port has climbed toward it**:
 
-- **`0.x`** — in progress. Each release lands a parity-gated stage; the number reflects what actually
-  runs and is verified against the oracle.
-- **`1.0.0`** — **full parity** with the frozen wazmrt oracle on both targets (native + `wasm32`), with
-  every conformance gate green.
+- **`0.x`** — in progress. Each release lands a gated stage; the number reflects what actually runs and
+  is verified against the official spec testsuite.
+- **`1.0.0`** — **complete on wasmrt's own terms** on both targets (native + `wasm32`): every in-scope
+  proposal implemented (tail calls are the last one outstanding), the spec testsuite at its achievable
+  ceiling, the WASI corpus green, the C ABI stable — and the size and speed numbers that decide
+  inclusion, measured and defended.
 
-Nothing is marked ✅ here until it passes its parity/conformance gate — a checkmark means *verified
-against the oracle or the official spec testsuite*, not merely "coded."
+Nothing is marked ✅ here until it passes its conformance gate — a checkmark means *verified against the
+official spec testsuite*, not merely "coded."
+
+> **Anchor change (owner, 2026-08-11).** Through T9, wasmrt was gated against the `wazmrt` Zig runtime as
+> a frozen oracle. **That is retired.** The two runtimes are now independent entrants competing for
+> inclusion in **wasmtk** and the **universalWasmLoader-\*** runtimes, decided on the smallest and fastest
+> binary; **rsxtk takes wasmrt by default** through the native Rust interface. Correctness anchors on the
+> external references that were always the harder test — the official spec testsuite, wasmtime's
+> observable behaviour, and the wasmtk WASI corpus.
 
 Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 
@@ -40,7 +49,7 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | 0.11.0 | Bug hunt + code hygiene | a comprehensive audit across tested **and** untested paths — bugs, fall-throughs, stale workarounds, dead code, missing documentation | ⬜ |
 | 0.12.0 | Optimization review | measured options for making the shipped artifacts faster and smaller — judged at the binary and C-ABI boundary, not by micro-benchmarks | ⬜ |
 | 0.13.0 | Security review | an adversarial review of the penetration surfaces — hostile guests, malformed input, and C-ABI misuse — with recommended mitigations | ⬜ |
-| **1.0.0** | **Parity** | **full parity with the wazmrt oracle** | ⬜ |
+| **1.0.0** | **Complete** | **every in-scope proposal implemented, conformance at its ceiling, C ABI stable, and the size/speed numbers that decide inclusion measured and defended** | ⬜ |
 
 ## What you can do with wasmrt (use-case matrix)
 

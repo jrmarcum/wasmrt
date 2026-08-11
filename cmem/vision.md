@@ -1,9 +1,32 @@
 # Vision
 
-`wasmrt` carries `wazmrt`'s north star into Rust — a **blazingly-fast, smallest-binary** WebAssembly
-runtime, **itself compilable to `wasm32`** so it can be embedded inside another wasm host — and adds a
-concrete purpose: **be the native engine the `universalWasmLoader-*` projects run on, in place of
-wasmtime.** "Canonically similar to what wasmtime can run, without being wasmtime."
+`wasmrt` is a **blazingly-fast, smallest-binary** WebAssembly runtime, **itself compilable to `wasm32`**
+so it can be embedded inside another wasm host, with a concrete purpose: **be the native engine the
+`universalWasmLoader-*` projects run on, in place of wasmtime.** "Canonically similar to what wasmtime
+can run, without being wasmtime."
+
+## 🔒 What wasmrt is competing for (owner, 2026-08-11)
+
+wasmrt began as a port of the Zig runtime `wazmrt` and was gated against it as a frozen oracle through
+T9. **That relationship is over.** The two runtimes are now **independent entrants** for inclusion in
+**wasmtk** and the **universalWasmLoader-\*** runtimes, and the contest is decided on **the smallest and
+fastest binary**. `wazmrt` is under its own size/self-ownership program for the same contest, so
+following its head would mean adopting a competitor's design choices — the opposite of what wins.
+
+**`rsxtk` takes wasmrt by default**, through the native Rust interface: no C ABI, no cdylib, no FFI
+marshalling. That makes **two distinct artifacts to optimize, with different levers**, and conflating
+them will produce work that helps neither:
+
+| consumer | artifact | what "small and fast" means there |
+| --- | --- | --- |
+| **rsxtk** (default, native) | `wasmrt-core` **rlib** | what LTO leaves in *rsxtk's* final binary — dead-code elimination across the crate boundary, generic bloat, and whether unused subsystems (WAT assembler, `.wast` runner, WASI) actually drop out. Calls are direct: **no FFI cost to shave**. |
+| **wasmtk**, **universalWasmLoader-\*** | `wasmrt_capi` **cdylib** + `wasmrt.h` | the shipped **493.5 KiB** on disk, plus per-call FFI overhead at the C boundary. Nothing is dead-code-eliminated here — every exported symbol is reachable by definition. |
+
+The practical consequence: a size win in the cdylib may be invisible to rsxtk, and an rlib win may not
+show up in the cdylib at all. **Measure the artifact the consumer actually links.**
+
+**Correctness anchors externally** now — the official spec testsuite, wasmtime's observable behaviour,
+and the wasmtk WASI corpus. Those were always the harder test; the oracle was scaffolding.
 
 ## Success = three measurable axes (owner, 2026-07-17)
 
@@ -26,17 +49,24 @@ Recorded because the axes above are the *destination* and are easy to read as a 
 
 | Axis | Standing | Gap |
 | --- | --- | --- |
-| **Canonical** | **99.4%** of the official spec testsuite (62,113 / 385 / 2,163 over 284 files); the 534-file `.wat` corpus assembles in full and round-trips through decode; every proposal in the scope list runs **except tail calls** | **Tail calls are the one unimplemented scope item** — `return_call`/`return_call_indirect` are not in the opcode table (`return_call_ref` is, via function-references). Consequently the C ABI has **no tail-call feature flag**: a toggle that gates nothing is worse than none. **1.0 = parity cannot be claimed without them.** |
-| **Fast** | ✅ **MEASURED 2026-08-07.** Cold start **4.48 ms** for a 48 KB module (3.5 µs for a toy); steady state **~237 Mops/s** on a tight `loop`/`br_if`. Bench: `cargo run --release -p wasmrt-core --example bench`. | Against the oracle's recorded figures (~4.4 ms at 46 KB, ~264 Mops/s) that is **cold parity, ~90% steady** — but those were measured on a different machine, so it is a sanity check, not a result. The Deno/V8 comparison is **not** re-run for wasmrt; that claim is still inherited. |
-| **Small** | ✅ **MEASURED 2026-08-07.** CLI **621 KiB**, cdylib **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** after `wasm-opt -Oz`), engine + text toolchain **260.9 KiB**. Still **zero third-party dependencies**. | The **wasm3 / WAMR comparison is not done** — it needs their binaries, not an estimate. `wasm-opt -Oz` is worth ~13% and is **not wired into any build script**. |
+| **Canonical** | **99.4%** of the official spec testsuite (62,113 / 385 / 2,163 over 284 files); the 533-file `.wat` corpus is clean through assemble→decode→validate, and every CLI command that takes a module accepts `.wat` directly; every proposal in the scope list runs **except tail calls** | **Tail calls are the one unimplemented scope item** — `return_call`/`return_call_indirect` are not in the opcode table (`return_call_ref` is, via function-references). Consequently the C ABI has **no tail-call feature flag**: a toggle that gates nothing is worse than none. **1.0 cannot be claimed without them.** |
+| **Fast** | ✅ **MEASURED 2026-08-07.** Cold start **4.48 ms** for a 48 KB module (3.5 µs for a toy); steady state **~237 Mops/s** on a tight `loop`/`br_if`. Bench: `cargo run --release -p wasmrt-core --example bench`. | ⚠️ **A ~5% steady-state regression from the ninth T9 pass is still unattributed** and handed to T11 — two hypotheses were tested and rejected. That was a footnote while the oracle defined success; **under a contest decided on speed it is a live liability.** No cross-runtime comparison has been run on this machine. |
+| **Small** | ✅ **MEASURED 2026-08-07.** CLI **621 KiB**, cdylib **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** after `wasm-opt -Oz`), engine + text toolchain **260.9 KiB**. Still **zero third-party dependencies**. | **The rlib-in-rsxtk figure has never been measured at all** — and that is the artifact the default consumer links. `wasm-opt -Oz` is worth ~13% and is **not wired into any build script**. No comparison against wasm3 / WAMR / wazmrt. |
 
-**Honest summary:** *canonical* remains the axis driven hardest. *Fast* and *small* now have real
-baselines rather than inherited claims — which is what **T11 (the optimization review) was blocked on**;
-every proposal there can now be stated as a delta. What is still missing on both is the **comparison to
-another runtime**, which needs those runtimes present.
+**Honest summary:** *canonical* is the axis driven hardest and is nearly done. *Fast* and *small* have
+real baselines — which is what **T11 (the optimization review) was blocked on**, so every proposal there
+can now be stated as a delta.
 
-⚠️ **The rule that motivated all of this stands: never quote wazmrt's numbers as wasmrt's.** The table
-above cites the oracle only alongside wasmrt's own measurement, and says so.
+⚠️ **What the anchor change makes urgent.** While `wazmrt` was the oracle, "canonical" was the gate and
+the other two axes were aspirations with a footnote. **Under a contest decided on smallest-and-fastest,
+fast and small are the gate**, and three gaps that were acceptable as footnotes are now the critical
+path: (1) the unattributed ~5% steady regression, (2) **no measurement at all of what rsxtk actually
+links**, and (3) no side-by-side against any competing runtime on one machine. All three are T11 work,
+and T11 is no longer a late-stage nicety.
+
+⚠️ **The rule that motivated the table stands, and now matters more: never quote another runtime's
+numbers as wasmrt's.** Every figure above is wasmrt's own, measured here. A competitor's published
+numbers are not a baseline — run both binaries on the same machine or say nothing.
 
 ## Why replace wasmtime under the loaders
 

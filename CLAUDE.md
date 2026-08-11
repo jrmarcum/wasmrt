@@ -3,18 +3,27 @@
 An idiomatic-**Rust** WebAssembly runtime — a port of the Zig runtime **`wazmrt`** (`../wazmrt`),
 built to **replace wasmtime** as the engine beneath the owner's `universalWasmLoader-*` projects.
 
-## ✅ GATE — OPEN (2026-07-27). The port has begun.
+## 🔒 THE ORACLE IS RETIRED (owner, 2026-08-11). Finish, and compete.
 
-The gate condition is **met**: `wazmrt` reached **full parity** (every wasm proposal it targets is
-implemented; it runs the whole wasmtk WASI suite; ~60k spec-testsuite assertions pass; the WAT
-assembler is gap-free; the C ABI is complete 319/319) and **`zig build test` passes** (489/493, 4 skip;
-green under Debug AND ReleaseSafe). The oracle is **frozen** at `wazmrt@dadc727` — recorded in
-`scripts/wazmrt-baseline.txt`. **Port code is now permitted.** Follow the phased task list in
-[`cmem/roadmap.md`](cmem/roadmap.md), parity-gated against the frozen oracle at each step.
+**Do not refer back to the `wazmrt` repo.** The port is done being a port. wasmrt and wazmrt are now
+**independent entrants** competing for inclusion in **wasmtk** and the **universalWasmLoader-\***
+runtimes, decided on **the smallest and fastest binary**; **`rsxtk` takes wasmrt by default** through the
+native Rust interface. wazmrt is running its own size/self-ownership program for the same contest, so its
+head is a *competitor's* design — following it is exactly backwards.
 
-`scripts/check-wazmrt.sh`'s role has **inverted**: it no longer waits for freeze — it detects whether
-the frozen oracle has **drifted** under the in-flight port. A "CHANGED since baseline" result means:
-review the new wazmrt commits, decide whether the port must follow, then re-baseline deliberately.
+`scripts/check-wazmrt.sh` is **deleted**; its baseline survives as `scripts/wazmrt-provenance.txt`, which
+nothing reads. **Correctness anchors on the official spec testsuite, wasmtime's observable behaviour, and
+the wasmtk WASI corpus** — always the harder tests. **`1.0.0` no longer means parity**: it means every
+in-scope proposal implemented, conformance at its ceiling, the C ABI stable, and the size/speed numbers
+measured and defended. Provenance is **not** retired — `cmem/licensing.md`'s attribution stays.
+
+⚠️ **This re-weights the remaining work.** While the oracle defined success, *canonical* was the gate and
+fast/small were aspirations with a footnote. **Now fast and small ARE the gate**, so **T11 decides the
+contest** and carries three items that were footnotes: the unattributed **~5% steady-state regression**;
+the fact that **the rlib has never been measured** though it is what `rsxtk` links (every recorded size
+figure is for an artifact the *default* consumer does not use); and **no same-machine comparison** against
+wasm3, WAMR or wazmrt. ⚠️ The second is §3.8's mistake again — measuring the thing in front of you rather
+than the thing the consumer uses.
 
 ## Where the port actually is (keep this line current)
 

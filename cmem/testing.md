@@ -1,22 +1,37 @@
 # Testing
 
-The port's **definition of done = full Rust↔oracle parity on both targets** (native + wasm). Detail:
-`docs/port/06-build-docs-licensing.md`; the test tree layout is in `tests/README.md`. The gate is
-**open** and the oracle is **frozen** at `wazmrt@dadc727` (2026-07-27) — this file fixes the strategy.
+**Definition of done = conformance to the WebAssembly specification on both targets** (native + wasm),
+plus the size and speed numbers that decide inclusion. Detail:
+`docs/port/06-build-docs-licensing.md`; the test tree layout is in `tests/README.md`.
 
-## Oracle strategy (the split) — re-checked at the 2026-07-27 freeze
+## 🔒 Conformance anchors (owner, 2026-08-11 — the oracle is retired)
 
-- **Features wazmrt implements** → **golden-vector parity Rust↔wazmrt**: identical inputs must yield
-  identical outputs. The proven technique — native `bench` result == wasm `bench` result == wazmrt
-  result for the same seed. Diff decode-coverage snapshots, validation snapshots, and `.wast`
-  pass/fail counts against the oracle. **At the freeze this covers nearly the whole scope** — incl.
-  SIMD, multi-memory, threads/atomics, memory64, and exception handling (both encodings), which the
-  frozen oracle now implements (they were *not* in the oracle before the freeze).
-- **The only feature wazmrt lacks** is the **tail-call proposal** (`return_call`/`return_call_indirect`;
-  wazmrt has `return_call_ref` but not base tail calls) → no wazmrt oracle → conform against **wasmtime
-  + the official WebAssembly spec testsuite** directly.
-- **Re-check only on oracle drift.** The split was re-checked at the freeze and collapsed to the one
-  item above; it changes again only if `scripts/check-wazmrt.sh` reports the frozen oracle moved.
+**wazmrt is no longer a test anchor.** The two runtimes compete independently for inclusion in wasmtk and
+the universalWasmLoader-\* runtimes, so parity with one is not evidence about the other. What answers
+"is this correct?", in order of authority:
+
+1. **The official WebAssembly spec testsuite** — 62,498 adjudicated assertions over 284 files, vendored
+   at `../wasmtk/tests/module/wasm_wast/testsuite-main`. This is the anchor: it is the specification,
+   executable. `wasmrt wast <dir>` runs it.
+2. **wasmtime's observable behaviour**, for questions the suite does not adjudicate — error wording,
+   diagnostic offsets, API shape. ⚠️ **Run the real binary; do not answer from memory about it.** That
+   rule was paid for: "what does wasmtime's `Module::new` do" invited a recalled answer, and three lines
+   through wasmtime 47 settled it in seconds *and* produced two byte offsets to assert against
+   (`best-practices.md`).
+3. **The wasmtk WASI corpus** — real compiled guests, which is the only thing that exercises the WASI
+   surface end to end.
+4. **wasmrt's own tests** — 456 of them, for the internal invariants none of the above can reach
+   (handle tagging, store isolation, encoding invariants, the `size_of` pins).
+
+**Tail calls** (`return_call`/`return_call_indirect`) were always conformed this way — they were the one
+wasmrt-target feature the oracle never covered. That is now simply how everything is done.
+
+*Historical: through T9 the strategy was a split — golden-vector parity Rust↔wazmrt for everything the
+frozen oracle implemented, spec-suite-and-wasmtime for tail calls, re-checked whenever
+`scripts/check-wazmrt.sh` reported drift. That script is deleted.* ⚠️ **Two punch-list items were false
+leads produced by that arrangement** ("the oracle runs this, so our type-checker is wrong" — it was
+running an entry point that skipped validation, `best-practices.md` §2.3a). Retiring the oracle removes
+the class; do not reintroduce it by reasoning about what wazmrt would do.
 
 ## Spec-suite conformance — current (2026-08-08, T9a#8 assembler immediates) — **99.4%**
 

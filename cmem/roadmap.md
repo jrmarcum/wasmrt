@@ -35,6 +35,34 @@ limits-only), a **`Linker` in core** shared by the C ABI / native crate / WASI /
 fixed **two silent-wrong-output defects** that work surfaced. Suite **61,033 / 738 / 3,075 — 98.8%**.
 **Next: T9 (0.10.0)** — the correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin`. **Then T10 — bug hunt + code hygiene (0.11.0), and T11 — optimization review (0.12.0)**, both added by the owner 2026-08-06. **measure → find → optimize**, in that order and for a reason (see the Definition of done).
 
+## 🔒 ANCHOR CHANGE (owner, 2026-08-11) — the oracle is retired; finish and compete
+
+**wasmrt no longer refers back to the `wazmrt` repo.** Everything below that reads "parity-gated",
+"against the oracle" or "the frozen oracle" describes how T0–T9 were run and is **historical**. From here
+the runtime is finished on its own terms and competes for inclusion in **wasmtk** and the
+**universalWasmLoader-\*** runtimes on **the smallest and fastest binary**; **`rsxtk` takes wasmrt by
+default** through the native Rust interface. `scripts/check-wazmrt.sh` is deleted; correctness anchors on
+the spec testsuite, wasmtime and the wasmtk WASI corpus. Full rationale in
+[design-decisions.md](design-decisions.md); the consequences for what to work on next are in
+[vision.md](vision.md).
+
+**The remaining plan does not change shape, but its weighting does.** Finish T9 (tail calls, `pin`,
+`func.wast` 8) → **T10** bug hunt → **T11** optimization review → **T12** security review → 1.0. The
+order *measure → find → optimize → attack* is still deliberate. What changes is that **T11 is now the
+stage that decides the contest**, not a late polish pass, and it carries three items that were footnotes
+while the oracle defined success:
+
+1. the **unattributed ~5% steady-state regression** from the ninth T9 pass (two hypotheses tested and
+   rejected — it is still unexplained);
+2. **the rlib has never been measured**, and it is what `rsxtk` links — every size figure on record
+   (CLI 621 KiB, cdylib 493.5 KiB, freestanding wasm32 158.1 KiB) is for an artifact the *default*
+   consumer does not use;
+3. **no same-machine comparison against any competing runtime** — wasm3, WAMR, or wazmrt itself.
+
+⚠️ Note the second one is the same mistake §3.8 just cost a whole port: **measuring the thing in front of
+you rather than the thing the consumer uses.** The `.wat` corpus gate ran `wat -o` and called it
+verified; the size axis measures three artifacts and skips the default one.
+
 ## Superseded status block (opened 2026-07-27, last amended 2026-08-05) — kept for the freeze record
 
 *(Mixed dates by accretion: it starts at the freeze and was amended through T7. The **current** status is

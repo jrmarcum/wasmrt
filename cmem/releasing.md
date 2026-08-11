@@ -6,13 +6,20 @@ but this file defines the process that keeps them current).
 
 ## Versioning = port-progress ladder (owner decision)
 
-The destination is fixed and known (the completed, frozen `wazmrt` oracle). The version number measures
-**how far the Rust port has climbed toward it**, and reflects what genuinely runs and passes its parity
-gate — never inflated to signal the effort's maturity (that story is told by `ROADMAP.md`'s use-case
+The destination is fixed and known: **a complete runtime, small and fast enough to be chosen.** The
+version number measures how far wasmrt has climbed toward it and reflects what genuinely runs and passes
+its gate — never inflated to signal the effort's maturity (that story is told by `ROADMAP.md`'s use-case
 matrix + a fast cadence).
 
-- **`0.x`** — in progress; each release lands one parity-gated stage.
-- **`1.0.0`** — **full parity with the frozen wazmrt oracle** on both targets, all conformance gates green.
+*Through T9 the destination was phrased as "the completed, frozen `wazmrt` oracle". **Retired 2026-08-11
+(owner)** — see the 1.0 entry below.*
+
+- **`0.x`** — in progress; each release lands one gated stage.
+- **`1.0.0`** — **complete on wasmrt's own terms** on both targets: every in-scope proposal implemented,
+  conformance at its achievable ceiling, WASI corpus green, C ABI stable, and the size/speed numbers that
+  decide inclusion measured and defended. 🔒 **The wazmrt oracle was retired as the 1.0 criterion on
+  2026-08-11 (owner)** — the two runtimes now compete independently for inclusion in wasmtk and the
+  universalWasmLoader-\* runtimes, so parity with a competitor is neither the goal nor a meaningful gate.
 - Pre-1.0 the public API (both `wasmrt-core` and `wasmrt.h`) is **unstable** — breaking changes bump the
   minor (`0.y`), which is the SemVer compatibility unit below 1.0. Expect frequent `0.y` bumps until T8.
 
@@ -25,7 +32,7 @@ line fills up, the remaining stage→version map shifts down by one rather than 
 one from 0.8 onward when the 0.6 line filled up; T6 and the T4 completion then shipped together in 0.7.0*:
 0.1 T0 scaffold · 0.2 T1 types+reader · 0.3 T2 opcode · 0.4 T3 decode · 0.5 T4 validate (core) ·
 0.6.x T5 interp (patch per feature slice, 0.6.0–0.6.9) · **0.7 T6 text toolchain + T4 completion (the deferred SIMD/atomics/GC/EH typing arms)** ·
-0.8 T7 wasi+cli · 0.9 T8 C-ABI · 0.10 T9 hardening · **0.11 T10 bug hunt + code hygiene** · **0.12 T11 optimization review** · **0.13 T12 security review** · **1.0 = parity**.
+0.8 T7 wasi+cli · 0.9 T8 C-ABI · 0.10 T9 hardening · **0.11 T10 bug hunt + code hygiene** · **0.12 T11 optimization review** · **0.13 T12 security review** · **1.0 = complete on its own terms**.
 
 *(T10, T11 and T12 added by the owner 2026-08-06. The single-digit-patch rule constrains the PATCH component
 only, so a two-digit MINOR — 0.10 … 0.13 — is correct and not a violation.)*
@@ -56,8 +63,11 @@ Release on **each completed, parity-gated task**. Automate later (a tag-triggere
 that gets published must already carry every doc + memory update. The agent does 1–6 and commits; the
 owner does 7–9.
 
-1. **Task is DONE**: its parity/conformance gate passes, `cargo test`/`clippy` green on all surfaces,
-   no regressions vs the frozen oracle.
+1. **Task is DONE**: its conformance gate passes, `cargo test`/`clippy` green on all surfaces, no
+   regression in the spec-suite numbers and **no file losing a pass**.
+1a. **The size and speed numbers are re-measured and recorded**, because they are what decides inclusion
+   (`cmem/vision.md`). A release that grows the cdylib or slows the steady loop must say so in the
+   CHANGELOG with the reason — an unexplained regression is the one thing this project cannot ship.
 1b. **The shipped binary is STANDALONE.** Copy `wasmrt.exe` to an empty directory and run it with
    `PATH` reduced to the system directories; it must print its version, not exit 127. `objdump -p`
    should list only `KERNEL32`, `ntdll`, `bcryptprimitives` and `api-ms-win-*`. ⚠️ This is a real step,
