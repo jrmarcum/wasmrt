@@ -12,7 +12,8 @@ parity testing at every step.
 > covers integer + floating-point compute, linear memory (incl. **multi-memory** and **memory64**),
 > tables / `call_indirect` / reference types, **WasmGC**, **SIMD** (the full `v128` set, incl. relaxed),
 > **atomics**, and **exception handling** — and the type-checker covers all of it, so
-> `wasmrt <file.wasm>` gives a real verdict on any module wasmrt can run.
+> `wasmrt <file>` gives a real verdict on any module wasmrt can run. Every command that takes a
+> module accepts either form — `wasmrt run fac.wat fac 10` assembles the text first, then runs it.
 >
 > It reads and writes the **text format** and runs the **official spec testsuite**: `wasmrt wast <dir>`
 > scores **99.4% (62,113 assertions passing)**, with every one of the 284 files parsing.

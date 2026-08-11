@@ -150,6 +150,12 @@ Choices made while porting; consistent with "boundary-faithful behavior, idiomat
   rejected). Raw `0xC5`–`0xCC` accepted as sat-trunc to mirror the oracle (see [known-issues.md](known-issues.md)).
 - **CLI grows with the pipeline** — `wasmrt <file>` summarizes + validates (T3/T4); `wasmrt run <file>
   <fn> [args]` executes (T5), parsing args to the export's param types. Faithful to wazmrt's CLI role.
+  🔒 **Every path that loads a module goes through ONE helper** (`read_module_bytes`, T9): it assembles
+  `.wat` text before decoding, so `run`, `wasi` and summarize accept the same file types and validate on
+  the same terms — three copies of the sniff is how they drifted apart in the first place (`best-practices.md`
+  §3.8, §3.4). Dispatch is on the **extension, not the content**, so a malformed `.wat` is reported as an
+  assemble failure and a malformed `.wasm` as a decode failure; sniffing content would blame the assembler
+  for a corrupt binary. The `wasmrt wat` subcommand keeps its own raw read — it assembles by definition.
 - **Sliced the two correctness-critical, hard-to-test-early modules** (owner-approved): **T4 validate**
   and **T5 interp** land core-first with the exotic proposal arms deferred to `.x` patch releases, because
   each is a trustworthiness promise and most of their tests need the WAT assembler (T6). Deferred ops

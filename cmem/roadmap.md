@@ -3,10 +3,10 @@
 ## Status (2026-08-10) — PORT phase; gate OPEN, oracle **RE-BASELINED**. **T0–T8 DONE; T9 IN PROGRESS.**
 
 **Current tree (unreleased, ahead of the published v0.9.0):** suite **62,113 / 385 / 2,163 — 99.4%**
-of 62,498 adjudicated, **450 workspace tests** (418 core + 28 capi + 4 CLI), Miri **28/28**. The
-532-file `.wat` corpus is a **clean 532/532** through assemble→decode→validate. T9's first pass landed
+of 62,498 adjudicated, **456 workspace tests** (418 core + 28 capi + 10 CLI), Miri **28/28**. The
+533-file `.wat` corpus is a **clean 533/533** through assemble→decode→validate. T9's first pass landed
 T9a #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
-**T9d (licensing/docs)**. **Fourteen further passes have landed**, closing T9a **#4 (both halves, via a
+**T9d (licensing/docs)**. **Fifteen further passes have landed**, closing T9a **#4 (both halves, via a
 funcref that carries its owning instance), #5, #6, #7, #8, #9, #11** and most of **#12**, plus defects
 the list never had: a cross-store `InstanceId` that let a guest silently share the wrong memory, and —
 found while wiring #7 — **the start function, which was decoded, validated and printed but never
@@ -897,6 +897,43 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   match, the test passed, and the obvious reading was "the sweep is decoration". Re-doing it with
   `sed` **and grepping to confirm the line was gone** made it fail and name all four ops exactly.
   **A no-op mutation and a worthless check produce the same observation** (§4.2a).
+
+  ### ◐ Progress 2026-08-11 (sixteenth) — the CLI could not run a `.wat` file at all
+
+  **Suite unchanged at 62,113 / 385 / 2,163 = 99.4%.** 456 tests (was 450). The `.wat` corpus is a clean
+  **533/533** through assemble→decode→validate. Again the correct outcome: the spec suite drives the
+  engine directly and never touches the CLI's file loading.
+
+  `wasmrt run prog.wat f` answered *"not a WebAssembly binary (bad magic)"*, and so did
+  `wasmrt wasi prog.wat` and plain `wasmrt prog.wat`. The assembler had been in the same executable since
+  T6, reachable only as a separate `wasmrt wat -o out.wasm` step. **The oracle assembled `.wat` on its run
+  path from its first release** — so this was a port/oracle divergence of a kind the earlier ones were not:
+  not a wrong answer, an **absent** one.
+
+  All three module loaders now share one `read_module_bytes` helper. Three copies of the sniff is precisely
+  how `run` and `wasi` drifted into different validation behaviour the day before (§3.4), so the fix is one
+  helper rather than three call sites doing the same thing.
+
+  Two decisions worth keeping:
+
+  1. **Dispatch on the extension, not the content.** Content-sniffing looks more robust and is worse here:
+     it would hand a corrupt *binary* to the assembler and report a syntax error for it. With the extension
+     test, a malformed `.wat` reports `cannot assemble` and a malformed `.wasm` reports `decode failed` —
+     the stage blamed stays honest (§3.6, §3.7). Pinned by a test that checks both messages.
+  2. **Validation still runs, on the assembled bytes**, pinned by a test asserting the full wasmtime-shaped
+     diagnostic survives the text path. A new input format must not become a side door around the check the
+     fifteenth pass had just installed.
+
+  ⚠️⚠️ **Found by the owner asking whether the runtime ran `.wat` files — the second finding in two days
+  from an owner question rather than a test.** That is structural, not luck: every gate here compares
+  *answers* on inputs **both** runtimes accept, so a capability one runtime does not offer generates nothing
+  to diff. Written up as **`best-practices.md` §3.8**, with the remedy — enumerate the oracle CLI's
+  subcommands, file types and flags as a table and check the port entry by entry, which is §3.4's
+  enumerate-don't-reason applied to the outside of the tool. 🚦 Filed for **T12x**, which already carries
+  "diff the two runtimes' tables against each other".
+
+  🆕 Also fixed in passing: `print_help`'s `--ro-dir` line had lost its `\n\` continuation when
+  `--allow-symlink` was added, so the help text printed a stray hard-wrapped line.
 
   ### ◐ Progress 2026-08-10 (fifteenth) — `wasmrt run` executed WITHOUT VALIDATING. **Both runtimes did**
 

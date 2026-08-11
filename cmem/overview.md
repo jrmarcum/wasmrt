@@ -79,10 +79,11 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-- **T9 (0.10.0, IN PROGRESS)** — **fifteen passes landed 2026-08-07/10**, unreleased. Suite
-  **62,113 / 385 / 2,163 — 99.4%**, **442 tests** (414 core + 28 capi), Miri 28/28, and **no file lost a
-  pass in any pass**. The `.wat` corpus assembles **534/534** for the first time, with 0 decode
-  failures on a full assemble→decode→validate round trip. The size and performance axes were **measured for the first time in the project's
+- **T9 (0.10.0, IN PROGRESS)** — **sixteen passes landed 2026-08-07/11**, unreleased. Suite
+  **62,113 / 385 / 2,163 — 99.4%**, **456 tests** (418 core + 28 capi + 10 CLI), Miri 28/28, and **no file
+  lost a pass in any pass**. The `.wat` corpus is a clean **533/533** on a full assemble→decode→validate
+  round trip, and every CLI command that takes a module now accepts that `.wat` directly — `run`, `wasi`
+  and summarize assemble text before decoding, through one shared loader. The size and performance axes were **measured for the first time in the project's
   life**: cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady; CLI **621 KiB**, cdylib
   **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** with `wasm-opt -Oz`).
 

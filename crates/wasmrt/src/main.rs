@@ -97,14 +97,14 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
     };
     let Some(path) = rest.first() else {
         eprintln!(
-            "wasmrt: usage: wasmrt wasi [--dir <host>[::<guest>]] [--ro-dir …] [--allow-symlink] <file.wasm> [args...]"
+            "wasmrt: usage: wasmrt wasi [--dir <host>[::<guest>]] [--ro-dir …] [--allow-symlink] <file> [args...]"
         );
         return ExitCode::FAILURE;
     };
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_module_bytes(path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("wasmrt: cannot read {path}: {e}");
+            eprintln!("wasmrt: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -177,6 +177,36 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Read a module file, **assembling it first when it is `.wat` text**.
+///
+/// `wasmrt run prog.wat` used to fail with *"not a WebAssembly binary (bad magic)"* — the assembler
+/// was right there in the same binary, but only reachable as a separate `wasmrt wat` step. The oracle
+/// accepted `.wat` on its run path all along, so this was a port/oracle divergence of exactly the
+/// shape today keeps producing: a capability present in one and absent in the other, with nothing
+/// comparing them.
+///
+/// **One helper, used by every path that loads a module** (`run`, `wasi`, summarize) rather than three
+/// copies of the sniff — the same reasoning as wazmrt hanging its validation guard off the existing
+/// `will_execute` predicate. A fourth loader added later inherits this instead of having to remember.
+///
+/// Dispatch is on the **extension**, matching the oracle: predictable, and it keeps a malformed
+/// *binary* reporting a decode error rather than being fed to the assembler and blamed for bad syntax.
+///
+/// ⚠️ What executes is the **assembled bytes**, not the file on disk. That matters for anything that
+/// hashes what it runs — `pin` is still a stub (T9e), but when it lands it must hash the assembled
+/// module, exactly as wazmrt's `verifyGate` hashes the in-memory bytes rather than re-reading the path.
+fn read_module_bytes(path: &str) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    if std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("wat"))
+    {
+        return wasmrt_core::wat::assemble(&bytes)
+            .map_err(|e| format!("{path}: cannot assemble: {e}"));
+    }
+    Ok(bytes)
 }
 
 /// Format an invalid-module report, **shaped to match wasmtime**.
@@ -364,9 +394,9 @@ fn print_help() {
     println!(
         "wasmrt {} — a fast, small WebAssembly runtime\n\n\
          USAGE:\n    \
-         wasmrt <file.wasm>                     decode, summarize and type-check a module\n    \
-         wasmrt run <file.wasm> <fn> [args...]  call an exported function\n    \
-         wasmrt wasi [--dir D] <file.wasm> […]  run a WASI preview-1 program (_start)\n    \
+         wasmrt <file>                          decode, summarize and type-check a module\n    \
+         wasmrt run <file> <fn> [args...]       call an exported function\n    \
+         wasmrt wasi [--dir D] <file> […]       run a WASI preview-1 program (_start)\n    \
          wasmrt wat <file.wat> [-o out.wasm]    assemble the text format to a binary\n    \
          wasmrt wast <file|dir>... [-v]         run .wast spec scripts\n    \
          wasmrt -h | --help                     show this help\n    \
@@ -374,9 +404,11 @@ fn print_help() {
          `wasi` covers stdio, args, environ, clocks, random, proc_exit and the sandboxed\n\
          filesystem. A guest reaches ONLY what you preopen:\n    \
            --dir <host>[::<guest>]     grant read-write access to a directory\n    \
-           --ro-dir <host>[::<guest>]  grant read-only access (propagates to the subtree)
-    --allow-symlink             let the guest CREATE symlinks (off by default)\n\
-         With no --dir, every path call returns BADF — there is no implicit cwd.",
+           --ro-dir <host>[::<guest>]  grant read-only access (propagates to the subtree)\n    \
+           --allow-symlink             let the guest CREATE symlinks (off by default)\n\n\
+         With no --dir, every path call returns BADF — there is no implicit cwd.\n\n\
+         <file> is a `.wasm` binary or `.wat` text; text is assembled first, then validated\n\
+         and run exactly like a binary.",
         wasmrt_core::VERSION
     );
 }
@@ -385,14 +417,14 @@ fn run_export(rest: &[String]) -> ExitCode {
     let (path, func) = match (rest.first(), rest.get(1)) {
         (Some(p), Some(f)) => (p.as_str(), f.as_str()),
         _ => {
-            eprintln!("wasmrt: usage: wasmrt run <file.wasm> <function> [args...]");
+            eprintln!("wasmrt: usage: wasmrt run <file> <function> [args...]");
             return ExitCode::FAILURE;
         }
     };
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_module_bytes(path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("wasmrt: cannot read {path}: {e}");
+            eprintln!("wasmrt: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -497,10 +529,10 @@ fn type_name(ty: ValType) -> &'static str {
 }
 
 fn summarize(path: &str) -> ExitCode {
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_module_bytes(path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("wasmrt: cannot read {path}: {e}");
+            eprintln!("wasmrt: {e}");
             return ExitCode::FAILURE;
         }
     };

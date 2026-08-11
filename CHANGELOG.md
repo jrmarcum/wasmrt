@@ -16,6 +16,18 @@ measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt a
 
 ### Fixed
 
+- **Every CLI path that loads a module now accepts `.wat` text, not only `.wasm` binaries.**
+  `wasmrt run prog.wat f`, `wasmrt wasi prog.wat` and `wasmrt prog.wat` assemble the text first and
+  then decode, validate and run it exactly like a binary; previously all three failed with
+  *"not a WebAssembly binary (bad magic)"* while the assembler sat in the same executable, reachable
+  only as a separate `wasmrt wat` step. The reference oracle accepted `.wat` on its run path from the
+  start, so this was a **port/oracle divergence** — the same shape as the validation gap above, just
+  benign: a capability present in one runtime and absent in the other, with nothing comparing them.
+  One helper serves all three loaders, so they cannot drift into accepting different things.
+  Dispatch is on the file **extension**, which keeps the stage blamed for a failure honest: malformed
+  text reports `cannot assemble`, malformed bytes `decode failed`. Validation still runs, on the
+  assembled bytes — accepting text is not a way around it.
+
 - **`wasmrt run` now validates before executing, and invalid-module reports match wasmtime.** For an
   ill-typed module wasmrt now prints `invalid module at offset 33 (function 0): type mismatch: expected
   i32, found i64` — the same byte offset (counted from the start of the module) and the same wording

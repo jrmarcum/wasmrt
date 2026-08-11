@@ -380,9 +380,19 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-## Current test state (2026-08-08, T9a#9 resolved as a non-defect)
+## Current test state (2026-08-11, the CLI `.wat` divergence closed)
 
-**450 workspace tests, all green** (418 core + 28 capi + 4 CLI integration), clippy clean on all four build surfaces; the
+**456 workspace tests, all green** (418 core + 28 capi + 10 CLI integration), clippy clean on all four
+build surfaces; the `.wat` corpus is a clean **533/533** through assemble→decode→validate.
+
+The six new CLI tests pin that `run`, `wasi` and summarize all accept `.wat`, that binaries still work,
+that an ill-typed `.wat` is **still refused with the full wasmtime-shaped diagnostic** (a new input format
+must not be a side door around validation), that the *stage* blamed stays honest (malformed text →
+`cannot assemble`, malformed bytes → `decode failed`), and that the extension match ignores case. They are
+integration tests because the defect lived in the CLI's file loading, which no core-level test reaches —
+which is also why nothing caught it for the whole port (`best-practices.md` §3.8).
+
+**Previously (2026-08-08, T9a#9 resolved as a non-defect):** 450 tests (418 core + 28 capi + 4 CLI); the
 C-ABI gate (74/74 + `c_smoke`) and Miri (28/28) pass. This pass added 15: six pinning the backtrace
 (three frames innermost-first, offsets that advance within a body, a caught exception leaving none
 behind), five pinning the start function (it runs, it runs AFTER the segments, a trap in it fails the

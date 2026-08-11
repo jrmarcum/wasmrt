@@ -22,13 +22,35 @@ oracle covers every wasmrt-target feature **except the tail-call proposal** (`re
 `return_call_indirect`) — oracle those against **wasmtime + the spec testsuite**. memory64 **is** in
 scope (owner, 2026-07-27). See [design-decisions.md](design-decisions.md).
 
-## ◐ T9 IN PROGRESS (2026-08-10) — fifteen passes landed, unreleased
+## ◐ T9 IN PROGRESS (2026-08-11) — sixteen passes landed, unreleased
 
 Working tree is **ahead of the published v0.9.0**. Suite **62,113 / 385 / 2,163 — 99.4%** of 62,498
-adjudicated; the **`.wat` corpus is a clean 532/532** through assemble→decode→validate;
-**450 tests** (418 core + 28 capi + 4 CLI); clippy, all four surfaces, the C-ABI gate
+adjudicated; the **`.wat` corpus is a clean 533/533** through assemble→decode→validate;
+**456 tests** (418 core + 28 capi + 10 CLI); clippy, all four surfaces, the C-ABI gate
 (74/74 + `c_smoke`, now asserting real trap frames) and Miri (28/28) green. **No file lost a single
-pass** in any of the fifteen passes — the check that matters whenever skips convert into verdicts.
+pass** in any of the sixteen passes — the check that matters whenever skips convert into verdicts.
+
+### 2026-08-11 (sixteenth) — the CLI could not run a `.wat` file at all
+
+`wasmrt run prog.wat f` answered *"not a WebAssembly binary (bad magic)"*, and so did
+`wasmrt wasi prog.wat` and plain `wasmrt prog.wat`. The assembler was in the same executable the whole
+time, reachable only as a separate `wasmrt wat -o out.wasm` step. The oracle assembled `.wat` on its run
+path from its first release, so this was a **port/oracle divergence** in the port's favour-of-nobody: not
+a wrong answer, an absent one.
+
+All three loaders now share one `read_module_bytes` helper that sniffs the extension and assembles first,
+so they cannot drift into accepting different things. Dispatch is on the **extension**, deliberately, so
+the stage blamed for a failure stays honest — malformed text reports `cannot assemble`, malformed bytes
+`decode failed`; content-sniffing would hand a corrupt binary to the assembler and report a syntax error
+for it. Validation still runs, on the assembled bytes, pinned by a test: accepting text must not become a
+side door around the check the fifteenth pass just installed.
+
+⚠️⚠️ **Found by the owner asking whether the runtime ran `.wat` files — the second finding in two days
+that came from an owner question rather than a test**, and the reason is structural: every gate here
+compares *answers* on inputs both runtimes accept, so a capability one runtime simply does not offer
+produces nothing to diff. Written up as **§3.8** in `best-practices.md`, whose remedy — enumerate the
+oracle CLI's subcommands, file types and flags in a table and check the port entry by entry — is §3.4's
+remedy applied to the outside of the tool instead of the inside.
 
 ### 2026-08-10 (fifteenth) — `wasmrt run` executed WITHOUT VALIDATING, and so did the oracle
 

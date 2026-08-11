@@ -300,6 +300,33 @@ what read them. And when two entries on a punch list have the same *message* in 
 them as one hypothesis rather than two items — the identical-numbers tell of §1.2 applies to identical
 messages too.
 
+### 3.8 A port/oracle divergence can be a MISSING CAPABILITY, and no gate here compares capabilities
+
+`wasmrt run prog.wat` failed with *"not a WebAssembly binary (bad magic)"* for the whole port. The
+oracle accepted `.wat` on its run path from its own first release. The assembler was in the same
+executable, one function away, reachable only as a separate `wasmrt wat` step.
+
+Nothing caught it, and nothing **could** have: every gate this project runs compares *answers* on inputs
+both runtimes accept — the spec suite, the `.wat` corpus, the WASI corpus, `check-wazmrt.sh`. A feature
+one runtime simply does not offer produces no differing answer to diff. It is invisible in exactly the
+way §3.1's silent-wrong-output is invisible, for the opposite reason: not a wrong answer, but **no
+answer at all, on an input nobody in the harness ever hands it**.
+
+Note where it sits relative to §3.1a. There the feature was decoded, validated and printed but never
+executed. Here the feature *worked perfectly* — it was simply never wired to the path a user would
+reach it from. Both are "the code is present and correct and does nothing", found by asking a question
+about the product rather than by running a test.
+
+⚠️⚠️ **It was found by the OWNER asking whether the runtime ran `.wat` files — the second finding in two
+days that came from an owner question rather than a test** (§2.3's validation gap was the first).
+That is not luck twice; it is a category the harness structurally cannot reach, because a test is
+written from the same mental model as the code, and a missing capability is a hole in that model.
+
+**Apply:** periodically enumerate what the oracle's CLI *accepts* — its subcommands, its file types, its
+flags — as a table, and check the port entry by entry. Same shape as the §3.4 remedy (enumerate the
+entry points, don't reason about them), applied to the outside of the tool rather than the inside.
+Cheap, and it is the only thing that finds this class.
+
 ---
 
 ## 4. Checks and gates
