@@ -1,5 +1,59 @@
 # Known Issues
 
+## ✅ Fixed 2026-08-14 (T9f) — `return_call_ref` was NOT A TAIL CALL, and conformance said 40/7
+
+**Three defects, one pass.** All pre-existing; all found while implementing `return_call` /
+`return_call_indirect`.
+
+### 1. ⚠️⚠️ `return_call_ref` grew the native stack — a FAKE tail call that answered correctly
+
+`interp.rs` called `call_function(.., depth + 1)` and then set `pc = ir.len()`. Every result it
+produced was **correct**. The native stack grew on every hop, so unbounded mutual recursion — the
+entire reason the proposal exists — still exhausted it.
+
+**Its conformance file read 40 passed / 7 failed for releases.** Nobody reads 40/7 as *the feature is
+absent*; it reads as "nearly done". `cmem/roadmap.md`'s T9f entry had predicted this exact trap in
+writing — *"a naive call-then-return implementation passes the tests and misses the feature"* — while
+it was already in the tree, applying to the form that already shipped.
+
+**Fixed structurally.** `run` no longer recurses on a tail call: it reports the callee through a
+`TailCall` out-parameter and unwinds; `call_function` **loops**, reusing its native frame at the same
+`depth`. `countdown(5_000_000)` returns; the identical function written with `call` traps.
+⚠️ Deliberate consequence, recorded rather than discovered later: **a replaced frame leaves no
+backtrace entry** — that is what replacing it means.
+
+⚠️ The out-parameter is deliberate over a richer return type: `run`'s return value is on the hot path
+of every call, and the previous change to it cost 3.6% (§1.7).
+
+**Measured, because the suite cannot see this**: with the fake restored by mutation, the new property
+test fails **5 of 6** while the three tail-call spec files still score **38/6, 72/4, 40/6**. Written up
+as `best-practices.md` §3.10 — *a conformance suite checks RESULTS; some features are about RESOURCES.*
+
+### 2. `return_call_ref` REFUSED VALID MODULES — equality where §3.3.8 says subtyping
+
+Its validator required the callee's results to *equal* the enclosing function's. The spec says
+**subtype**: a function returning `(ref null $t)` may tail-call one returning `(ref $t)`, because a
+non-nullable reference is a subtype of the nullable one. ⚠️ Wrong in the **refusing** direction, which
+is exactly why it survived — a rejected valid module is a failing assertion, never a wrong answer, and
+this project's instincts are tuned for silent-wrong-output. All three tail forms now share one
+`check_tail_results`.
+
+### 3. 🆕 `return_call_indirect` assembled as `call_indirect` — emitter instance #5
+
+`emit_call_indirect` hard-coded `ctx.out.push(0x11)`, so routing the tail form through it emitted the
+**non-tail** instruction: the text said one thing and the module said another. **Created and caught
+within the hour**, which is the useful part — it is the T10a mechanism (an emitter reconstructing a
+form from a *subset* of the parser's facts) and it caught me while I was writing about it. It surfaced
+as a **`StackHeightMismatch` from the validator**, three stages away (§3.7). The opcode is a parameter
+now.
+
+✅ **T10a's opcode sweep fired preventively** for the first time: adding `0x12`/`0x13` without the
+assembler's immediate entries failed the build-time test immediately, before the defect could ship.
+
+**Result:** `return_call.wast` **44/0/0**, `return_call_indirect.wast` **76/0/0** (was 27/3/**49
+skipped**), `return_call_ref.wast` **46/0/0**. Suite **62,238 / 378 / 2,038**. **458 tests.**
+🚦 **Every in-scope proposal is now implemented** — 1.0 is no longer blocked on a missing feature.
+
 ## ✅ RESOLVED 2026-08-14 — all three wazmrt-reported findings closed
 
 The report below is kept verbatim as the record; this is what was done about it.

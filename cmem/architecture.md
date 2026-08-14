@@ -172,6 +172,30 @@ the IR a clean seam so a register-machine pass (Option B) is layerable later if 
 ladder and the load-bearing invariants (ValType packing, slot encoding, the `#[inline(never)]` trap
 path, shared Memory/Table, etc.).
 
+### 🔒 The call path: recursion for calls, a LOOP for tail calls (T9f, 2026-08-14)
+
+The wasm call stack is the **native** call stack: `call_function` sets up a `Frame` and calls `run`,
+which calls `call_function` for a nested call. That is deliberate and stays — it is what makes
+`max_call_depth` a real bound and keeps the hot path free of an explicit frame stack.
+
+**A tail call must not use it.** `run` does **not** recurse on `return_call` / `return_call_indirect` /
+`return_call_ref`: it writes the intended callee into a `TailCall` out-parameter and unwinds, and
+`call_function` **loops** — rebinding instance, function and arguments, reusing its own native frame,
+at the **same `depth`**. An unbounded chain therefore runs in constant native stack and never
+approaches `max_call_depth`, because the chain never deepens.
+
+⚠️ **Do not "simplify" that loop back into a recursive call.** It reads like an equivalent spelling and
+is not: `return_call_ref` shipped for releases as the recursive version, produced correct results, and
+was not a tail call at all (`known-issues.md`, `best-practices.md` §3.10).
+
+Two consequences worth knowing before touching this:
+- **A replaced frame leaves no backtrace entry.** A trap deep in a tail-call chain reports the function
+  that trapped and its real caller, not the thousands tail-called through — that is what replacement
+  *means*, and a runtime listing them would be describing a stack it did not keep.
+- **The signal is an out-parameter, not a return value.** `run`'s return type is on the hot path of
+  every call in the engine; the previous attempt to thread state through it cost 3.6%
+  (`best-practices.md` §1.7). Writing a cold out-parameter costs nothing.
+
 ## Libc-free / allocator
 
 Core links no libc. Native builds and the C-ABI lib pick a global allocator (system/`smp`-equivalent);

@@ -22,7 +22,10 @@ and expected-vs-found, **matched byte-for-byte against wasmtime 47.0.2**.
 sandbox-escape tests, which self-skip because this host denies native symlink creation. See **T12y**.
 
 **Still open in T9:** the text-parser remainder of **#12** (`func.wast` 8), **T9e `pin`**,
-**T9f tail calls DONE 2026-08-14**. **All of T9a #1–#9 and #11 are now closed.** #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
+**T9f tail calls DONE 2026-08-14 — every in-scope proposal is now implemented.** **All of T9a #1–#9 and
+#11 are closed**, #10 stays a non-issue by design, and **`T9e pin` is the ONLY T9 item left**:
+`func.wast` 8 moved to T10 with the other bugs (owner, 2026-08-14 — *"implement T9 first then tackle all
+of the bugs which is T10 anyway"*). The T8 block below is the v0.9.0 release record.
 
 ### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
@@ -573,8 +576,9 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
      just plumbing; imported **tables** need the funcref encoding decided first, and that touches a
      recorded invariant. **Do not implement imported tables without it.**
 
-  **Still open in T9** (as of the fourteenth pass): the text-parser remainder of
-  **#12** · **T9e `pin`** · **T9f tail calls**. #10 stays a non-issue by design. Note 2 above is
+  **Still open in T9** (as of the eighteenth pass): **T9e `pin`** ONLY. ✅ T9f tail calls landed
+  2026-08-14; the text-parser remainder of **#12** (`func.wast` 8) moved to T10 with the other bugs
+  (owner, 2026-08-14: "implement T9 first then tackle all of the bugs which is T10 anyway"). #10 stays a non-issue by design. Note 2 above is
   now **resolved** — the funcref carries its owning instance and imported tables ship.
 
   ### ◐ Progress 2026-08-08 — T9a#4 memory half. Suite 61,247/655/2,932 → **61,593 / 697 / 2,469**
@@ -1178,17 +1182,40 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     and the opt-out may only *raise* strictness.
 
   ### T9f — Tail calls ✅ **DONE 2026-08-14** — and `return_call_ref` had been a FAKE tail call
-  - `return_call` / `return_call_indirect` (`0x12`/`0x13`) are **not in the opcode table at all**;
-    `return_call_ref` (`0x15`) exists via function-references. They are **in scope** per `vision.md`
-    (full browser-standard parity), so **1.0 = parity cannot be claimed without them** — which is why
-    this is a build item and not a "leave it" note.
-  - **The one oracle-split residual:** the frozen wazmrt oracle does not implement them either, so
-    conform against **wasmtime + the official spec testsuite** rather than the oracle.
-  - Touches decode (`opcode.rs`), validation, and the interpreter's call path. **A real tail call must
-    replace the current frame, not grow the stack** — the point of the proposal is unbounded mutual
-    recursion, so a naive "call then return" implementation passes the tests and misses the feature.
-  - **Only once they exist may a C-ABI `tail_call` feature flag be added** — and then `abi_version()`
-    stays 1 (adding an enum value is additive), but `features.rs` and the header must move together.
+
+  **`return_call.wast` 44/0/0 · `return_call_indirect.wast` 76/0/0** (was 27/3/**49 skipped**) **·
+  `return_call_ref.wast` 46/0/0** (was 40/7/0). Suite **62,238 / 378 / 2,038**: +125 passes, −125
+  skips. 🚦 **Every in-scope proposal is now implemented; 1.0 is no longer blocked on a feature.**
+
+  ⚠️⚠️ **This entry's own warning came true about the code that already shipped.** It read: *"a real
+  tail call must replace the current frame, not grow the stack — a naive call-then-return
+  implementation passes the tests and misses the feature."* That is precisely what `return_call_ref`
+  had been doing since T5, scoring 40/7 on its conformance file the whole time. **The prediction was
+  written as a caution about future work and was already a description of the present.**
+
+  **What landed:**
+  - `run` no longer recurses on a tail call. It reports the callee through a `TailCall`
+    out-parameter and unwinds; `call_function` **loops**, reusing its native frame at the same
+    `depth`. Constant native stack for an unbounded chain. An out-parameter, not a richer return
+    type, because `run`'s return value is on the hot path and the last change to it cost 3.6% (§1.7).
+  - The three tail forms share **one** `check_tail_results`, which is **subtyping, not equality**
+    (§3.3.8) — the equality version had been *refusing valid modules*.
+  - `WASMRT_FEATURE_TAIL_CALL` = 14. The flag exists **only now that the feature does**, per
+    `features.rs`'s own rule; `abi_version()` stays **1** because adding an enum value is additive.
+    Pinned by a test asserting both directions *and* that the neighbouring function-references flag
+    does **not** gate it.
+  - `return_call_ref` stays under `FunctionReferences`, deliberately: that proposal defines it and its
+    typed operand is not expressible without it, so moving it would change what an existing
+    embedder's config rejects for no safety gain.
+
+  ⚠️ **Conformance could not have caught the fake** — see `best-practices.md` §3.10 and the property
+  test `tests/tail_call_is_a_real_tail_call.wast`. Under a mutation restoring it, the spec files still
+  score 38/6, 72/4, 40/6.
+
+  ⚠️ **Performance measured A/B/A** (the signature changed): tail calls **227/226/226** and
+  **231/234/231** Mops/s; parent **214/219/217**. **Faster, not slower.** 🚦 But the recorded ~237
+  baseline does not reproduce here at all, so **build-to-build variance (~7%) exceeds the ~5%
+  regression T11 is chasing** — T11's first job is a benchmark that can resolve 5%.
 
   ### T9h — Cross-module type identity: a type registry on the `Store` ✅ **DONE 2026-08-08** *(approach approved by the owner the same day)*
 

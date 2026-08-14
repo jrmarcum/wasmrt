@@ -10,7 +10,7 @@ plus the size and speed numbers that decide inclusion. Detail:
 the universalWasmLoader-\* runtimes, so parity with one is not evidence about the other. What answers
 "is this correct?", in order of authority:
 
-1. **The official WebAssembly spec testsuite** — 62,498 adjudicated assertions over 284 files, vendored
+1. **The official WebAssembly spec testsuite** — 62,616 adjudicated assertions over 284 files, vendored
    at `../wasmtk/tests/module/wasm_wast/testsuite-main`. This is the anchor: it is the specification,
    executable. `wasmrt wast <dir>` runs it.
 2. **wasmtime's observable behaviour**, for questions the suite does not adjudicate — error wording,
@@ -20,10 +20,10 @@ the universalWasmLoader-\* runtimes, so parity with one is not evidence about th
    (`best-practices.md`).
 3. **The wasmtk WASI corpus** — real compiled guests, which is the only thing that exercises the WASI
    surface end to end.
-4. **wasmrt's own tests** — 457 of them, for the internal invariants none of the above can reach
+4. **wasmrt's own tests** — 458 of them, for the internal invariants none of the above can reach
    (handle tagging, store isolation, encoding invariants, the `size_of` pins).
 
-**Tail calls** (`return_call`/`return_call_indirect`) were always conformed this way — they were the one
+✅ **Tail calls** (`return_call`/`return_call_indirect`) were conformed exactly this way and **landed 2026-08-14** — they were the one
 wasmrt-target feature the oracle never covered. That is now simply how everything is done.
 
 *Historical: through T9 the strategy was a split — golden-vector parity Rust↔wazmrt for everything the
@@ -33,16 +33,16 @@ leads produced by that arrangement** ("the oracle runs this, so our type-checker
 running an entry point that skipped validation, `best-practices.md` §2.3a). Retiring the oracle removes
 the class; do not reintroduce it by reasoning about what wazmrt would do.
 
-## Spec-suite conformance — current (2026-08-08, T9a#8 assembler immediates) — **99.4%**
+## Spec-suite conformance — current (2026-08-14, T9f tail calls) — **99.4%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | T9a#7 + start (08-08) | charset (08-08) | **T9a#8 (08-08)** |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | 61,987 | 62,037 | **62,113** |
-| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | 441 | 393 | **385** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | 2,245 | **2,163** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | 99.4% | **99.4%** of 62,498 |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | T9a#7 + start (08-08) | charset (08-08) | **T9a#8 (08-08)** | **T9f tail calls (08-14)** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | 61,987 | 62,037 | **62,113** | **62,238** |
+| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | 441 | 393 | **385** | **378** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | 2,245 | **2,163** | **2,038** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | 99.4% | **99.4%** of 62,498 | **99.4%** of 62,616 |
 
 ### T9a#9 (2026-08-08) — no column, because the suite did not move, and should not have
 
@@ -395,10 +395,36 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-## Current test state (2026-08-11, the CLI `.wat` divergence closed)
+## Current test state (2026-08-14, T9f tail calls)
 
-**457 workspace tests, all green** (419 core + 28 capi + 10 CLI integration), clippy clean on all four
-build surfaces; the `.wat` corpus is a clean **533/533** through assemble→decode→validate.
+**458 workspace tests, all green** (420 core + 28 capi + 10 CLI integration), clippy clean on all four
+build surfaces; the `.wat` corpus is a clean **533/533** through assemble→decode→validate. Suite
+**62,238 / 378 / 2,038 — 99.4%** of 62,616.
+
+### ⚠️⚠️ The kind of test the spec suite CANNOT replace
+
+`tests/tail_call_is_a_real_tail_call.wast` exists because **conformance checks results and the tail-call
+proposal is about a resource.** `return_call_ref` shipped for releases as "call the callee, then jump to
+the end of the body": every answer correct, native stack growing on every hop. Its conformance file read
+**40 passed / 7 failed**, which nobody reads as *the feature is absent*.
+
+Measured deliberately, with the fake restored by mutation: the property test fails **5 of 6** while the
+three tail-call spec files still score **38/6, 72/4, 40/6**. Record that pair of numbers — it is the
+evidence that a 90% conformance score can coexist with a missing feature. Full lesson:
+`best-practices.md` §3.10.
+
+The file pins four chains at **1,000,000 deep** — self-recursion, **mutual** recursion (the case a
+self-call optimizer would miss), through a **table**, and through a **typed reference** — plus one
+shallow tail call so the ordinary path stays covered.
+
+### `tests/*.wast` runs under `cargo test`
+
+`crates/wasmrt-core/tests/regression_wast.rs` executes **every** `.wast` in the repo's `tests/`
+directory, asserting zero failures **and zero skips** (a construct that regresses into "unsupported" is
+silently not a pass) and failing if the directory is empty so it cannot pass vacuously. Anything dropped
+in `tests/` is covered without anyone remembering to wire it up. ⚠️ It exists because the three
+regression reproducers were green and **nothing ran them** — *a gate with no trigger is a preference*
+(`best-practices.md` §3A).
 
 The six new CLI tests pin that `run`, `wasi` and summarize all accept `.wat`, that binaries still work,
 that an ill-typed `.wat` is **still refused with the full wasmtime-shaped diagnostic** (a new input format
