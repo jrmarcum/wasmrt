@@ -22,7 +22,7 @@ and expected-vs-found, **matched byte-for-byte against wasmtime 47.0.2**.
 sandbox-escape tests, which self-skip because this host denies native symlink creation. See **T12y**.
 
 **Still open in T9:** the text-parser remainder of **#12** (`func.wast` 8), **T9e `pin`**,
-**T9f tail calls**. **All of T9a #1–#9 and #11 are now closed.** #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
+**T9f tail calls DONE 2026-08-14**. **All of T9a #1–#9 and #11 are now closed.** #10 stays a non-issue by design. The T8 block below is the v0.9.0 release record.
 
 ### Superseded — the T8 / v0.9.0 record (2026-08-06)
 
@@ -1177,7 +1177,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     root-owned, `off|warn|enforce`, a pure `decide()` matrix, hash the **in-memory bytes about to run**,
     and the opt-out may only *raise* strictness.
 
-  ### T9f — Tail calls: the last unimplemented IN-SCOPE proposal `[ ]`
+  ### T9f — Tail calls ✅ **DONE 2026-08-14** — and `return_call_ref` had been a FAKE tail call
   - `return_call` / `return_call_indirect` (`0x12`/`0x13`) are **not in the opcode table at all**;
     `return_call_ref` (`0x15`) exists via function-references. They are **in scope** per `vision.md`
     (full browser-standard parity), so **1.0 = parity cannot be claimed without them** — which is why

@@ -109,10 +109,10 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   which was decoded, validated and printed by the CLI but never executed** (§4.5.5), found while
   asking where an *instantiation* trap would get its backtrace frames.
 
-  Still open: T9a **#8**, **#9**, #12's text-parser remainder, `pin`, and **tail calls**.
+  Still open: #12's text-parser remainder (`func.wast` 8) and `pin`. ✅ **Tail calls landed 2026-08-14.**
 
-**Next: finish T9** — the remaining punch-list, `pin`, and tail calls (1.0 cannot be claimed without
-them). Then **T10** (bug hunt + code hygiene), **T11** (optimization review — **no longer blocked, since
+**Next: finish T9** — `func.wast` 8 and `pin`. ✅ Tail calls landed 2026-08-14, so no in-scope proposal is
+missing. Then **T10** (bug hunt + code hygiene), **T11** (optimization review — **no longer blocked, since
 T9 produced its baselines**) and **T12** (security review), added by the owner 2026-08-06; the ordering
 **measure → find → optimize → attack** is deliberate.
 

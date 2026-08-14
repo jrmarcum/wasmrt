@@ -162,7 +162,8 @@ typedef enum {
     WASMRT_FEATURE_MEMORY64                  = 10,
     WASMRT_FEATURE_FUNCTION_REFERENCES       = 11,  /* requires REFERENCE_TYPES         */
     WASMRT_FEATURE_GC                        = 12,  /* requires FUNCTION_REFERENCES     */
-    WASMRT_FEATURE_EXCEPTIONS                = 13   /* requires REFERENCE_TYPES         */
+    WASMRT_FEATURE_EXCEPTIONS                = 13,  /* requires REFERENCE_TYPES         */
+    WASMRT_FEATURE_TAIL_CALL                 = 14   /* return_call/_indirect            */
 } wasmrt_feature_t;
 
 wasmrt_config_t *wasmrt_config_new(void);

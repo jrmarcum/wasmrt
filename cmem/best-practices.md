@@ -360,6 +360,28 @@ decided the cost of being right was higher than it turned out to be.
 
 ---
 
+### 3.10 A conformance suite checks RESULTS; some features are about RESOURCES
+
+`return_call_ref` shipped for releases as "call the callee, then jump to the end of the body". Every
+answer it produced was correct. It recursed natively on every hop, so unbounded mutual recursion —
+the entire reason the tail-call proposal exists — still exhausted the stack.
+
+Its conformance file read **40 passed / 7 failed**. Nobody looks at 40/7 and concludes *the feature is
+absent*; it reads as "nearly done, a few edge cases". Measured deliberately afterwards, a mutation
+restoring the fake still scores **38/6, 72/4, 40/6** across the three tail-call files.
+
+**The reason is structural, not a gap in the suite.** `assert_return` compares a value. A tail call's
+defining property is that it does not consume a resource, and no assertion about a *result* can
+observe that. The same blindness covers anything whose contract is consumption rather than output:
+memory that must not grow, a cache that must not be rebuilt, an allocation that must not happen.
+
+**Apply:** when a feature's *point* is a resource property, write the property test yourself and make
+it large enough that only the real implementation survives — 1,000,000 frames, not 100. Then
+mutation-verify it against the conformance number and record both: *"the suite still reads 90% under
+the mutation"* is the sentence that stops the next person trusting the percentage. ⚠️ This is §3.1's
+silent-wrong-output inverted — there the answer was wrong and nothing said so; here the answer is
+right and the feature is missing anyway.
+
 ## 3A. Borrowed lessons — from wazmrt's `best-practices.md` (owner-authorized read, 2026-08-14)
 
 🔒 **Scope of this exception.** The oracle is retired for *correctness answers and design* (§

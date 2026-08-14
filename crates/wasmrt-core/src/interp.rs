@@ -2242,7 +2242,10 @@ fn call_function(
     // through. That is what the frame having been replaced MEANS; a runtime that listed them all
     // would be describing a stack it did not keep.
     if let Some(tc) = tail {
-        return call_function(code, host_funcs, store, tc.inst, tc.func, &tc.args, depth + 1);
+        inst = tc.inst;
+        func_index = tc.func;
+        tail_args = Some(tc.args);
+        continue;
     }
 
     let n = body.ty.results.len();

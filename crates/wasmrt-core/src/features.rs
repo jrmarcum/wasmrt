@@ -6,11 +6,14 @@
 //!
 //! **The rule that makes this honest: a flag exists only for a proposal wasmrt actually
 //! implements.** A toggle for something unimplemented would be a no-op that reads as a
-//! security control, which is the "fall-through" class `cmem/INDEX.md` forbids. That is
-//! why there is **no `tail_call` flag** — `return_call` / `return_call_indirect` (`0x12` /
-//! `0x13`) are not in the opcode table at all (they are the one oracle-split residual, see
-//! `cmem/roadmap.md`), so gating them would gate nothing. `return_call_ref` belongs to
-//! function-references and is gated there.
+//! security control, which is the "fall-through" class `cmem/INDEX.md` forbids.
+//!
+//! ✅ **[`Feature::TailCall`] is that rule working as intended.** Through v0.9.0 there was
+//! deliberately no such flag, because `return_call` / `return_call_indirect` (`0x12` / `0x13`)
+//! were not in the opcode table and a toggle for them would have gated nothing. T9f implemented
+//! them — as real frame replacement, not "call then return" — so the flag exists now, and not one
+//! release earlier. Adding an enum value is additive, so `abi_version()` stays **1**.
+//! `return_call_ref` belongs to function-references and is gated there.
 //!
 //! **Everything defaults ON** ([`Features::all`]), so the default path is byte-identical to
 //! pre-T8 behaviour and the spec suite is unaffected. Gating only ever *rejects*; turning a
@@ -66,6 +69,14 @@ pub enum Feature {
     /// Exception handling, both encodings (`try_table`/`throw`/`throw_ref` and the legacy
     /// `try`/`catch`/`rethrow`), the tag section, and `exnref`.
     Exceptions,
+    /// Tail calls: `return_call` and `return_call_indirect` (`0x12`/`0x13`), which **replace**
+    /// the caller's frame rather than stacking on it.
+    ///
+    /// ⚠️ `return_call_ref` stays under [`Feature::FunctionReferences`], where it has always been:
+    /// that proposal defines it, and its typed reference operand is not even expressible without
+    /// it. Moving it here would change what an existing embedder's config rejects for no safety
+    /// gain — both flags default on, and disabling function-references already removes it.
+    TailCall,
 }
 
 impl Feature {
@@ -88,6 +99,7 @@ impl Feature {
             Feature::FunctionReferences => "function-references",
             Feature::Gc => "gc",
             Feature::Exceptions => "exception-handling",
+            Feature::TailCall => "tail-call",
         }
     }
 }
@@ -117,6 +129,7 @@ pub struct Features {
     pub function_references: bool,
     pub gc: bool,
     pub exceptions: bool,
+    pub tail_call: bool,
 }
 
 impl Default for Features {
@@ -164,6 +177,7 @@ impl Features {
             function_references: true,
             gc: true,
             exceptions: true,
+            tail_call: true,
         }
     }
 
@@ -185,6 +199,7 @@ impl Features {
             function_references: false,
             gc: false,
             exceptions: false,
+            tail_call: false,
         }
     }
 
@@ -206,6 +221,7 @@ impl Features {
             Feature::FunctionReferences => self.function_references,
             Feature::Gc => self.gc,
             Feature::Exceptions => self.exceptions,
+            Feature::TailCall => self.tail_call,
         }
     }
 
@@ -226,6 +242,7 @@ impl Features {
             Feature::FunctionReferences => self.function_references = on,
             Feature::Gc => self.gc = on,
             Feature::Exceptions => self.exceptions = on,
+            Feature::TailCall => self.tail_call = on,
         }
     }
 
@@ -269,6 +286,9 @@ pub const fn op_feature(op: Op) -> Option<Feature> {
         // --- exception handling (both encodings) ---
         TryLegacy | CatchLegacy | Throw | Rethrow | ThrowRef | Delegate | CatchAll
         | TryTable => Feature::Exceptions,
+
+        // --- tail calls ---
+        ReturnCall | ReturnCallIndirect => Feature::TailCall,
 
         // --- typed function references ---
         CallRef | ReturnCallRef | RefAsNonNull | BrOnNull | BrOnNonNull => {
@@ -518,7 +538,7 @@ mod tests {
         );
     }
 
-    const EVERY: [Feature; 14] = [
+    const EVERY: [Feature; 15] = [
         Feature::SignExtension,
         Feature::SaturatingFloatToInt,
         Feature::MultiValue,
@@ -533,5 +553,41 @@ mod tests {
         Feature::FunctionReferences,
         Feature::Gc,
         Feature::Exceptions,
+        Feature::TailCall,
     ];
+
+    /// ⚠️ **The flag must GATE something.** This module's own doc says a toggle for an
+    /// unimplemented proposal is a no-op that reads as a security control — so the test for a new
+    /// flag is not that it exists, it is that turning it off changes the verdict, and that turning
+    /// it on leaves the module valid. Both directions, or it is decoration.
+    #[test]
+    fn the_tail_call_flag_actually_gates_tail_calls() {
+        // (module (func $f (return_call $f)))
+        let wat = br#"(module (func $f (return_call $f)))"#;
+        let bytes = crate::wat::assemble(wat).expect("assemble");
+        let module = crate::module::decode(&bytes).expect("decode");
+
+        assert!(
+            crate::validate::validate_with_features(&module, &Features::all()).is_ok(),
+            "enabled: a tail call must validate"
+        );
+
+        let mut off = Features::all();
+        off.tail_call = false;
+        assert_eq!(
+            crate::validate::validate_with_features(&module, &off),
+            Err(crate::validate::ValidateError::FeatureDisabled(Feature::TailCall)),
+            "disabled: the module must be refused, naming tail-call"
+        );
+
+        // And the neighbouring flag must NOT gate it — `return_call` is not a function-references
+        // instruction, and a flag that rejects more than it claims is its own kind of wrong.
+        let mut no_funcrefs = Features::all();
+        no_funcrefs.function_references = false;
+        no_funcrefs.gc = false; // gc requires function-references; keep the set coherent
+        assert!(
+            crate::validate::validate_with_features(&module, &no_funcrefs).is_ok(),
+            "return_call must not be gated by function-references"
+        );
+    }
 }

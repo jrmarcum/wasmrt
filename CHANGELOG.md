@@ -18,7 +18,36 @@ The three crates share one version and are released together: `wasmrt` (CLI), `w
 _Next: **0.10.0 (T9)** — the correctness punch-list, tail calls, licensing and docs, size + performance
 measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt and code-hygiene pass; **0.12.0 (T11)** — an optimization review of the shipped binaries and the C ABI; and **0.13.0 (T12)** — a security review of the penetration surfaces, with recommended mitigations._
 
+### Added
+
+- **Tail calls — `return_call` and `return_call_indirect` (T9f).** The last unimplemented proposal in
+  wasmrt's stated scope, so **1.0 is no longer blocked on a missing feature**. Decoder, validator,
+  text assembler and interpreter, plus a `WASMRT_FEATURE_TAIL_CALL` config flag (**additive — the C
+  ABI version stays 1**). Spec files reach `return_call.wast` 44/0/0, `return_call_indirect.wast`
+  76/0/0 and `return_call_ref.wast` 46/0/0; the suite gains 125 passes and loses 125 skips.
+
+  These are **real** tail calls: the interpreter no longer recurses on one. It reports the intended
+  callee and unwinds, and the call loop reuses the same native frame at the same depth, so an
+  unbounded chain runs in constant native stack — `countdown(5000000)` returns, where the identical
+  function written with `call` exhausts the stack. Note the deliberate consequence: a replaced frame
+  leaves no backtrace entry, because that is what replacing it means.
+
 ### Fixed
+
+- **`return_call_ref` was not actually a tail call.** It called the callee and then jumped to the end
+  of the body — every result correct, and the native stack grew on every hop, which is the one thing
+  the proposal exists to prevent. Its conformance file read 40 passed / 7 failed, which reads as
+  "nearly done" rather than "the feature is absent". Now implemented as real frame replacement, and
+  pinned by a property test (1,000,000-deep self, mutual, table and typed-reference chains) because no
+  `assert_return` can observe the difference.
+
+- **`return_call_ref` rejected valid modules.** Its validator required the callee's results to *equal*
+  the enclosing function's results; §3.3.8 says **subtype**. A function returning `(ref null $t)` may
+  tail-call one returning `(ref $t)`. All three tail forms now share one check.
+
+- **`return_call_indirect` assembled as `call_indirect`.** The shared emitter hard-coded the
+  `call_indirect` opcode, so the text and the emitted module disagreed; it surfaced as a validator
+  stack-height error three stages away.
 
 - **Cross-module reference IDENTITY: a GC object's type index was read against the READER's
   module.** `gc_heap` is shared across a linking group, so objects cross module boundaries — and

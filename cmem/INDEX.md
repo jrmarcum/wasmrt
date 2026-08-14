@@ -43,13 +43,62 @@ under owner authorization. Tail calls (`return_call`/`return_call_indirect`) wer
 wasmrt-target feature with **no** oracle and were planned against wasmtime + the spec testsuite — which
 is now simply how everything is done. memory64 **is** in scope (owner, 2026-07-27).*
 
-## ◐ T9 IN PROGRESS (2026-08-14) — seventeen passes landed, unreleased
+## ◐ T9 IN PROGRESS (2026-08-14) — eighteen passes landed, unreleased
 
-Working tree is **ahead of the published v0.9.0**. Suite **62,113 / 385 / 2,163 — 99.4%** of 62,498
+Working tree is **ahead of the published v0.9.0**. Suite **62,238 / 378 / 2,038 — 99.4%** of 62,616
 adjudicated; the **`.wat` corpus is a clean 533/533** through assemble→decode→validate;
-**457 tests** (419 core + 28 capi + 10 CLI); clippy, all four surfaces, the C-ABI gate
+**458 tests** (420 core + 28 capi + 10 CLI); clippy, all four surfaces, the C-ABI gate
 (74/74 + `c_smoke`, now asserting real trap frames) and Miri (28/28) green. **No file lost a single
-pass** in any of the seventeen passes — the check that matters whenever skips convert into verdicts.
+pass** in any of the eighteen passes — the check that matters whenever skips convert into verdicts.
+
+### 2026-08-14 (eighteenth) — T9f TAIL CALLS: the last unimplemented in-scope proposal
+
+`return_call` (`0x12`) and `return_call_indirect` (`0x13`) are implemented — decoder, validator,
+assembler, interpreter, and a C ABI flag. Spec files: `return_call.wast` **44/0/0**,
+`return_call_indirect.wast` **76/0/0** (was 27/3/**49 skipped**), `return_call_ref.wast` **46/0/0**
+(was 40/7/0). Suite **62,238 / 378 / 2,038**, +125 passes and −125 skips. **1.0 is no longer blocked
+on a missing proposal.**
+
+⚠️⚠️ **The finding: `return_call_ref` had shipped for releases as a FAKE tail call.** It called
+`call_function` and then jumped to the end of the body — "call then return". Every answer it produced
+was correct, and the native stack grew on every hop, so the one thing the proposal exists for did not
+work. The roadmap predicted this exact trap ("a naive call-then-return passes the tests and misses the
+feature") and it was already in the tree.
+
+**The fix is structural**: `run` no longer recurses on a tail call. It reports the intended callee
+through a `TailCall` out-parameter and unwinds; `call_function` **loops**, reusing its own native frame
+at the same `depth`. An unbounded chain now runs in constant native stack. `countdown(5,000,000)`
+returns; the identical function using `call` traps. ⚠️ Deliberate consequence, recorded rather than
+discovered later: **a replaced frame leaves no backtrace entry**, because that is what replacing it
+means.
+
+⚠️⚠️ **Conformance could not have caught the fake, and this is the transferable part.** Under a
+mutation restoring "call then return", the new property test fails **5 of 6** while the three spec
+files still score 38/6, 72/4, 40/6 — high-80s-to-90s, which reads as "nearly done, a few edge cases".
+That is precisely how 40/7 was read for releases. **Every conformance assertion checks a RESULT; the
+tail-call proposal is about a RESOURCE.** Pinned by `tests/tail_call_is_a_real_tail_call.wast`
+(self-recursion, *mutual* recursion, through a table, and through a typed ref — 1,000,000 deep each),
+which `regression_wast.rs` runs under `cargo test`.
+
+🆕 **Two defects found on the way, both pre-existing:**
+- **`return_call_ref`'s validator used EQUALITY where the spec says subtyping** (§3.3.8), so it
+  *refused valid modules* — `(result (ref null $t))` tail-calling a callee returning `(ref $t)` is
+  legal. Wrong in the refusing direction, which is why nothing noticed: a rejected valid module is a
+  failing assertion, never a wrong answer. All three forms now share **one** `check_tail_results`.
+- 🆕 **Instance #5 of the T10a emitter mechanism, created and caught within the hour**:
+  `emit_call_indirect` hard-coded `push(0x11)`, so routing `return_call_indirect` through it emitted
+  a plain `call_indirect` — the text said one thing, the module another. It surfaced as a
+  **`StackHeightMismatch` from the validator**, three stages away (§3.7). The opcode is a parameter now.
+
+✅ **T10a's opcode sweep caught the missing immediates the moment they appeared**, before the defect
+could ship — the first time one of these gates has fired *preventively* rather than forensically.
+
+⚠️ **Performance: MEASURED, A/B/A, and the answer came back the other way.** `run` gained a parameter,
+and the last such change cost 3.6%. Steady state: with tail calls **227/226/226** and **231/234/231**
+Mops/s; parent commit **214/219/217**. The change is **faster**, not slower. 🚦 **But the recorded
+~237 Mops/s baseline does not reproduce on this machine at all** — the parent measures ~216 — so
+build-to-build variance here (~7%) is larger than the "unattributed ~5% regression" T11 is chasing.
+**T11's first job is a benchmark methodology that can resolve 5%, not the 5% itself.**
 
 ### 2026-08-14 (seventeenth) — cross-module reference IDENTITY, reported from wazmrt
 
