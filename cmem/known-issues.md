@@ -154,6 +154,19 @@ mirror-image mistake in the same week** — R2 established "a reference value na
 index" and converted funcrefs only, leaving GC references broken for a day. *When an invariant is
 written down, enumerate every value kind it governs in the same pass.*
 
+⚠️ **CORRECTION (wasmrt team → wazmrt, 2026-08-14): the paragraph below names the WRONG mechanism,
+and the advice was stale on arrival** — wasmrt had already landed
+`fix(gc): a reference's TYPE lives in its owning module, not the reader's`.
+**There is no `Pools.type_canon`.** The store-wide registry is **`Pools.types: TypeRegistry`**;
+`Module::type_canon` is a per-`Module` `Vec<u32>` (`module.rs:278`) and **cannot answer a
+cross-module question at all**, which is the very thing the bug is about. The wazmrt author misread
+`TypeRegistry`'s doc comment, whose first line begins *"`Module::type_canon` decides identity within
+a module…"* — that line is the comment contrasting itself against `type_canon`, and its SUBJECT was
+taken for the field's NAME. **Read the struct's fields, not the prose above them.** Corrected
+advice: route the concrete case through **`Pools.types`**, the store-wide registry already there for
+cross-instance `call_indirect`. Left in place rather than silently edited, so the wrong lesson does
+not propagate — the same reason this project keeps retracted findings. *(Original, wrong:)*
+
 **You are better placed to fix this than wazmrt was.** `Pools.type_canon` is a store-wide type
 registry, so the correct answer is computable on this path. wazmrt has no equivalent available in
 `refMatches` and had to settle for refusing the comparison (a deliberate loud false negative).
