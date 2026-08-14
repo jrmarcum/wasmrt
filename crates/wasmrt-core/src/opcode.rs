@@ -925,6 +925,22 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                 },
                 0x18 => Instr { offset: 0, op: Op::BrOnCast, imm: read_br_cast(&mut r)? },
                 0x19 => Instr { offset: 0, op: Op::BrOnCastFail, imm: read_br_cast(&mut r)? },
+                // ⚠️⚠️ 0x1a `any.convert_extern` and 0x1b `extern.convert_any` are DELIBERATELY ABSENT.
+                //
+                // They are in scope and must eventually exist — but implementing them here, first,
+                // opens a silent-wrong-answer hole. An `externref` crosses the C ABI as a raw
+                // pass-through `uint64_t` (`wasmrt.h`), while `ref_matches`' `Any` arm treats any
+                // non-null, non-i31 reference as a `gc_heap` INDEX. The two share one numeric space,
+                // so once a host handle can be converted to `anyref`, host handle 2 reads as GC
+                // object #2 — a type-confused read that the cast believes it verified.
+                //
+                // 🔒 **Fix the representation FIRST, then add these two arms.** `Value` is a `u128`
+                // and every reference form lives in the low 64 bits (`NULL_REF = u64::MAX`,
+                // `I31_TAG = 1<<63`, a funcref's owner in 62..32, a GC index bare), so the high 64
+                // bits are free for an externref tag — no widening required, and the C ABI's
+                // pass-through contract can be preserved by tagging on entry and stripping on exit
+                // in `wasmrt-capi`'s two conversion functions. Reported by the wazmrt sweep and
+                // recorded in `cmem/known-issues.md`; unreachable today ONLY because of this gap.
                 0x1c => Instr { offset: 0, op: Op::RefI31, imm: Imm::None },
                 0x1d => Instr { offset: 0, op: Op::I31GetS, imm: Imm::None },
                 0x1e => Instr { offset: 0, op: Op::I31GetU, imm: Imm::None },

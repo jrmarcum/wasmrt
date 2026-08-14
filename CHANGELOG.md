@@ -1,10 +1,14 @@
 # Changelog
 
 All notable changes to wasmrt are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and wasmrt uses a **port-progress**
-versioning scheme: `0.x` releases climb toward **1.0.0 = full parity** with the
-[`wazmrt`](https://github.com/jrmarcum/wazmrt) reference oracle. See [ROADMAP.md](ROADMAP.md) for the
-stage ladder and the live use-case matrix.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and wasmrt uses a **progress** versioning
+scheme: `0.x` releases climb toward **1.0.0 = complete on wasmrt's own terms** — every in-scope proposal
+implemented, conformance at its achievable ceiling, the C ABI stable, and the size and speed numbers
+measured and defended. See [ROADMAP.md](ROADMAP.md) for the stage ladder and the live use-case matrix.
+
+*Through 0.9.0 the target was phrased as full parity with the [`wazmrt`](https://github.com/jrmarcum/wazmrt)
+reference oracle; that anchor was retired 2026-08-11 when the two runtimes became independent entrants
+for the same inclusion slots.*
 
 The three crates share one version and are released together: `wasmrt` (CLI), `wasmrt-core` (library),
 `wasmrt-capi` (C ABI).
@@ -15,6 +19,22 @@ _Next: **0.10.0 (T9)** — the correctness punch-list, tail calls, licensing and
 measurement, and module pin verification. Then **0.11.0 (T10)** — a bug hunt and code-hygiene pass; **0.12.0 (T11)** — an optimization review of the shipped binaries and the C ABI; and **0.13.0 (T12)** — a security review of the penetration surfaces, with recommended mitigations._
 
 ### Fixed
+
+- **Cross-module reference IDENTITY: a GC object's type index was read against the READER's
+  module.** `gc_heap` is shared across a linking group, so objects cross module boundaries — and
+  `type_index` is numbered by whichever module ALLOCATED the object. Reading it against the testing
+  module was wrong in **both** directions: `ref.test` accepted a structurally different type and
+  rejected the correct one. The accept side is the dangerous one — a `ref.cast` that wrongly succeeds
+  lets the following `struct.get` read a field at another type's width and return a silently wrong
+  value from a check that believed it had verified the type. `HeapObject` now carries its allocating
+  instance (free — it lands in existing padding, pinned by a `size_of` assertion), and a concrete
+  cross-instance match resolves both sides through the store-wide type registry.
+  **Reported by the wazmrt project**, with a committed reproducer.
+
+- **The same defect in the funcref path**, which the report did not cover and the spec testsuite does
+  not reach: `ref_matches` fetched a funcref's type index from its owning module and then compared it
+  against the testing module anyway — logged in its own comment as "approximate". Enumerating every
+  type-identity comparison in the engine found two of four sites wrong.
 
 - **Every CLI path that loads a module now accepts `.wat` text, not only `.wasm` binaries.**
   `wasmrt run prog.wat f`, `wasmrt wasi prog.wat` and `wasmrt prog.wat` assemble the text first and

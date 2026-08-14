@@ -27,10 +27,10 @@ than the thing the consumer uses.
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — sixteen passes landed 2026-08-11, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — seventeen passes landed 2026-08-14, unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,113 / 385 / 2,163 of 62,498),
-**456 workspace tests** (418 core + 28 capi + 10 CLI), Miri 28/28, no file lost a pass in any pass. The `.wat`
+**457 workspace tests** (419 core + 28 capi + 10 CLI), Miri 28/28, no file lost a pass in any pass. The `.wat`
 corpus is a clean **533/533** through assemble→decode→validate, and **every CLI command that takes a module
 now accepts that `.wat` directly** — `run`, `wasi` and summarize assemble text before decoding, through one
 shared loader. ⚠️⚠️ **That gap had been open for the whole port and was found by an owner QUESTION, not a

@@ -205,9 +205,21 @@ impl Default for ResourceLimits {
 /// A heap-allocated GC object: its declared type index (RTT) + its struct fields / array
 /// elements. One `Value` (128-bit) per field — enough for every field type incl. `v128`.
 struct HeapObject {
+    /// The instance that ALLOCATED this object. `type_index` is numbered in *that* instance's
+    /// module, so without this an object crossing a link is read against the wrong type table.
+    ///
+    /// ⚠️ The same rule a funcref already encodes by packing its owner into bits 62..32
+    /// (see `ref_matches`). `gc_heap` lives on `Pools`, shared by every instance in a linking group,
+    /// so objects genuinely cross modules and a bare index decided nothing.
+    owner: u32,
     type_index: u32,
     fields: Vec<Value>,
 }
+
+// `owner` is FREE: it lands in the padding `Vec`'s 8-byte alignment already forced after a bare
+// `u32`. Pinned so that a future change making it cost real memory fails the build instead of
+// quietly growing every GC object — the same guard `Instr`'s `offset` carries.
+const _: () = assert!(core::mem::size_of::<HeapObject>() == core::mem::size_of::<Vec<Value>>() + 8);
 
 /// A thrown exception in flight: the tag it carries and its value payload. Owned (a `Vec`
 /// per exception) rather than arena-allocated — it frees when the last holder drops.
@@ -326,6 +338,17 @@ struct Pools {
     elem_dropped: Vec<bool>,
     /// GC heap: one entry per allocated struct/array; a GC reference value is its index here.
     /// No collector — objects live for the instance's lifetime, bounded by `MAX_GC_OBJECTS`.
+    ///
+    /// 🔒 **ONE heap per store (per linking group), NOT one per instance — do not "consolidate" this
+    /// onto `InstanceData`.** A GC reference is a bare index into this vector, so if each instance
+    /// owned a heap, the same index would select a *different object* on the other side of a link:
+    /// object substitution, silently, with no type error. Keeping the heap store-wide makes an index
+    /// mean one thing everywhere, which is why that whole defect class cannot occur here.
+    ///
+    /// ⚠️ It is *this* invariant that makes [`HeapObject::owner`] necessary rather than redundant:
+    /// one shared heap means objects genuinely cross module boundaries, so each one must carry the
+    /// instance whose type table numbers its `type_index`. The two decisions are a pair — a shared
+    /// heap without the owner tag is the cross-module type-confusion bug fixed 2026-08-14.
     gc_heap: Vec<HeapObject>,
     /// Exceptions boxed so they can be `exnref` values (`catch_ref`/`catch_all_ref` push one,
     /// `throw_ref` consumes one) — an `exnref` value is an index here. Only the `_ref` forms
@@ -2860,7 +2883,7 @@ fn run(
                         .map(|(k, f)| pack_field(f.storage, frame.vstack[base + k]))
                         .collect();
                     frame.vstack.truncate(base);
-                    let r = alloc_object(store, ti, obj)?;
+                    let r = alloc_object(store, ctx.inst, ti, obj)?;
                     frame.push(r);
                     pc += 1;
                 }
@@ -2870,7 +2893,7 @@ fn run(
                     };
                     let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
                     let obj: Vec<Value> = sf.iter().map(|f| default_field(f.storage)).collect();
-                    let r = alloc_object(store, ti, obj)?;
+                    let r = alloc_object(store, ctx.inst, ti, obj)?;
                     frame.push(r);
                     pc += 1;
                 }
@@ -2922,7 +2945,7 @@ fn run(
                     let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
                     let len = frame.pop_i32() as u32 as usize;
                     let init = pack_field(f.storage, frame.pop());
-                    let r = alloc_object(store, ti, vec![init; len])?;
+                    let r = alloc_object(store, ctx.inst, ti, vec![init; len])?;
                     frame.push(r);
                     pc += 1;
                 }
@@ -2932,7 +2955,7 @@ fn run(
                     };
                     let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
                     let len = frame.pop_i32() as u32 as usize;
-                    let r = alloc_object(store, ti, vec![default_field(f.storage); len])?;
+                    let r = alloc_object(store, ctx.inst, ti, vec![default_field(f.storage); len])?;
                     frame.push(r);
                     pc += 1;
                 }
@@ -2946,7 +2969,7 @@ fn run(
                         .map(|k| pack_field(f.storage, frame.vstack[base + k]))
                         .collect();
                     frame.vstack.truncate(base);
-                    let r = alloc_object(store, type_index, obj)?;
+                    let r = alloc_object(store, ctx.inst, type_index, obj)?;
                     frame.push(r);
                     pc += 1;
                 }
@@ -2991,7 +3014,7 @@ fn run(
                         return Err(Trap::UnsupportedInstruction);
                     };
                     let v = frame.pop();
-                    frame.push_i32(i32::from(ref_matches(ctx.module, ctx.code, store, v, rt)));
+                    frame.push_i32(i32::from(ref_matches(ctx.module, ctx.code, store, ctx.inst, v, rt)));
                     pc += 1;
                 }
                 Op::RefCastOp => {
@@ -2999,7 +3022,7 @@ fn run(
                         return Err(Trap::UnsupportedInstruction);
                     };
                     let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?; // peek — value stays
-                    if !ref_matches(ctx.module, ctx.code, store, v, rt) {
+                    if !ref_matches(ctx.module, ctx.code, store, ctx.inst, v, rt) {
                         return Err(Trap::CastFailure);
                     }
                     pc += 1;
@@ -3009,7 +3032,7 @@ fn run(
                         return Err(Trap::UnsupportedInstruction);
                     };
                     let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
-                    pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
+                    pc = if ref_matches(ctx.module, ctx.code, store, ctx.inst, v, dst) {
                         frame.branch(label)?
                     } else {
                         pc + 1
@@ -3020,7 +3043,7 @@ fn run(
                         return Err(Trap::UnsupportedInstruction);
                     };
                     let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
-                    pc = if ref_matches(ctx.module, ctx.code, store, v, dst) {
+                    pc = if ref_matches(ctx.module, ctx.code, store, ctx.inst, v, dst) {
                         pc + 1
                     } else {
                         frame.branch(label)?
@@ -3428,12 +3451,19 @@ fn gc_object_index(store: &Pools, r: Value) -> Result<usize> {
 }
 
 /// Allocate a GC object, returning its reference value (its heap index).
-fn alloc_object(store: &mut Pools, type_index: u32, fields: Vec<Value>) -> Result<Value> {
+///
+/// `owner` is the allocating instance: `type_index` means nothing without it once the object can be
+/// read by another module (see [`HeapObject::owner`]).
+fn alloc_object(store: &mut Pools, owner: usize, type_index: u32, fields: Vec<Value>) -> Result<Value> {
     let idx = store.gc_heap.len();
     if idx >= store.limits.max_gc_objects {
         return Err(Trap::GcHeapExhausted);
     }
-    store.gc_heap.push(HeapObject { type_index, fields });
+    store.gc_heap.push(HeapObject {
+        owner: owner as u32,
+        type_index,
+        fields,
+    });
     Ok(idx as Value)
 }
 
@@ -3461,10 +3491,20 @@ fn head_matches(module: &Module, actual: RefHeap, actual_ti: Option<u32>, target
 }
 
 /// Does GC reference value `v` match target reference type `rt` (`ref.test`/`ref.cast`)?
-/// `code` is needed for the `funcref` case: the value carries its owning instance, and a funcref's
-/// TYPE lives in that instance's module, not the testing one. Reading it from `module` gave the wrong
-/// answer for any reference that arrived through a shared table.
-fn ref_matches(module: &Module, code: &[InstanceData], store: &Pools, v: Value, rt: RefType) -> bool {
+///
+/// ⚠️ **A reference's TYPE lives in the module that created it, never in the testing one.** `code` and
+/// `inst` are what make that resolvable: a funcref carries its owning instance in its bits, and a GC
+/// object carries it in [`HeapObject::owner`]. Reading either index against `module` answers a
+/// different question than the one asked, and answers it *plausibly* — see the two-directional failure
+/// pinned by `tests/gc_cross_module_type_index.wast`.
+fn ref_matches(
+    module: &Module,
+    code: &[InstanceData],
+    store: &Pools,
+    inst: usize,
+    v: Value,
+    rt: RefType,
+) -> bool {
     if v == NULL_REF {
         return rt.nullable;
     }
@@ -3482,22 +3522,87 @@ fn ref_matches(module: &Module, code: &[InstanceData], store: &Pools, v: Value, 
             let Some(obj) = store.gc_heap.get(idx) else {
                 return false;
             };
-            let kind = match module.comp_types.get(obj.type_index as usize).map(CompType::kind) {
+            let owner = obj.owner as usize;
+            // The object's own module — the only place its `type_index` means anything.
+            let owner_module = match code.get(owner) {
+                Some(d) => &d.module,
+                // No such instance: refuse rather than fall back to `module`, which is precisely the
+                // substitution this function exists to prevent.
+                None => return false,
+            };
+            let kind = match owner_module
+                .comp_types
+                .get(obj.type_index as usize)
+                .map(CompType::kind)
+            {
                 Some(CompKind::Struct) => RefHeap::Struct,
                 Some(CompKind::Array) => RefHeap::Array,
                 _ => RefHeap::Func,
             };
-            head_matches(module, kind, Some(obj.type_index), rt.heap)
+            // An ABSTRACT target (`any`, `eq`, `struct`, `array`, `i31`, `none`) asks only what shape
+            // the object has, which `kind` already answers — no type index is involved, so this is
+            // module-independent and needs no registry.
+            let HeapType::Concrete(t) = rt.heap else {
+                return head_matches(module, kind, None, rt.heap);
+            };
+            if owner == inst {
+                // Same instance: the two indices are in one numbering, so the cheap module-local
+                // subtype check is exact. This is the overwhelmingly common case.
+                return module.is_subtype(obj.type_index, t);
+            }
+            // Across a link the two indices are in different modules and cannot be compared directly.
+            // Resolve BOTH to store-wide ids and ask the registry — the same mechanism import
+            // matching and `call_indirect` use, and the reason wasmrt can answer this exactly where a
+            // runtime without a store-wide registry has to settle for a loud false negative.
+            match (
+                owner_module
+                    .comp_types
+                    .get(obj.type_index as usize)
+                    .and(code[owner].type_ids.get(obj.type_index as usize).copied()),
+                code.get(inst)
+                    .and_then(|d| d.type_ids.get(t as usize).copied()),
+            ) {
+                (Some(obj_id), Some(target_id)) => store.types.is_subtype(obj_id, target_id),
+                // A hand-built `Module` never joined the registry, so one side has no store-wide id.
+                // Refuse. ⚠️ The direction matters and is not a style choice: the ACCEPT side is the
+                // dangerous one — a wrongly-accepted `ref.cast` lets the following `struct.get` read a
+                // field at another type's width and return a silently wrong value, whereas a wrongly
+                // refused cast traps loudly at the cast itself (`best-practices.md`: which direction to
+                // err in is a property of the consequence).
+                _ => false,
+            }
         }
         RefHeap::Func => {
-            // Resolve the funcref's type index in the module that DEFINED it, then ask the testing
-            // module whether that satisfies the target. Cross-instance concrete comparison remains
-            // approximate -- the type-registry ids would decide it exactly -- and is logged.
+            // Resolve the funcref's type index in the module that DEFINED it — the value carries its
+            // owning instance in bits 62..32 precisely so this is possible.
             let owner = funcref_instance(v);
             let ti = code
                 .get(owner)
                 .and_then(|d| defined_func_type(&d.module, funcref_index(v)));
-            head_matches(module, RefHeap::Func, ti, rt.heap)
+            // An abstract target needs no index: every non-null funcref is a `func`.
+            let HeapType::Concrete(t) = rt.heap else {
+                return head_matches(module, RefHeap::Func, ti, rt.heap);
+            };
+            let Some(ti) = ti else {
+                // An IMPORTED function has no defining type index in its own module, so there is
+                // nothing to resolve. Refuse, for the same reason as above.
+                return false;
+            };
+            if owner == inst {
+                return module.is_subtype(ti, t);
+            }
+            // ⚠️ This arm used to stop one step short: it fetched `ti` from the owner's module and
+            // then compared it against the TESTING module's table anyway — correct about where the
+            // index came from, wrong about where it was read. It was logged as "approximate". It is
+            // the same defect the GC arm above carried, and the registry decides both exactly.
+            match (
+                code[owner].type_ids.get(ti as usize).copied(),
+                code.get(inst)
+                    .and_then(|d| d.type_ids.get(t as usize).copied()),
+            ) {
+                (Some(got_id), Some(want_id)) => store.types.is_subtype(got_id, want_id),
+                _ => false,
+            }
         }
         _ => head_matches(module, RefHeap::Extern, None, rt.heap),
     }
@@ -5221,7 +5326,7 @@ fn eval_const_expr(
                             .map(|(k, f)| pack_field(f.storage, stack[base + k]))
                             .collect();
                         stack.truncate(base);
-                        let v = alloc_object(pools, ti, obj)?;
+                        let v = alloc_object(pools, inst, ti, obj)?;
                         stack.push(v);
                     }
                     // struct.new_default t
@@ -5229,7 +5334,7 @@ fn eval_const_expr(
                         let ti = r.read_var_u32()?;
                         let sf = module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
                         let obj: Vec<Value> = sf.iter().map(|f| default_field(f.storage)).collect();
-                        let v = alloc_object(pools, ti, obj)?;
+                        let v = alloc_object(pools, inst, ti, obj)?;
                         stack.push(v);
                     }
                     // array.new t — (init, len)
@@ -5238,7 +5343,7 @@ fn eval_const_expr(
                         let f = module.array_field(ti).ok_or(Trap::UndefinedType)?;
                         let n = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?) as u32 as usize;
                         let init = pack_field(f.storage, stack.pop().ok_or(Trap::ConstantExpr)?);
-                        let v = alloc_object(pools, ti, vec![init; n])?;
+                        let v = alloc_object(pools, inst, ti, vec![init; n])?;
                         stack.push(v);
                     }
                     // array.new_default t — (len)
@@ -5246,7 +5351,7 @@ fn eval_const_expr(
                         let ti = r.read_var_u32()?;
                         let f = module.array_field(ti).ok_or(Trap::UndefinedType)?;
                         let n = as_i32(stack.pop().ok_or(Trap::ConstantExpr)?) as u32 as usize;
-                        let v = alloc_object(pools, ti, vec![default_field(f.storage); n])?;
+                        let v = alloc_object(pools, inst, ti, vec![default_field(f.storage); n])?;
                         stack.push(v);
                     }
                     // array.new_fixed t n — n elements already on the stack.
@@ -5260,7 +5365,7 @@ fn eval_const_expr(
                             .map(|&v| pack_field(f.storage, v))
                             .collect();
                         stack.truncate(base);
-                        let v = alloc_object(pools, ti, elems)?;
+                        let v = alloc_object(pools, inst, ti, elems)?;
                         stack.push(v);
                     }
                     // ref.i31 — unboxed, so no allocation. `NULL_REF` is checked before `I31_TAG`

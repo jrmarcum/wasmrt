@@ -1,5 +1,63 @@
 # Known Issues
 
+## ✅ RESOLVED 2026-08-14 — all three wazmrt-reported findings closed
+
+The report below is kept verbatim as the record; this is what was done about it.
+
+**#1 — the real bug: FIXED, and it was worse than reported.** `HeapObject` now carries `owner`, the
+allocating instance, exactly as a funcref packs its owner into bits 62..32. `ref_matches` takes the
+testing instance, resolves an abstract target from the object's shape alone (no index involved), and
+for a **concrete** target either takes the cheap module-local path (`owner == inst`, the common case,
+exact) or resolves **both** sides to store-wide ids and asks `Pools.types` — the same mechanism import
+matching and `call_indirect` already used. `owner` is **free**: it lands in padding the `Vec`'s
+alignment already forced, pinned by a `size_of` assertion so a future change that makes it cost real
+memory fails the build. Reproducer now 3/3.
+
+🆕 **The sweep found a SECOND site the report did not: the `Func` arm of the same function.** It had
+learned half the rule — it fetched a funcref's type index from the owner's module and then compared it
+against the **testing** module's table anyway. Its own comment called this "approximate" and logged it.
+That is the identical defect one level subtler, and **the full spec testsuite never moved when it was
+fixed**: nothing in 62,498 assertions casts a funcref to a concrete type across a module boundary. It
+is now pinned by `tests/funcref_cross_module_type_index.wast`.
+
+⚠️ **This is exactly what the wazmrt note warned about** — *"wasmrt built the registry and wired it
+into `call_indirect` only; if you build it, wire it into every consumer at once."* Acting on that,
+every type-identity comparison in the engine was enumerated rather than reasoned about: import
+matching ✅, `call_indirect` ✅, `ref_matches`/Any 🔴→✅, `ref_matches`/Func 🔴→✅. **Two of four were
+wrong, and only one of the two was in the report.**
+
+**#2 — the immunity: PROTECTED.** `Pools.gc_heap`'s doc comment now states as a 🔒 invariant that the
+heap is one-per-store and must not be "consolidated" onto `InstanceData`, with the reason (a bare index
+would select a different object across a link — object substitution, silently). It also records that
+this is *why* `HeapObject::owner` is necessary rather than redundant: the two decisions are a pair.
+
+**#3 — the latent externref/GC overlap: BLOCKED AT THE POINT OF ENTRY, not just noted.** The absent
+`0xfb 0x1a`/`0x1b` arms in `opcode.rs` now carry a ⚠️⚠️ block explaining that implementing
+`any.convert_extern`/`extern.convert_any` without first changing the representation opens the hole, and
+naming the fix: **`Value` is a `u128` and every reference form lives in the low 64 bits**
+(`NULL_REF = u64::MAX`, `I31_TAG = 1<<63`, funcref owner in 62..32, GC index bare), so the high 64 bits
+are free for an externref tag — **no widening required**, and the C ABI's pass-through contract survives
+by tagging on entry and stripping on exit in `wasmrt-capi`'s two conversion functions. The warning sits
+where an implementer will physically be, not in a document they might not read. **Representation first,
+then the opcodes.**
+
+🆕 **A gate the reproducers themselves needed.** Both `.wast` files were green and **nothing ran them**
+except a human typing `wasmrt wast tests/`. `crates/wasmrt-core/tests/regression_wast.rs` now runs every
+`tests/*.wast` under `cargo test`, asserts zero failures **and zero skips** (a construct that regresses
+into "unsupported" is silently not a pass), and fails if the directory is empty so the gate cannot pass
+vacuously. Any future reproducer dropped in `tests/` is covered without anyone remembering to wire it
+up. *This is wazmrt's* **"a gate only gates the commits that RUN it — a gate with no trigger is a
+preference too"** *applied to my own work, minutes after reading it.*
+
+**Verification.** All four changes mutation-verified with the mutation **confirmed applied** before the
+result was believed (§4.2a): reverting `owner == inst` to `true` reproduces the original failure in both
+reproducers (2 failures each, while the abstract `isFunc` assertion correctly still passes) and makes
+`regression_wast` fail. Spec suite **byte-identical** at 62,113 / 385 / 2,163 — the correct outcome, and
+the same reason as the T9 `InstanceId` fix: this is a cross-module path the suite cannot reach.
+**457 tests** (was 456), clippy clean.
+
+---
+
 ## 🔴 REPORTED FROM wazmrt, 2026-08-14 — GC reference identity across a link
 
 wazmrt hit a cross-module GC-reference defect, fixed it, and swept for the same class here. Three

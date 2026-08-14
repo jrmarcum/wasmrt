@@ -20,7 +20,7 @@ the universalWasmLoader-\* runtimes, so parity with one is not evidence about th
    (`best-practices.md`).
 3. **The wasmtk WASI corpus** — real compiled guests, which is the only thing that exercises the WASI
    surface end to end.
-4. **wasmrt's own tests** — 456 of them, for the internal invariants none of the above can reach
+4. **wasmrt's own tests** — 457 of them, for the internal invariants none of the above can reach
    (handle tagging, store isolation, encoding invariants, the `size_of` pins).
 
 **Tail calls** (`return_call`/`return_call_indirect`) were always conformed this way — they were the one
@@ -397,7 +397,7 @@ assemble failures where there was 1, which is exactly long enough to start diagn
 
 ## Current test state (2026-08-11, the CLI `.wat` divergence closed)
 
-**456 workspace tests, all green** (418 core + 28 capi + 10 CLI integration), clippy clean on all four
+**457 workspace tests, all green** (419 core + 28 capi + 10 CLI integration), clippy clean on all four
 build surfaces; the `.wat` corpus is a clean **533/533** through assemble→decode→validate.
 
 The six new CLI tests pin that `run`, `wasi` and summarize all accept `.wat`, that binaries still work,

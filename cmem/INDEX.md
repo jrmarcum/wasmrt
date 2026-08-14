@@ -43,13 +43,56 @@ under owner authorization. Tail calls (`return_call`/`return_call_indirect`) wer
 wasmrt-target feature with **no** oracle and were planned against wasmtime + the spec testsuite — which
 is now simply how everything is done. memory64 **is** in scope (owner, 2026-07-27).*
 
-## ◐ T9 IN PROGRESS (2026-08-11) — sixteen passes landed, unreleased
+## ◐ T9 IN PROGRESS (2026-08-14) — seventeen passes landed, unreleased
 
 Working tree is **ahead of the published v0.9.0**. Suite **62,113 / 385 / 2,163 — 99.4%** of 62,498
 adjudicated; the **`.wat` corpus is a clean 533/533** through assemble→decode→validate;
-**456 tests** (418 core + 28 capi + 10 CLI); clippy, all four surfaces, the C-ABI gate
+**457 tests** (419 core + 28 capi + 10 CLI); clippy, all four surfaces, the C-ABI gate
 (74/74 + `c_smoke`, now asserting real trap frames) and Miri (28/28) green. **No file lost a single
-pass** in any of the sixteen passes — the check that matters whenever skips convert into verdicts.
+pass** in any of the seventeen passes — the check that matters whenever skips convert into verdicts.
+
+### 2026-08-14 (seventeenth) — cross-module reference IDENTITY, reported from wazmrt
+
+wazmrt hit a cross-module GC-reference defect, fixed it, swept for the same class here and **filed a
+report in this repo** (`known-issues.md`, commit `30ef881`) with a committed reproducer. All three
+findings are now closed — and the sweep found **a second defective site the report did not**.
+
+**The bug:** a GC object's `type_index` was read against the **reader's** module. `gc_heap` lives on
+`Pools`, shared across a linking group, so objects genuinely cross modules — and the index that
+describes one meant something different on the other side. Wrong in **both** directions: it accepted a
+`ref.cast` to a structurally different type (after which `struct.get` reads a field at another type's
+width — a silent wrong value from a check that believed it had verified the type) and rejected the
+correct one. Fix: `HeapObject` carries its allocating instance, exactly as a funcref packs its owner in
+bits 62..32, and a concrete cross-instance match resolves **both** sides through the store-wide registry.
+`owner` is **free** — it lands in padding the `Vec`'s alignment already forced, pinned by `size_of`.
+
+🆕 **The second site: the `Func` arm of the same function.** It had already been fixed once for this
+class — it fetched the funcref's type index from the owner's module and then compared it in the
+**testing** module anyway. Its own comment called that **"approximate"**. ⚠️⚠️ **A defect described in a
+comment is still a defect; the hedging word was doing the concealing.** The full spec suite never moved
+when it was fixed, because nothing in 62,498 assertions casts a funcref to a concrete type across a
+module boundary.
+
+⚠️ **The generalization is `best-practices.md` §3.9** — *a shared registry wired into ONE consumer is a
+bug in the others.* Prompted by wazmrt's own note (*"you built the registry and wired it into
+`call_indirect` only"*), every type-identity comparison was **enumerated instead of reasoned about**:
+import matching ✅, `call_indirect` ✅, `ref_matches`/Any 🔴, `ref_matches`/Func 🔴. **Two of four wrong,
+and only one was in the report.**
+
+Also: the shared-heap **immunity is now a stated 🔒 invariant** on `gc_heap` (do not consolidate it onto
+`InstanceData`); and the latent **externref/GC index overlap** is blocked *at the point of entry* — the
+absent `0xfb 0x1a`/`0x1b` opcode arms carry the warning and the fix (`Value` is a `u128` with the high
+64 bits free for a tag, so **no widening is needed**), so an implementer meets it where they will be.
+
+🆕 **A gate the reproducers themselves needed**: both `.wast` files were green and **nothing ran them**.
+`regression_wast.rs` now runs every `tests/*.wast` under `cargo test`, asserting zero failures **and zero
+skips**, failing if the directory is empty. *That is wazmrt's* **"a gate only gates the commits that RUN
+it"** *applied within the hour of reading it* — see §3A, the owner-authorized borrow of wazmrt's
+**method** (not its design; the oracle stays retired).
+
+**457 tests** (was 456). Suite **byte-identical** at 62,113 / 385 / 2,163 — correct, since this is a
+cross-module path the suite cannot reach. All four changes mutation-verified with the mutation
+**confirmed applied** first.
 
 ### 2026-08-11 (sixteenth) — the CLI could not run a `.wat` file at all
 

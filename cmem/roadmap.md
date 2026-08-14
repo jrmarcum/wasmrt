@@ -3,7 +3,7 @@
 ## Status (2026-08-10) — PORT phase; gate OPEN, oracle **RE-BASELINED**. **T0–T8 DONE; T9 IN PROGRESS.**
 
 **Current tree (unreleased, ahead of the published v0.9.0):** suite **62,113 / 385 / 2,163 — 99.4%**
-of 62,498 adjudicated, **456 workspace tests** (418 core + 28 capi + 10 CLI), Miri **28/28**. The
+of 62,498 adjudicated, **457 workspace tests** (419 core + 28 capi + 10 CLI), Miri **28/28**. The
 533-file `.wat` corpus is a **clean 533/533** through assemble→decode→validate. T9's first pass landed
 T9a #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **Fifteen further passes have landed**, closing T9a **#4 (both halves, via a
