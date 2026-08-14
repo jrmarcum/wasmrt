@@ -2155,6 +2155,18 @@ fn call_function(
     if depth > store.limits.max_call_depth {
         return Err(Trap::CallStackExhausted);
     }
+    // 🔒 **The tail-call loop.** A `return_call*` does not recurse: `run` reports its intended callee
+    // through `tail_out` and unwinds, and control comes back HERE to start the next function in the
+    // same native frame at the same `depth`. That is what makes a tail call a tail call — an
+    // unbounded chain uses constant native stack, and `max_call_depth` is never approached because
+    // the chain never deepens. Everything below reads as before on the first iteration.
+    let mut inst = inst;
+    let mut func_index = func_index;
+    // `None` until a tail call happens, so an ordinary call still borrows the caller's slice and
+    // pays no extra allocation. Only a tail call materializes a new argument vector.
+    let mut tail_args: Option<Vec<Value>> = None;
+    loop {
+    let args: &[Value] = tail_args.as_deref().unwrap_or(args);
     let data = code.get(inst).ok_or(Trap::UndefinedFunc)?;
     // Imported functions occupy the LOW indices of the function space, so an index below
     // the import count is an import and everything above it shifts down by that count.
@@ -2205,7 +2217,8 @@ fn call_function(
     // The frame is recorded HERE, not inside `run`, because this is the level that knows which
     // function is running: a `FuncBody` has no index of its own. `run` reports only the position.
     let mut pc = 0usize;
-    if let Err(e) = run(&mut frame, &ctx, store, depth, &mut pc) {
+    let mut tail: Option<TailCall> = None;
+    if let Err(e) = run(&mut frame, &ctx, store, depth, &mut pc, &mut tail) {
         // `pc` can sit one past the end if the body ran off its own `end`; clamp rather than
         // index, so a malformed frame degrades to a missing offset instead of a panic.
         let offset = body
@@ -2222,9 +2235,20 @@ fn call_function(
         return Err(e);
     }
 
+    // A tail call: this frame is GONE. Rebind and go round — deliberately not a recursive call,
+    // and deliberately without `depth + 1`. ⚠️ The backtrace consequence is correct and worth
+    // stating: a replaced frame leaves no trace, so a trap deep in a tail-call chain reports the
+    // function that trapped and its real caller, not the thousands of frames that tail-called
+    // through. That is what the frame having been replaced MEANS; a runtime that listed them all
+    // would be describing a stack it did not keep.
+    if let Some(tc) = tail {
+        return call_function(code, host_funcs, store, tc.inst, tc.func, &tc.args, depth + 1);
+    }
+
     let n = body.ty.results.len();
     let base = frame.stack_base(n)?;
-    Ok(frame.vstack[base..].to_vec())
+    return Ok(frame.vstack[base..].to_vec());
+    }
 }
 
 /// Run a frame to completion, reporting through `pc_out` **where** it stopped.
@@ -2232,12 +2256,19 @@ fn call_function(
 /// `pc_out` is written on every path, success or failure, and is what lets [`call_function`] name
 /// the trapping instruction. It is only meaningful on the error path; on success it is simply the
 /// end of the body.
+///
+/// `tail_out` is written **only** when the body ended in a tail call, and is how the frame gets
+/// replaced rather than stacked — see [`TailCall`]. An out-parameter rather than a richer return
+/// type on purpose: this function's return value is on the hot path of every call in the engine,
+/// and the one previous attempt to thread state through it cost 3.6% on the steady-state benchmark
+/// (see the note on `pc` below). Writing it on a cold path costs nothing.
 fn run(
     frame: &mut Frame,
     ctx: &Ctx,
     store: &mut Pools,
     depth: usize,
     pc_out: &mut usize,
+    tail_out: &mut Option<TailCall>,
 ) -> Result<()> {
     let mut pc = 0usize;
     // The loop is a closure, called once, purely so `pc` can stay a plain local while still being
@@ -2488,6 +2519,21 @@ fn run(
                 }
                 Op::Return => pc = ir.len(),
 
+                // §4.4.8 `return_call x`. The frame is REPLACED: take the callee's arguments and end
+                // the body, reporting the target rather than calling it. `call_function` loops.
+                Op::ReturnCall => {
+                    let Imm::Func(f) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let ft = ctx.module.func_type(f).ok_or(Trap::UndefinedFunc)?;
+                    let base = frame.stack_base(ft.params.len())?;
+                    *tail_out = Some(TailCall {
+                        inst: ctx.inst,
+                        func: f,
+                        args: frame.vstack[base..].to_vec(),
+                    });
+                    pc = ir.len();
+                }
                 Op::Call => {
                     let Imm::Func(f) = instr.imm else {
                         return Err(Trap::UnsupportedInstruction);
@@ -2622,6 +2668,20 @@ fn run(
                         .and_then(|d| d.module.func_type(f))
                         .ok_or(Trap::UndefinedFunc)?;
                     let base = frame.stack_base(ft.params.len())?;
+                    // ⚠️ `return_call_ref` used to be implemented here as "call, then jump to the end
+                    // of the body" — which returns the right answer and is NOT a tail call: it
+                    // recursed into `call_function`, so the native stack grew exactly as it does for
+                    // an ordinary call, and unbounded mutual recursion still exhausted it. The whole
+                    // point of the proposal is that it does not. It now reports the target instead.
+                    if instr.op == Op::ReturnCallRef {
+                        *tail_out = Some(TailCall {
+                            inst: owner,
+                            func: f,
+                            args: frame.vstack[base..].to_vec(),
+                        });
+                        pc = ir.len();
+                        continue;
+                    }
                     let args = frame.vstack[base..].to_vec();
                     let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
                         Ok(r) => r,
@@ -2632,15 +2692,14 @@ fn run(
                     };
                     frame.vstack.truncate(base);
                     frame.vstack.extend_from_slice(&results);
-                    pc = if instr.op == Op::ReturnCallRef {
-                        ir.len()
-                    } else {
-                        pc + 1
-                    };
+                    pc += 1;
                 }
 
                 // --- call_indirect: table lookup + runtime type check ---
-                Op::CallIndirect => {
+                // `return_call_indirect` shares every step — the table read, the null and bounds
+                // traps, and the type-identity check — and differs only in what it does with the
+                // resolved target, so it is deliberately the SAME arm rather than a copy.
+                Op::CallIndirect | Op::ReturnCallIndirect => {
                     let Imm::CallIndirect(ci) = &instr.imm else {
                         return Err(Trap::UnsupportedInstruction);
                     };
@@ -2701,6 +2760,18 @@ fn run(
                         return Err(Trap::IndirectTypeMismatch);
                     }
                     let base = frame.stack_base(got.params.len())?;
+                    // The tail form replaces the frame instead of stacking one — and note it inherits
+                    // the cross-instance `owner` above, so a tail call THROUGH a shared table lands in
+                    // the reference's own instance, same as the non-tail form.
+                    if instr.op == Op::ReturnCallIndirect {
+                        *tail_out = Some(TailCall {
+                            inst: owner,
+                            func: f,
+                            args: frame.vstack[base..].to_vec(),
+                        });
+                        pc = ir.len();
+                        continue;
+                    }
                     let args = frame.vstack[base..].to_vec();
                     // Into the funcref's OWN instance, so the callee runs against its own memory,
                     // globals and tables. `ctx.inst` here was the silent-wrong-call.
@@ -3448,6 +3519,26 @@ fn gc_object_index(store: &Pools, r: Value) -> Result<usize> {
         return Err(Trap::GcOutOfBounds);
     }
     Ok(idx)
+}
+
+/// A pending **tail call**: the body ended by handing control to another function rather than
+/// returning to its own caller.
+///
+/// ⚠️ This type is the whole point of the tail-call proposal. `return_call f` must **replace** the
+/// current frame, not stack a new one on top of it — the feature exists so that mutual recursion can
+/// run unbounded, which is exactly what a "call then return" implementation fails to deliver while
+/// still producing correct answers on every conformance test. So instead of `run` recursing into
+/// `call_function`, it *reports* the intended callee and unwinds; [`call_function`] loops, reusing
+/// its own native stack frame. Native stack depth stays constant however long the chain runs.
+struct TailCall {
+    /// The instance to run in — a tail call can cross a module boundary, and the callee must run
+    /// against its own memory and globals like any other cross-instance call.
+    inst: usize,
+    /// Index in `inst`'s function space. Imports are resolved by `call_function` on the next
+    /// iteration, which is also what makes a tail call to a *host* function work without a
+    /// special case here.
+    func: u32,
+    args: Vec<Value>,
 }
 
 /// Allocate a GC object, returning its reference value (its heap index).

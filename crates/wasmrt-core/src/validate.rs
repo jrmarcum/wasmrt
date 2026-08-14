@@ -1095,6 +1095,29 @@ impl<'a> FuncValidator<'a> {
             .copied()
             .ok_or(ValidateError::UndefinedLocal)
     }
+    /// §3.3.8: a tail call's callee results must satisfy the **enclosing function's** declared
+    /// results — the callee returns to *our* caller, so our signature fixes the type.
+    ///
+    /// ⚠️ **This is SUBTYPING, not equality**, and getting that wrong is the same mistake this
+    /// project has now made at four sites: `return_call_ref` shipped with an equality check and so
+    /// refused valid modules — `(func (result (ref null $t)))` tail-calling a callee that returns
+    /// `(ref $t)` is legal, because a non-nullable reference is a subtype of the nullable one.
+    /// Equality is wrong in the *refusing* direction here, which is why nothing caught it: a
+    /// rejected valid module is a failing conformance assertion, never a wrong answer.
+    ///
+    /// One authority for all three tail forms. They had three copies of the check, which by this
+    /// project's own history means three copies of whatever is wrong with it.
+    fn check_tail_results(&self, callee: &[V]) -> ValidateResult<()> {
+        if callee.len() != self.results.len()
+            || !callee
+                .iter()
+                .zip(self.results.iter())
+                .all(|(&got, &want)| subtype_of(self.module, got, want))
+        {
+            return Err(ValidateError::TypeMismatch);
+        }
+        Ok(())
+    }
     fn table_elem_type(&self, i: u32) -> ValidateResult<V> {
         self.module
             .tables
@@ -1429,6 +1452,37 @@ impl<'a> FuncValidator<'a> {
                 self.pop_vals(&ft.params)?;
                 self.push_vals(&ft.results);
             }
+            // §3.3.8 tail calls. Two differences from the non-tail twin, and both matter:
+            // the callee's results must satisfy **this function's declared results** (the tail call
+            // returns to *our* caller, so its type is fixed by our signature and not by what is on
+            // the stack), and the instruction ends the block — hence `set_unreachable` rather than
+            // pushing results.
+            Op::ReturnCall => {
+                let ft = self
+                    .module
+                    .func_type(expect_func(&instr.imm)?)
+                    .ok_or(ValidateError::UndefinedFunc)?;
+                self.pop_vals(&ft.params)?;
+                self.check_tail_results(&ft.results)?;
+                self.set_unreachable();
+            }
+            Op::ReturnCallIndirect => {
+                let Imm::CallIndirect(ci) = &instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let tet = self.table_elem_type(ci.table)?;
+                if !subtype_of(self.module, tet, V::FUNCREF) {
+                    return Err(ValidateError::TypeMismatch);
+                }
+                let ft = self
+                    .module
+                    .func_sig(ci.type_index)
+                    .ok_or(ValidateError::UndefinedType)?;
+                self.pop_expect(V::I32)?;
+                self.pop_vals(&ft.params)?;
+                self.check_tail_results(&ft.results)?;
+                self.set_unreachable();
+            }
             Op::CallRef => {
                 let ti = expect_func(&instr.imm)?;
                 let ft = self.module.func_sig(ti).ok_or(ValidateError::UndefinedType)?;
@@ -1441,9 +1495,7 @@ impl<'a> FuncValidator<'a> {
                 let ft = self.module.func_sig(ti).ok_or(ValidateError::UndefinedType)?;
                 self.pop_expect(V::concrete_ref(true, RefHeap::Func, ti))?;
                 self.pop_vals(&ft.params)?;
-                if ft.results.as_slice() != self.results {
-                    return Err(ValidateError::TypeMismatch);
-                }
+                self.check_tail_results(&ft.results)?;
                 self.set_unreachable();
             }
 

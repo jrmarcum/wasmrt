@@ -93,7 +93,12 @@ define_ops! {
         Rethrow = 0x09 => "rethrow", ThrowRef = 0x0a => "throw_ref",
         End = 0x0b => "end", Br = 0x0c => "br", BrIf = 0x0d => "br_if",
         BrTable = 0x0e => "br_table", Return = 0x0f => "return", Call = 0x10 => "call",
-        CallIndirect = 0x11 => "call_indirect", CallRef = 0x14 => "call_ref",
+        CallIndirect = 0x11 => "call_indirect",
+        // Tail calls (§2.4.8). `return_call` takes a funcidx like `call`; `return_call_indirect`
+        // takes (typeidx, tableidx) like `call_indirect` — the immediates are identical to their
+        // non-tail twins, only the frame discipline differs.
+        ReturnCall = 0x12 => "return_call", ReturnCallIndirect = 0x13 => "return_call_indirect",
+        CallRef = 0x14 => "call_ref",
         ReturnCallRef = 0x15 => "return_call_ref", Delegate = 0x18 => "delegate",
         CatchAll = 0x19 => "catch_all", TryTable = 0x1f => "try_table",
         // Parametric. `select` with an explicit result type assembles to `SelectT`, so the
@@ -466,8 +471,8 @@ fn immediate_kind(b: u8) -> ImmKind {
         0x1f => ImmKind::TryTable,                       // try_table
         0x0c | 0x0d | 0x09 | 0x18 => ImmKind::Label,     // br/br_if + legacy rethrow/delegate
         0x0e => ImmKind::BrTable,
-        0x10 => ImmKind::Func,
-        0x11 => ImmKind::CallIndirect,
+        0x10 | 0x12 => ImmKind::Func, // call / return_call (imm = func index)
+        0x11 | 0x13 => ImmKind::CallIndirect, // call_indirect / return_call_indirect
         0x14 | 0x15 => ImmKind::Func, // call_ref / return_call_ref (imm = type index)
         0xd5 | 0xd6 => ImmKind::Label, // br_on_null / br_on_non_null
         0x20..=0x22 => ImmKind::Local,

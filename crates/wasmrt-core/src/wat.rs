@@ -2508,8 +2508,9 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     }
     let op = crate::opcode::Op::from_text_name(&kw).ok_or(Error::UnknownInstr)?;
     use crate::opcode::Op as O;
-    if op == O::CallIndirect {
-        return emit_call_indirect(ctx, l, 1, true).map(|_| ());
+    if op == O::CallIndirect || op == O::ReturnCallIndirect {
+        let opcode = if op == O::CallIndirect { 0x11 } else { 0x13 };
+        return emit_call_indirect(ctx, l, 1, true, opcode).map(|_| ());
     }
     // The cast ops take a **list** immediate — `(ref null? ht)` — which the atom/list split
     // below would otherwise mistake for an operand and try to emit as an instruction.
@@ -2592,6 +2593,8 @@ fn immediate_arity(op: crate::opcode::Op) -> usize {
         O::LocalGet | O::LocalSet | O::LocalTee => 1,
         O::GlobalGet | O::GlobalSet => 1,
         O::Call | O::RefFunc | O::Br | O::BrIf | O::Throw | O::Rethrow => 1,
+        // `return_call x:funcidx` — the tail-call twin of `call`, same immediate (T9f).
+        O::ReturnCall => 1,
         // `call_ref x:typeidx` / `return_call_ref x:typeidx` (function-references). Their absence
         // here made `immediate_arity` return 0, so the assembler emitted the opcode and left `$t`
         // in the token stream — see the emitter arm for what that produced.
@@ -2635,7 +2638,15 @@ fn has_optional_indices(op: crate::opcode::Op) -> bool {
 /// operand sub-expressions that follow (emitted before the opcode).
 ///
 /// Returns the index just past the instruction's forms.
-fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool) -> Result<usize> {
+/// Emit `call_indirect` or its tail twin `return_call_indirect`.
+///
+/// ⚠️ `opcode` is a PARAMETER, not a constant, and that is the whole point. This function once
+/// pushed a hard-coded `0x11`, so routing `return_call_indirect` through it emitted a plain
+/// `call_indirect` — the text said one thing and the module said another. Instance #5 of the
+/// mechanism T10a names: an emitter reconstructing a form from a SUBSET of the parser's facts,
+/// here dropping which instruction it was even emitting. It surfaced as a `StackHeightMismatch`
+/// from the VALIDATOR three stages away (`best-practices.md` §3.7).
+fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool, opcode: u8) -> Result<usize> {
     let mut j = start;
     // An optional leading table index or `$name` (multi-table).
     let mut table = 0u32;
@@ -2659,7 +2670,7 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool) ->
         }
         j = l.len();
     }
-    ctx.out.push(0x11);
+    ctx.out.push(opcode);
     uleb(&mut ctx.out, u64::from(ti));
     uleb(&mut ctx.out, u64::from(table));
     Ok(j)
@@ -2904,7 +2915,8 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             ctx.labels.pop();
             Ok(i + 1)
         }
-        O::CallIndirect => emit_call_indirect(ctx, items, i + 1, false),
+        O::CallIndirect => emit_call_indirect(ctx, items, i + 1, false, 0x11),
+        O::ReturnCallIndirect => emit_call_indirect(ctx, items, i + 1, false, 0x13),
         O::BrTable => {
             ctx.out.push(0x0e);
             emit_br_table_labels(ctx, items, i + 1)
@@ -3088,7 +3100,7 @@ fn emit_op_with_immediates(
                 u64::from(resolve_by_name(ctx.global_names, imm(0)?)?),
             );
         }
-        O::Call | O::RefFunc => {
+        O::Call | O::ReturnCall | O::RefFunc => {
             uleb(
                 &mut ctx.out,
                 u64::from(resolve_by_name(ctx.func_names, imm(0)?)?),
@@ -5361,6 +5373,7 @@ mod emitter_coverage_tests {
                 | O::Delegate
                 | O::BrTable
                 | O::CallIndirect
+                | O::ReturnCallIndirect
                 | O::SelectT
         ) || takes_memarg(op)
     }
