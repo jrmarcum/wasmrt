@@ -1,5 +1,85 @@
 # Known Issues
 
+## 🔴 REPORTED FROM wazmrt, 2026-08-14 — GC reference identity across a link
+
+wazmrt hit a cross-module GC-reference defect, fixed it, and swept for the same class here. Three
+findings, worst first. **The first is verified by EXECUTION against `target/release/wasmrt` 0.9.0,
+not by reading** — reproducer committed as `tests/gc_cross_module_type_index.wast`.
+
+### 1. 🔴 REAL BUG — a GC object's TYPE INDEX is read against the READER's module
+
+`crates/wasmrt-core/src/interp.rs`, `ref_matches` → `RefHeap::Any` arm:
+
+```rust
+let Some(obj) = store.gc_heap.get(idx) else { return false; };
+let kind = match module.comp_types.get(obj.type_index as usize)...;
+head_matches(module, kind, Some(obj.type_index), rt.heap)
+```
+
+`obj.type_index` was written by whichever module ALLOCATED the object; `module` is the module doing
+the testing. `head_matches` then evaluates `HeapType::Concrete(t) => module.is_subtype(ti, t)` —
+raw indices from two different modules. Since `gc_heap` lives on `Pools` (shared per linking group),
+objects really do cross modules, so this is reachable today.
+
+**Measured, wrong in BOTH directions.** A's only type is index 0, a `(struct i32)`; B's index 0 is a
+`(struct i64)` and B's index 1 is the structurally matching `(struct i32)`:
+
+| test | expected | wasmrt 0.9.0 |
+| --- | --- | --- |
+| `ref.test (ref $b0)` — `(struct i64)`, structurally WRONG | 0 | **1** |
+| `ref.test (ref $b1)` — `(struct i32)`, structurally right | 1 | **0** |
+
+⚠️ **The accept side is the dangerous one** — wazmrt's R1 said exactly this about the same class. A
+`ref.cast (ref $b0)` succeeds, and a following `struct.get $b0 0` reads a field written as i32 at
+i64 width. Values are `u128` slots, so this is a wrong VALUE rather than an out-of-bounds read — but
+it is a silent wrong answer produced by a check that believes it verified the type.
+
+⚠️ **wasmrt ALREADY LEARNED THIS, for funcrefs.** `ref_matches`'s own doc comment says so: *"the
+value carries its owning instance, and a funcref's TYPE lives in that instance's module, not the
+testing one. Reading it from `module` gave the wrong answer for any reference that arrived through a
+shared table."* The `RefHeap::Func` arm was fixed; the `RefHeap::Any` arm was not. **wazmrt made the
+mirror-image mistake in the same week** — R2 established "a reference value names an ENTITY, not an
+index" and converted funcrefs only, leaving GC references broken for a day. *When an invariant is
+written down, enumerate every value kind it governs in the same pass.*
+
+**You are better placed to fix this than wazmrt was.** `Pools.type_canon` is a store-wide type
+registry, so the correct answer is computable on this path. wazmrt has no equivalent available in
+`refMatches` and had to settle for refusing the comparison (a deliberate loud false negative).
+Route the concrete case through the registry rather than copying wazmrt's limitation.
+
+### 2. ✅ IMMUNITY WORTH PROTECTING — `gc_heap` on `Pools` is the right call; do not "simplify" it
+
+wazmrt put `gc_heap` on the **instance**, and a GC reference was a bare index — so a `structref`
+crossing a module boundary indexed the READER's heap and silently selected a **different object**
+(`ref.cast` succeeding, `struct.get` returning another object's value). Fixed 2026-08-14 by making a
+GC reference carry `(owner_slot, index)` and resolving through the store.
+
+**wasmrt cannot have that bug**, because `Pools` is *"the resource pools shared by every instance in
+a linking group"*, so a heap index is store-wide meaningful. That is a load-bearing consequence of
+what reads like a mere allocation detail — recorded so it is not undone later by someone
+consolidating heaps per instance.
+
+### 3. ⚠️ LATENT — the host-`externref` / GC-index overlap, unreachable only because a feature is missing
+
+`WASMRT_EXTERNREF` is passed through raw (`Value::from(v.of.ref_)`; header comment *"opaque to the
+host: pass it back unchanged"*), and the `RefHeap::Any` arm turns any non-i31, non-null value into a
+`gc_heap` index. A host handle of `2` would be read as GC object #2.
+
+**Not reachable today only because `any.convert_extern` / `extern.convert_any` are not implemented**
+(empty grep across `wasmrt-core`) — nothing moves a host `externref` into the `any` hierarchy.
+wazmrt implemented those two ops and thereby made the shared design flaw live. **wasmrt's scope
+requires them**, so fix the representation *before* implementing them, not after.
+
+⚠️ **This one is a TWO-PROJECT decision.** The `wasmrt_*` alias header exists so a consumer can A/B
+the engines by swapping a DLL; boxing host externrefs in one and not the other makes the surfaces
+differ semantically. wazmrt has tagged host references internally (`interp.host_tag`, bit 62) but
+has deliberately NOT changed its C-ABI value model, pending an owner decision. Nothing forces the
+issue: **wasmtk does not use `externref` at all** (its single mention is a binaryen type-ID table
+entry that `getTypeName` does not even map), and the `universalWasmLoader-*` family reads guest
+memory through a caller handle — i32 offsets, not externrefs.
+
+---
+
 Issue tracker. Gate open (2026-07-27); **assemble → decode → validate → run → WASI → embed-from-C all
 working** (T0–T8 done, published through v0.9.0). This records the **inherited concerns** from the frozen
 wazmrt oracle, the **port notes /
