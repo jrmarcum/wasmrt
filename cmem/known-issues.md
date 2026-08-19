@@ -1,5 +1,34 @@
 # Known Issues
 
+## ⚠️⚠️ OPEN (found 2026-08-19 by RUNNING the CLI) — a trailing `--dir` is handed to the GUEST, so the sandbox is silently never granted
+
+**Severity: live, security-relevant, and silent.** `wasmrt wasi <module> --dir <spec>` **does not
+error.** `take_dir_flags` (`crates/wasmrt/src/main.rs:55`) consumes preopen flags only from the
+**leading** run of arguments and stops at the first non-flag — which is the module path. Everything
+after it, `--dir <spec>` included, becomes the **guest's argv**.
+
+**So the guest runs with NO preopen at all**, every path call returns `BADF`, and **nothing warns**.
+It reads as a guest bug, not as a missing grant, which is what makes it expensive to diagnose.
+
+⚠️ **It is also a swappability break, and that is how it was found**: wazmrt's flags come **after** the
+module path (`wazmrt <module> --dir …`) and wasmrt's come **before**. A wazmrt user's muscle memory
+under wasmrt therefore produces an unsandboxed run rather than an error. Found by the first real run of
+`interop.md` §4 check 5 — **running both binaries, which is a check no amount of reading either
+codebase would have produced** (`interop.md` §2.1m, finding F3).
+
+**Fix (with T9e's CLI alignment):** accept preopen flags in **both** positions, and — the load-bearing
+half — **refuse an unrecognised leading `--flag` rather than treating it as the module path**, so the
+mistake cannot be silent in either direction. ⚠️ **Do not simply move the parse to the trailing
+position**: that would break the documented form and swap one silent failure for another. **The
+direction to err in is a property of the consequence** — an unsandboxed run is worse than a rejected
+command line.
+
+🎓 **The generalisable finding: a flag that is silently REINTERPRETED as data is worse than a flag that
+is rejected.** Sibling of the `--no-verify`/`--yes` flag-region hazard recorded for T9e, and of the
+`--dir` separator row — three defects in one small parser, all of the same shape: **an argument that
+means one thing to the host and another to the guest, with nothing marking the boundary.** The `--`
+end-of-flags marker wasmrt still lacks is exactly that marker.
+
 ## ⬜ OPEN (found 2026-08-19) — the proposal list is spelled THREE times and nothing compares them
 
 **Severity: latent, not live.** No proposal is mis-gated today. What is missing is the check that keeps

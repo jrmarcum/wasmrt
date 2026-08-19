@@ -222,6 +222,16 @@ finalized C ABI is [`crates/wasmrt-capi/include/wasmrt.h`](crates/wasmrt-capi/in
 
 ## 🤝 "**coordinate**" = sync with `wazmrt` through the contract (owner, 2026-08-19)
 
+🗓️ **CADENCE — who holds the pen (owner, 2026-08-19).** **Regime A is in force: `wazmrt` LEADS.** It is
+finishing its hardening stage, **its copy of the contract is the latest**, and wasmrt **mirrors from it
+and does not originate version numbers** — wasmrt still measures, still objects, and contributes
+findings as an **annex** for wazmrt to fold in. **Regime B starts once wasmrt also finishes hardening**
+(T9 → `1.0.1`): the two then **cross-coordinate at the END OF EACH STAGE** of the `1.0.x` ladder.
+⚠️⚠️ **That is a gate at a stage boundary, not a background activity** — reconcile against code that has
+stopped moving. 🎓 **A CONTRACT VERSION is a PIN, not a LOCK**: it makes drift detectable and cannot
+prevent a simultaneous write, which is why three mid-edit collisions happened in one session on
+2026-08-19. **wasmrt is two stages from regime B** (`1.0.0`, the clear-out, is not started).
+
 **One word, binding.** When the owner says **"coordinate"**, synchronise this project with the sibling
 runtime through [`cmem/interop.md`](cmem/interop.md) — the swappability contract, versioned and kept
 identical in both repos. Read it first; **byte-compare the two copies**; **verify rows by RUNNING both,

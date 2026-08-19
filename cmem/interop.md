@@ -1,6 +1,6 @@
 # interop.md — the **wasmrt ⇄ wazmrt swappability contract**
 
-**CONTRACT VERSION: 9** ⏳ **PENDING MIRROR — wazmrt's copy is at 8; v9 originates HERE (wasmrt) and awaits the owner's direction to mirror** · opened 2026-08-19 (owner) · last change 2026-08-19 · **this file must be kept IDENTICAL
+**CONTRACT VERSION: 8 — wazmrt LEADS (owner, 2026-08-19).** wazmrt is finishing its hardening stage and **its copy is the latest**; wasmrt mirrors from it and **does not originate version numbers** until wasmrt reaches the same stage. 📎 **This copy also carries a wasmrt ANNEX** — the measured findings in §2.1m — **offered for fold-in by wazmrt, deliberately NOT numbered as a version** · opened 2026-08-19 (owner) · last change 2026-08-19 · **this file must be kept IDENTICAL
 in both repos**, each side editing ONLY its own copy (§1a) (`wasmrt/cmem/interop.md` and `wazmrt/cmem/interop.md`).
 
 > *"I think this may require a common memory md file in both projects to confer with each other on from
@@ -46,6 +46,39 @@ status + date + evidence, and bump the CONTRACT VERSION **in your own copy**. �
 inverse direction, which is the half that gets skipped: coordinate BEFORE shipping a change to a
 contract surface** — any CLI option, any security check, any resource ceiling, any exit code — **not
 after**.
+
+#### 🗓️ The coordination CADENCE and who holds the pen (owner, 2026-08-19)
+
+> *"The wazmrt project is toward the end of the hardening phase. Theirs is the latest version. We will
+> coordinate with them until this project also reaches that stage. Then both projects will cross
+> coordinate at the end of each additional stage."*
+
+**Two regimes, and which one applies depends on whether the projects are level.**
+
+| regime | when | who originates | wasmrt's job |
+| --- | --- | --- | --- |
+| **A — wazmrt LEADS** | now, and until wasmrt finishes **hardening** (T9 → `1.0.1`) | **wazmrt only** | **mirror from them**, contribute findings as an **annex**, never originate a version number |
+| **B — CROSS-COORDINATE** | once both have finished hardening | either, symmetrically | coordinate **at the end of each stage**, not continuously |
+
+⚠️ **Regime A is not deference about design — it is about the PEN.** wazmrt is ahead by stage, so it
+holds the contract's version sequence. wasmrt still measures, still objects, and still reports
+divergences; it simply does not bump the number. **A finding is contributed as an annex and folded in
+by whoever holds the pen** — which is how §2.1m's five measured findings are carried today.
+
+⚠️⚠️ **Regime B is a GATE AT A STAGE BOUNDARY, not a background activity.** The stages are the `1.0.x`
+ladder — clear-out, hardening, bug hunt, optimization, security review. **Coordinate at the end of
+each**, so the contract is reconciled against code that has stopped moving. Coordinating mid-stage is
+what produced **three mid-edit collisions in a single session on 2026-08-19**, each one two agents
+writing the same file at the same moment.
+
+🎓 **The lesson that cadence encodes, and it is the one this file kept re-learning the hard way: a
+CONTRACT VERSION is a PIN, not a LOCK.** It makes drift *detectable*; it does nothing to prevent a
+simultaneous write. **The fix is not a better marker — it is not writing at the same time.** One pen
+while the projects are uneven, and a scheduled boundary once they are level.
+
+**Where wasmrt is against that ladder:** `1.0.0` (the conformance clear-out, T13) is not started;
+hardening is `1.0.1` and carries `pin`/T9e and the iteration budget/T9i. **So regime A holds for at
+least the next two stages.**
 
 ### 1a. 🔒🔒 THE EDITING BOUNDARY — **ABSOLUTE** (owner, 2026-08-19)
 
@@ -570,7 +603,8 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 
 | version | date | change |
 | --- | --- | --- |
-| **9** ⏳ | 2026-08-19 | 🔬 **§4 CHECK 5 RUN FOR THE FIRST TIME — the CLI rows verified by RUNNING both binaries, not by reading either** (§2.1m). wasmrt 0.9.0 vs wazmrt 1.0.0, same box. **Five findings.** ⚠⚠ **F1: the two “call an export” gaps fail in OPPOSITE directions** — `wasmrt add.wat add 2 3` exits **0** printing a summary and silently ignoring the export and its arguments, while `wazmrt run …` exits **1** and says why; same missing capability, and wasmrt's half is the silent-wrong-output one, so it outranks the other. **F2: the “summarize” row was marked ✅ AGREED and the output text is NOT identical** (behaviour and exit code do agree) — the word “identical” had been written from reading. 🆕 **F3: FLAG POSITION differs and had no row at all** — wazmrt's flags follow the module path, wasmrt's precede it, and ⚠⚠ **a trailing `--dir` under wasmrt is passed to the GUEST, so the sandbox is silently never granted.** 🔻 **F4: a CORRECTION — §2.2’s claim that a single-colon `--dir` “does not error, it preopens the wrong thing” is FALSE; measured, it fails loudly** (`errno 29`, rc=1). That claim had been carried as ⚠⚠ since v1 and was written from reading the code. **F5: `-v` output shape differs** (1 line vs 2). ⚠ Everything check 5 did not reach — the `.wast` row, `--ro-dir`, `--allow-symlink`, `--env`, the ceiling flags, `--`, and all of §2.3’s per-failure exit codes — stays ⬜ UNVERIFIED and **may not be quoted as agreed.** |
+| **annex** 📎 | 2026-08-19 | *(wasmrt contribution, NOT a version — wazmrt leads and holds the pen; offered for fold-in.)* |
+| *(annex detail)* | 2026-08-19 | 🔬 **§4 CHECK 5 RUN FOR THE FIRST TIME — the CLI rows verified by RUNNING both binaries, not by reading either** (§2.1m). wasmrt 0.9.0 vs wazmrt 1.0.0, same box. **Five findings.** ⚠⚠ **F1: the two “call an export” gaps fail in OPPOSITE directions** — `wasmrt add.wat add 2 3` exits **0** printing a summary and silently ignoring the export and its arguments, while `wazmrt run …` exits **1** and says why; same missing capability, and wasmrt's half is the silent-wrong-output one, so it outranks the other. **F2: the “summarize” row was marked ✅ AGREED and the output text is NOT identical** (behaviour and exit code do agree) — the word “identical” had been written from reading. 🆕 **F3: FLAG POSITION differs and had no row at all** — wazmrt's flags follow the module path, wasmrt's precede it, and ⚠⚠ **a trailing `--dir` under wasmrt is passed to the GUEST, so the sandbox is silently never granted.** 🔻 **F4: a CORRECTION — §2.2’s claim that a single-colon `--dir` “does not error, it preopens the wrong thing” is FALSE; measured, it fails loudly** (`errno 29`, rc=1). That claim had been carried as ⚠⚠ since v1 and was written from reading the code. **F5: `-v` output shape differs** (1 line vs 2). ⚠ Everything check 5 did not reach — the `.wast` row, `--ro-dir`, `--allow-symlink`, `--env`, the ceiling flags, `--`, and all of §2.3’s per-failure exit codes — stays ⬜ UNVERIFIED and **may not be quoted as agreed.** |
 | **8** ⏳ | 2026-08-19 | 🗓️ **COORDINATION CADENCE (owner) — §1d: coordinate at the END of each track**, not continuously and not mid-track; then the project that is ahead **holds** until the sibling reaches the same boundary. Rationale: rule 4 verifies a row by RUNNING both, which needs something built and green — coordinating mid-track compares a settled implementation against a moving one. ⚠️ Does **not** weaken "coordinate BEFORE shipping a contract surface": *decide* before building, *verify and record* at the end of the track. Current application: wazmrt finishes **Track H**, then holds for wasmrt. |
 | **7** ⏳ | 2026-08-19 | ✅ **ROW 3b's 🚩 IS DISCHARGED — §0.5 restored, from wazmrt's session context, the only place it survived.** ⚠️ **Restored as §1b, NOT as a verbatim §0.5:** three of its four parts had since been re-expressed better (the order in §1; the editing boundary in §1a, which the owner has since made ABSOLUTE and is stronger than what §0.5 introduced), so re-pasting it would have left two definitions of one order in one file — the exact drift this file exists to prevent. What was genuinely lost and is now back: **the ordered checklist** (including *"the sibling may cite a contract row that does not exist yet — that is a cue to WRITE the row"*, which is literally what T9i did), and *"`coordinate` is also the right response to discovering you have already diverged."* Adds **§1c** on wasmrt's diagnosis — *a version is a pin, not a lock* — plus owner rows 6 (the `7ce0dcd2` attribution, which wazmrt cannot fix without breaching §1a) and 7 (one coordination session at a time). |
 | **6** ⏳ | 2026-08-19 | 🔒🔒 **THE EDITING BOUNDARY IS NOW ABSOLUTE (owner) — §1a.** *"Not to edit the other's md file unless specifically directed by me … each project needs to edit their own files … important for tracking and integrity."* **Neither project writes ANYTHING into the other's tree — including this file** — without a specific owner direction. `coordinate` is an order to CONFER, never a licence to WRITE. Supersedes the earlier "this file is the one thing you may write there" rule, which caused two destructive overwrites in one day (rows 3b, 4). Rule 1 rewritten: propose in your OWN copy, bump the version, mark ⏳ **PENDING MIRROR**, and TELL THE OWNER the sibling is behind — the owner directs the other project, which makes the edit in its own tree. A version mismatch is now a normal coordination signal, resolved by reporting, **never** by copying over it. ⚠️ **This row is itself pending mirror: wasmrt's copy is at 5.** |

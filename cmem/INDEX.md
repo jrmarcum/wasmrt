@@ -676,6 +676,18 @@ When the owner says **"update the project memory"** (or a synonym — "update me
 
 ### 🤝 The "**coordinate**" trigger (binding on every agent) — *added by the owner 2026-08-19*
 
+🗓📎 **CADENCE AND WHO HOLDS THE PEN (owner, 2026-08-19) — read this before running the steps.**
+**Regime A, in force now: wazmrt LEADS.** It is finishing its hardening stage, **its copy is the latest**,
+and wasmrt **mirrors from it and does not originate version numbers**; wasmrt still measures, still
+objects, and contributes findings as an **annex** for wazmrt to fold in. **Regime B begins once wasmrt
+also finishes hardening** (T9 → `1.0.1`): from then the two **cross-coordinate at the END OF EACH STAGE**
+of the `1.0.x` ladder — clear-out, hardening, bug hunt, optimization, security review. ⚠⚠ **Regime B is a
+GATE AT A STAGE BOUNDARY, not a background activity**, so the contract is reconciled against code that
+has stopped moving. Coordinating mid-stage is what produced **three mid-edit collisions in one session**
+on 2026-08-19. 🎓 **A CONTRACT VERSION is a PIN, not a LOCK** — it makes drift detectable and does
+nothing to prevent a simultaneous write; the fix is **not writing at the same time**, which is what the
+cadence buys. wasmrt is two stages away from regime B (`1.0.0` clear-out not started).
+
 When the owner says **"coordinate"** — the one-word order — synchronise this project with the sibling
 runtime (`wazmrt`) through [`interop.md`](interop.md), the swappability contract. Do all of the
 following, **in this order**:
