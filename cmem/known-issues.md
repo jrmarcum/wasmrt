@@ -1,5 +1,50 @@
 # Known Issues
 
+## ⚠️⚠️ OPEN (found 2026-08-19) — SEVEN WasmGC instructions are MISSING, in a proposal recorded as DONE
+
+**`overview.md` has said since v0.6.4 that WasmGC landed** — *"GC struct/array heap + `i31` +
+`ref.test`/`ref.cast`/`br_on_cast`"* — and `vision.md`'s canonical axis says **"every proposal in the
+scope list now runs."** ⚠️ **Both are wrong by seven instructions**, all of them in-scope GC:
+
+| mnemonic | what it is |
+| --- | --- |
+| `array.new_data` · `array.new_elem` | construct an array from a data / element segment |
+| `array.init_data` · `array.init_elem` | fill an existing array from a segment |
+| `array.fill` · `array.copy` | the array bulk operations |
+| `any.convert_extern` | the `extern` → `any` half of the externref bridge |
+
+**Not an assembler gap — genuinely absent.** There is **no `Op` variant, no `from_text_name` entry and
+no interpreter arm** for any of them (`grep` for `ArrayFill`/`ArrayCopy`/`AnyConvertExtern` returns
+nothing in `opcode.rs` or `interp.rs`). A `.wat` using them fails to assemble; the binary form has no
+opcode to decode.
+
+**How it stayed invisible:** the failure surfaces as `UnknownInstr` from the *assembler*, which
+`is_unsupported()` scores as a **skip** — so seven missing instructions in a shipped proposal produced
+**no failures at all**, only quiet skips, in files (`array.wast` 29 skipped, `extern.wast` 17) whose
+names do not say "array bulk ops". 🎓 **A conformance number cannot report a gap that only ever
+produces skips** — which is the whole reason T13-0 instruments them.
+
+⚠️ **This is the sibling of the start-function defect**, one level up: *a feature can be decoded,
+validated and printed and still never execute* — and here, **a PROPOSAL can be recorded DONE with
+instructions missing**, because "GC" was ticked off as a unit and nobody enumerated its instruction
+list against the spec. **Tick a proposal off against its instruction list, never against its name.**
+
+🔻 **Independent confirmation that the shape is real:** the sibling runtime hit the *same seven*, and
+recorded that its own item "named four ops — SIX were missing", plus a separate finding that the
+extern/any converts "existed only in const-exprs" and were worth **172 assertions**. Two
+implementations, two independent triages, the same list.
+
+**Priority: this outranks every untargeted-proposal track in T13.** GC is **in scope**; descriptors and
+wide-arithmetic are not. A missing in-scope instruction is a correctness gap; an unimplemented
+untargeted proposal is a scope decision.
+
+⚠️ **And it changes how the scoring split must be built.** Had the split been written first, from the
+plausible reading that "the assembler does not know this mnemonic → the mnemonic is not real", these
+seven would have been classified **malformed** and their `assert_malformed` cases would have banked as
+**false passes** — the one direction that cannot be noticed afterwards. **The over-inclusive rule is
+what saves it: the "we are incomplete" list must be a positive allow-list of real instructions we lack,
+and everything reclassified as malformed must be provably not an instruction in any proposal.**
+
 ## ⚠️⚠️ OPEN (found 2026-08-19 by RUNNING the CLI) — a trailing `--dir` is handed to the GUEST, so the sandbox is silently never granted
 
 **Severity: live, security-relevant, and silent.** `wasmrt wasi <module> --dir <spec>` **does not
