@@ -224,7 +224,13 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
             if !subtype_of(module, elem.elem_type, tet) {
                 return Err(ValidateError::TypeMismatch);
             }
-            validate_const_expr(module, &elem.offset_expr, V::I32, all_globals, None, features)?;
+            // The offset produces the TABLE's index type — `i64` on a 64-bit table
+            // (table64), `i32` otherwise. Exactly the rule the data-segment loop below
+            // already applied for memory64; hardcoding `i32` here is what made
+            // `(elem (table $t) (i64.const 1) …)` a TypeMismatch and took every assertion
+            // in `table_get64.wast` / `table_set64.wast` with it.
+            let off_ty = if module.tables[ti].limits.is64 { V::I64 } else { V::I32 };
+            validate_const_expr(module, &elem.offset_expr, off_ty, all_globals, None, features)?;
         }
     }
 

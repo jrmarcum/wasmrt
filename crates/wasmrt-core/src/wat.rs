@@ -1456,11 +1456,23 @@ fn skip_inline_clauses(items: &[Sexpr], j: &mut usize) {
 }
 
 /// A folded `(i32.const 0)` offset expression, for the inline data/elem shorthands.
-fn zero_offset() -> Vec<Sexpr> {
+/// The implied `offset` const-expr of an inline `(data …)` / `(elem …)` shorthand.
+///
+/// ⚠️ **Takes the index type**, because an offset expression is typed by the memory or table it
+/// targets: `i64.const 0` on a 64-bit one, `i32.const 0` otherwise. It hardcoded `i32` until
+/// 2026-08-19, so `(memory i64 (data "…"))` assembled a module whose own data segment did not
+/// type-check — the shorthand produced an offset the memory could not accept.
+fn zero_offset_of(is64: bool) -> Vec<Sexpr> {
     vec![Sexpr::List(vec![
-        Sexpr::Atom("i32.const".to_string()),
+        Sexpr::Atom(if is64 { "i64.const" } else { "i32.const" }.to_string()),
         Sexpr::Atom("0".to_string()),
     ])]
+}
+
+/// The 32-bit case, which is every table shorthand (an inline `(elem …)` on a 64-bit table is
+/// not expressible — the shorthand carries no index type).
+fn zero_offset() -> Vec<Sexpr> {
+    zero_offset_of(false)
 }
 
 fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
@@ -1607,7 +1619,20 @@ fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     }
     skip_inline_clauses(items, &mut j);
 
-    // `(memory $m (data "…"))` — an inline data segment sizes the memory.
+    // ⚠️ The index-type keyword is read BEFORE the inline-data branch below, because
+    // `(memory i64 (data …))` is legal and that branch used to hardcode `is64: false`. Parsed
+    // here, both forms see it. (`float_memory64.wast` was 6 failures / 84 skips on this one
+    // line — the `i64` sat where the branch expected `data`, so neither path matched and the
+    // whole file failed to assemble with `BadForm`.)
+    let mut is64 = false;
+    if items.get(j).is_some_and(|s| eq_atom(s, "i64")) {
+        is64 = true;
+        j += 1;
+    } else if items.get(j).is_some_and(|s| eq_atom(s, "i32")) {
+        j += 1;
+    }
+
+    // `(memory $m [i64] (data "…"))` — an inline data segment sizes the memory.
     if let Some(d) = items.get(j).filter(|s| eq_kw(s, "data")) {
         let mut bytes = Vec::new();
         for s in &want_list(d)?[1..] {
@@ -1618,25 +1643,18 @@ fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             min: pages,
             max: Some(pages),
             shared: false,
-            is64: false,
+            is64,
         });
         b.mem_names.push(name);
         b.datas.push(DataSeg {
             mem_index: mi,
-            offset: Some(zero_offset()),
+            offset: Some(zero_offset_of(is64)),
             bytes,
         });
         b.data_names.push(None);
         return Ok(());
     }
 
-    let mut is64 = false;
-    if items.get(j).is_some_and(|s| eq_atom(s, "i64")) {
-        is64 = true;
-        j += 1;
-    } else if items.get(j).is_some_and(|s| eq_atom(s, "i32")) {
-        j += 1;
-    }
     let min = match items.get(j) {
         Some(s) => parse_u64_str(want_atom(s)?)?,
         None => 0,
@@ -5256,6 +5274,54 @@ mod tests {
                 "array.copy {d} <- {s} must be accepted"
             );
         }
+    }
+
+    /// table64: a 64-bit table's index type reaches **every** operand position, including the
+    /// ones outside instruction bodies.
+    ///
+    /// ⚠️ The active element segment's offset is the one that bit: it is a module-level check,
+    /// not an instruction, so the instruction-typing work missed it entirely and
+    /// `(elem (table $t) (i64.const 1) …)` failed as a `TypeMismatch`. That single line took
+    /// **every** assertion in `table_get64.wast` and `table_set64.wast` with it — a module that
+    /// fails to build costs its whole file.
+    #[test]
+    fn a_64bit_table_types_its_operands_and_its_elem_offset_as_i64() {
+        let src = r#"(module
+            (table $t i64 4 funcref)
+            (elem (table $t) (i64.const 1) func $f)
+            (func $f (result i32) (i32.const 7))
+            (func (export "size") (result i64) (table.size $t))
+            (func (export "call") (result i32)
+              (call_indirect $t (type $s) (i64.const 1))))
+            "#;
+        // `(type $s)` needs declaring; assemble the whole thing and check it validates.
+        let src = src.replace("(type $s)", "(result i32)");
+        let m = crate::module::decode(&asm(&src).expect("assembles")).expect("decodes");
+        assert!(crate::validate::validate(&m).is_ok(), "a 64-bit table must validate");
+        // `table.size` on a 64-bit table yields i64, so the export's result type proves the
+        // index type reached the instruction as well as the segment.
+        assert_eq!(crate::interp::as_i32(run(&src, "call", &[])[0]), 7);
+    }
+
+    /// `(memory i64 (data "…"))` — the index-type keyword and the inline-data shorthand
+    /// together.
+    ///
+    /// ⚠️ The inline-data branch used to run **before** the keyword was parsed and hardcoded
+    /// `is64: false`, so the `i64` sat where that branch expected `data`, neither path matched,
+    /// and the whole of `float_memory64.wast` failed to assemble with `BadForm` — 6 failures
+    /// and 84 skips on one line. **A fact parsed in one branch and hardcoded in another is the
+    /// emitter defect wearing a parser's clothes.**
+    #[test]
+    fn a_64bit_memory_accepts_the_inline_data_shorthand() {
+        let src = r#"(module
+            (memory i64 (data "\07\00\00\00"))
+            (func (export "f") (result i32) (i32.load (i64.const 0))))"#;
+        assert_eq!(crate::interp::as_i32(run(src, "f", &[])[0]), 7);
+        // …and the 32-bit spelling still works, so the hoist did not just invert the bug.
+        let src32 = r#"(module
+            (memory (data "\09\00\00\00"))
+            (func (export "f") (result i32) (i32.load (i32.const 0))))"#;
+        assert_eq!(crate::interp::as_i32(run(src32, "f", &[])[0]), 9);
     }
 
     #[test]
