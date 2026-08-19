@@ -1659,6 +1659,27 @@ fn classify_unknown_mnemonic(name: &str) -> Error {
     Error::UnknownInstr
 }
 
+/// §6.5.2 label repetition: consume an optional `$id` after `else` / `end` that repeats the
+/// label of the block being closed. Returns how many items were consumed (0 or 1).
+///
+/// ⚠️ **The repeat is CHECKED against the enclosing label, not merely skipped.** A repeat naming a
+/// different block is malformed, and ignoring it would make the whole annotation decorative — its
+/// only purpose is to let a human assert *which* block is being closed. `ctx.labels`' last entry
+/// is the innermost block, which is the one both `else` and `end` refer to.
+fn consume_matching_label(ctx: &Ctx, items: &[Sexpr], at: usize) -> Result<usize> {
+    let Some(id) = items
+        .get(at)
+        .and_then(Sexpr::as_atom)
+        .filter(|a| a.starts_with('$'))
+    else {
+        return Ok(0);
+    };
+    match ctx.labels.last() {
+        Some(Some(want)) if want == id => Ok(1),
+        _ => Err(Error::UnknownLabel),
+    }
+}
+
 fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let mut j = 1;
     let name = opt_name(items, &mut j);
@@ -2603,6 +2624,18 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
         let opcode = if op == O::CallIndirect { 0x11 } else { 0x13 };
         return emit_call_indirect(ctx, l, 1, true, opcode).map(|_| ());
     }
+    // `(select (result t) a b c)` — the reference-types typed form. Its `(result …)` is an
+    // IMMEDIATE, not an operand, so it must be lifted out before the operand walk below; the
+    // same shape `call_indirect`'s `(type $t)` has, and handled the same way.
+    if op == O::Select {
+        let mut j = 1;
+        let tys = parse_select_result(ctx, l, &mut j)?;
+        for k in j..l.len() {
+            emit_one(ctx, l, k)?;
+        }
+        emit_select(ctx, &tys);
+        return Ok(());
+    }
     // The cast ops take a **list** immediate — `(ref null? ht)` — which the atom/list split
     // below would otherwise mistake for an operand and try to emit as an instruction.
     match op {
@@ -2743,6 +2776,41 @@ fn has_optional_indices(op: crate::opcode::Op) -> bool {
 /// mechanism T10a names: an emitter reconstructing a form from a SUBSET of the parser's facts,
 /// here dropping which instruction it was even emitting. It surfaced as a `StackHeightMismatch`
 /// from the VALIDATOR three stages away (`best-practices.md` §3.7).
+/// `select (result t)*` — the reference-types typed form. Consumes the optional `(result …)`
+/// clause and returns the value types it names; an absent clause yields an empty vector, which
+/// is the untyped `select`.
+///
+/// ⚠️ **Neither form assembled at all until 2026-08-19** — `select` had no bespoke handling, so
+/// the `(result …)` was read as the next instruction and came back `UnknownInstr` naming
+/// `result`. That is `select.wast`'s 124 skips, and it is why the withdrawn "no declaration
+/// after the body begins" rule broke on this file: in FLAT form the immediate sits exactly
+/// where a misplaced declaration would.
+fn parse_select_result(ctx: &Ctx, l: &[Sexpr], j: &mut usize) -> Result<Vec<ValType>> {
+    let mut tys = Vec::new();
+    while let Some(items) = l.get(*j).filter(|s| eq_kw(s, "result")).and_then(Sexpr::as_list) {
+        for t in &items[1..] {
+            tys.push(parse_val_type(t, ctx.type_names)?);
+        }
+        *j += 1;
+    }
+    Ok(tys)
+}
+
+/// Emit `select` — bare `0x1b`, or `0x1c` with an explicit result-type vector.
+fn emit_select(ctx: &mut Ctx, tys: &[ValType]) {
+    if tys.is_empty() {
+        ctx.out.push(0x1b);
+        return;
+    }
+    ctx.out.push(0x1c);
+    uleb(&mut ctx.out, tys.len() as u64);
+    for t in tys {
+        // `emit_val_type` is fallible only for forms `select` cannot take; a concrete `(ref $t)`
+        // is not a valid `select` result type, and `parse_val_type` has already refused one.
+        let _ = emit_val_type(&mut ctx.out, *t);
+    }
+}
+
 fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool, opcode: u8) -> Result<usize> {
     let mut j = start;
     // An optional leading table index or `$name` (multi-table).
@@ -3003,14 +3071,29 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             emit_catch_clauses(ctx, items, &mut j)?;
             Ok(j)
         }
+        // §6.5.2: `else` and `end` may REPEAT the enclosing block's label — `(block $l … end $l)`.
+        //
+        // ⚠️ The id was not consumed until 2026-08-19, so it was read as the *next instruction*
+        // and came back `UnknownInstr` naming a **label** — which is why `id.wast` and
+        // `stack.wast` failed with a message that pointed at nothing. The repeat is CHECKED, not
+        // skipped: §6.5.2 requires it to match the block it closes, and checking is the only
+        // reason the form exists — a silently-ignored mismatch makes the annotation decorative.
         O::Else => {
             ctx.out.push(0x05);
-            Ok(i + 1)
+            Ok(i + 1 + consume_matching_label(ctx, items, i + 1)?)
         }
         O::End => {
             ctx.out.push(0x0b);
+            let n = consume_matching_label(ctx, items, i + 1)?;
             ctx.labels.pop();
-            Ok(i + 1)
+            Ok(i + 1 + n)
+        }
+        // Flat `select (result t)?` — the immediate sits where the next instruction would.
+        O::Select => {
+            let mut j = i + 1;
+            let tys = parse_select_result(ctx, items, &mut j)?;
+            emit_select(ctx, &tys);
+            Ok(j)
         }
         O::CallIndirect => emit_call_indirect(ctx, items, i + 1, false, 0x11),
         O::ReturnCallIndirect => emit_call_indirect(ctx, items, i + 1, false, 0x13),
@@ -5377,6 +5460,62 @@ mod tests {
             (memory (data "\09\00\00\00"))
             (func (export "f") (result i32) (i32.load (i32.const 0))))"#;
         assert_eq!(crate::interp::as_i32(run(src32, "f", &[])[0]), 9);
+    }
+
+    /// §6.5.2 label repetition — `else`/`end` may name the block they close.
+    ///
+    /// ⚠️ Unconsumed until 2026-08-19, so the id was read as the next instruction and reported
+    /// `UnknownInstr` **naming a label** — a message that pointed at nothing, which is why
+    /// `id.wast` and `stack.wast` sat unexplained. The repeat is **checked**: the negative case
+    /// below is the whole reason the form exists.
+    #[test]
+    fn else_and_end_may_repeat_the_block_label_and_a_mismatch_is_refused() {
+        assert!(asm(r#"(module (func (block $l (br $l) end $l)))"#).is_ok());
+        assert!(asm(r#"(module (func (if $c (i32.const 1) (then) else $c end $c)))"#).is_ok());
+        // A repeat naming a different block is malformed — not silently ignored.
+        assert_eq!(
+            asm(r#"(module (func (block $l (br $l) end $nope)))"#),
+            Err(Error::UnknownLabel)
+        );
+        // …and the bare forms still work, so this did not just start demanding the id.
+        assert!(asm(r#"(module (func (block $l (br $l) end)))"#).is_ok());
+    }
+
+    /// `select` with an explicit result type (reference-types), in **both** spellings.
+    ///
+    /// ⚠️ Neither assembled until 2026-08-19 — `select` had no bespoke handling, so its
+    /// `(result …)` was read as the next instruction and came back `UnknownInstr` naming
+    /// `result`. That was `select.wast`'s 124 skips. 🎓 It is also why the "no declaration after
+    /// the body begins" rule was withdrawn at T9: in FLAT form this immediate sits exactly where
+    /// a misplaced declaration would, so keyword scanning cannot tell them apart.
+    #[test]
+    fn select_takes_an_explicit_result_type_in_both_forms() {
+        // Folded. `externref` cannot use bare `select` — the typed form is the only way — so a
+        // pass here proves the type reached the encoding rather than being dropped.
+        let folded = r#"(module (func (export "f")
+            (param externref externref i32) (result externref)
+            (select (result externref) (local.get 0) (local.get 1) (local.get 2))))"#;
+        let b = asm(folded).expect("folded typed select assembles");
+        assert!(b.contains(&0x1c), "must emit the TYPED select opcode 0x1c, not bare 0x1b");
+        assert!(crate::validate::validate(&crate::module::decode(&b).unwrap()).is_ok());
+
+        // Flat.
+        let flat = r#"(module (func (export "f") (result i32)
+            i32.const 1 i32.const 2 i32.const 0 select (result i32)))"#;
+        // ⚠️ Condition 0 selects the SECOND operand — `select(a, b, c)` is `c != 0 ? a : b`. My first
+        // expectation here said 1, and the implementation was right: a test can be wrong in the
+        // direction of accusing working code, which is the reading that wastes the most time.
+        assert_eq!(crate::interp::as_i32(run(flat, "f", &[])[0]), 2);
+        // …and with a non-zero condition it takes the first, so the test pins the CHOICE and not
+        // just “something came back”.
+        let flat_true = flat.replace("i32.const 0 select", "i32.const 1 select");
+        assert_eq!(crate::interp::as_i32(run(&flat_true, "f", &[])[0]), 1);
+
+        // Bare `select` still emits 0x1b, so the typed path did not capture the untyped one.
+        let bare = asm(r#"(module (func (result i32)
+            i32.const 1 i32.const 2 i32.const 0 select))"#)
+        .expect("bare select assembles");
+        assert!(bare.contains(&0x1b) && !bare.contains(&0x1c));
     }
 
     #[test]
