@@ -17,7 +17,7 @@ stripped it — a guest could plant links in a read-only preopen. Replicating "t
 faithfully would have replicated the hole. **T12x** exists to diff the two runtimes' security tables
 *as independent implementations*, which is the useful form of the comparison.
 
-## 🔎 A dedicated adversarial review is scheduled: **T12 (0.13.0)** — owner, 2026-08-06
+## 🔎 A dedicated adversarial review is scheduled: **T12 (`1.0.4`)** — owner, 2026-08-06
 
 This file records the security **design** — what the model is and why. **T12 is where it gets attacked
 on purpose**: a review-and-recommend phase over the *final* code (hence after the bug hunt and the
@@ -218,6 +218,78 @@ it survives a change of mechanism. Verified by mutation: deleting the `..` guard
 > **A wasmrt build today performs no authenticity check of any kind**, and the CLI exposes none.
 > Ported at **T9** (it was previously slated for T7, then T8, and slipped both times). The *authority*
 > half of the model — the WASI sandbox — **is** fully built; do not confuse the two.
+
+## 🔎 REVIEWED 2026-08-19 — "load once into memory" vs. the verification track (owner's question)
+
+**The owner's proposal:** *"instead of verifying the wasm files, the wazmrt team loads the files into
+memory and does not re-access them from the drive after load. This way the file can't be swapped out
+mid-run. I think this is better than the verification track."*
+
+**Reviewed rather than adopted, per §2.1/§2.2a — a stated benefit is a hypothesis about someone else's
+code, so their code got read.** Three findings, and the first one changes the question.
+
+### 1. ⚠️ The premise does not hold: wazmrt does BOTH, and load-once is what makes verification sound
+
+wazmrt has **pin verification built and armed** — `src/pin.zig` (root-owned SHA-256 allow-list) plus
+`src/sign.zig` (Ed25519), and per its own `security-model.md` it **denies unsigned modules by default
+when armed** (a root key is embedded *or* a pin DB is present). It is not running load-once *instead of*
+verifying. **Load-once is the discipline that makes its `verifyGate` honest**: the gate hashes the
+in-memory bytes rather than re-reading the path, so `bytes-hashed == bytes-run` by construction.
+
+**That is the same sentence this file has carried since the mechanism was decided** — see *"TOCTOU
+closed by construction"* above, which pre-dates the question. So the owner's mechanism is not an
+alternative to the recorded design; **it is the recorded design's load-bearing half.**
+
+### 2. ✅ wasmrt ALREADY HAS the property — it just is not gated
+
+Every CLI path that *executes* a module goes through one loader, `read_module_bytes`
+(`crates/wasmrt/src/main.rs:200`), used by summarize (`:104`), `run` (`:424`) and `wasi` (`:532`). It
+performs **exactly one `std::fs::read`** into a `Vec<u8>`; `.wat` is assembled from that buffer, and
+assemble → decode → validate → instantiate → execute all run on owned memory. **The path is never
+reopened, so the file cannot be swapped mid-run.** The C ABI never touches the filesystem at all — the
+embedder hands over bytes. The only other `fs::read`s in the binary are `wasmrt wat` (an assembler that
+does not execute) and the `.wast` runner (a test harness).
+
+The loader's own doc comment already says why: *"What executes is the assembled bytes, not the file on
+disk. That matters for anything that hashes what it runs."*
+
+⚠️ **But it is a comment, not a check** — and *a goal with no gate is a preference* (§4.1). A future
+fourth loader, or a streaming/`mmap` "optimization" at T11, could take the property away and nothing
+would fail. **Action: make load-once an explicit tested invariant** — one test asserting the executing
+paths take `&[u8]` rather than a path, and a `T12z`-style row in the entry-point table. Cheap, and it is
+the half of the owner's proposal that is actually missing.
+
+### 3. 🚦 They answer DIFFERENT questions, so this is a scope decision, not a substitution
+
+| property | answered by | attack it stops |
+| --- | --- | --- |
+| **integrity over time** — the bytes cannot change under me between check and run | **load-once** (already held) | swap the file mid-run; win a race against the loader |
+| **authenticity** — these are the bytes I authorized *in the first place* | **pin / signature** (not built) | replace the file **before** the load, with any other valid module |
+
+⚠️ **Load-once alone gives zero protection against the strictly easier attack.** An adversary who can
+write the file does not need to win a race — they overwrite it while nothing is running, and a
+load-once runtime loads the replacement perfectly and executes it. **Dropping verification in favour of
+load-once trades away defence against the easy attack in order to keep defence against the hard one.**
+
+**The honest counter-argument, which is real:** for wasmrt's actual consumers (`rsxtk`, `wasmtk`,
+`universalWasmLoader-*`), the module usually ships in the same package as the host binary — and an
+attacker who can rewrite the `.wasm` can generally rewrite the host too, against which no runtime check
+helps. That is exactly why wazmrt's pin is **inert unless armed**: it costs nothing when no root key and
+no DB are present, and the *deployment* decides whether it applies.
+
+### 📌 Recommendation
+
+1. **Keep load-once and GATE it** — it is already true, it is free, and today nothing defends it.
+2. **Do not delete the authenticity track; re-scope it.** `pin` stops being a `1.0.1` headline and
+   becomes a small, default-`off` mechanism whose cost is zero when unarmed. It is ~a hash, a plaintext
+   root-owned DB read, and the `decide()` matrix — all of it already specified above, so the expensive
+   part (deciding the mechanism) is done.
+3. **If the owner still wants it dropped, record the decision with its threat model** — *"wasmrt does
+   not answer authenticity; the embedder must"* — in `wasmrt.h` and the README, not just here.
+   ⚠️ An undocumented gap gets found twice: once by us, and again by T12. *Say what you did not do*
+   (§6.3).
+
+*(Owner decision pending. Nothing in the code changed for this entry — it is a review.)*
 
 - **Pin verify is BUILT in wazmrt (Phase 5):** SHA-256, plaintext **content-addressed** DB,
   `# mode: off|warn|enforce`, and a pure `decide(policy, pinned, opt_out, tty)` matrix.

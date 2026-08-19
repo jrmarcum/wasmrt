@@ -1,24 +1,29 @@
 # wasmrt roadmap
 
 **wasmrt** is a fast, small, idiomatic-**Rust** WebAssembly runtime — a from-scratch port of the
-battle-tested Zig runtime [`wazmrt`](https://github.com/jrmarcum/wazmrt), which already runs the full
-WebAssembly spec testsuite and a large WASI corpus. wazmrt is the **reference oracle**: wasmrt is
-finished when it reproduces the oracle's behavior, feature-for-feature.
+battle-tested Zig runtime [`wazmrt`](https://github.com/jrmarcum/wazmrt). **That oracle relationship is
+retired** (see the anchor change below) — wasmrt is finished on its own terms, measured against the
+official spec testsuite, wasmtime's observable behaviour, and the wasmtk WASI corpus.
 
 This page tracks that journey. It updates on **every release**, so you can follow exactly what works
 today — not what's promised.
 
 ## How versions map to progress
 
-The destination is fixed and known (the completed wazmrt). The version number measures **how far the
-Rust port has climbed toward it**:
+The version number measures **what genuinely runs and passes its gate** — never inflated to signal
+maturity:
 
 - **`0.x`** — in progress. Each release lands a gated stage; the number reflects what actually runs and
   is verified against the official spec testsuite.
-- **`1.0.0`** — **complete on wasmrt's own terms** on both targets (native + `wasm32`): every in-scope
-  proposal implemented (tail calls are the last one outstanding), the spec testsuite at its achievable
-  ceiling, the WASI corpus green, the C ABI stable — and the size and speed numbers that decide
-  inclusion, measured and defended.
+- **`1.0.0`** — **the conformance clear-out**: the official spec testsuite driven to **zero failures,
+  zero skips and zero unrun files**, with an empty baseline and no deliberate spec deviations. Every
+  in-scope proposal is already implemented (tail calls landed 2026-08-14), so what remains is the
+  residual itself — the proposals the corpus contains that wasmrt had not targeted, and the blocks that
+  never ran at all.
+- **`1.0.x`** — the four review phases behind it, in a deliberate order: **`1.0.1`** hardening (incl.
+  module authenticity), **`1.0.2`** bug hunt + code hygiene, **`1.0.3`** optimization review, **`1.0.4`**
+  security review. The last two are **review-and-recommend**: they produce costed findings for a
+  decision, not a unilateral pass.
 
 Nothing is marked ✅ here until it passes its conformance gate — a checkmark means *verified against the
 official spec testsuite*, not merely "coded."
@@ -45,11 +50,11 @@ Legend: ✅ done & verified · 🚧 in progress · ⬜ planned
 | **0.7.0** | Text toolchain + Validate (complete) | `.wat` assembler + `.wast` runner, bringing the official spec testsuite online; plus the SIMD / atomics / GC / EH typing arms, so the type-checker covers everything the interpreter runs | ✅ |
 | **0.8.0** | WASI + CLI | host imports + module linking on a shared store + WASI preview 1 **including the sandboxed filesystem** (`--dir` / `--ro-dir` preopens); plus `#![forbid(unsafe_code)]` in the engine | ✅ |
 | **0.9.0** | C ABI | the `wasmrt.h` embedding surface — checked handles, caller-based host callbacks, configurable proposals + resource ceilings; gated by c-smoke, link-completeness and Miri | ✅ |
-| 0.10.0 | Hardening | the correctness punch-list, licensing, docs, size minimization, all gates green | ⬜ |
-| 0.11.0 | Bug hunt + code hygiene | a comprehensive audit across tested **and** untested paths — bugs, fall-throughs, stale workarounds, dead code, missing documentation | ⬜ |
-| 0.12.0 | Optimization review | measured options for making the shipped artifacts faster and smaller — judged at the binary and C-ABI boundary, not by micro-benchmarks | ⬜ |
-| 0.13.0 | Security review | an adversarial review of the penetration surfaces — hostile guests, malformed input, and C-ABI misuse — with recommended mitigations | ⬜ |
-| **1.0.0** | **Complete** | **every in-scope proposal implemented, conformance at its ceiling, C ABI stable, and the size/speed numbers that decide inclusion measured and defended** | ⬜ |
+| **1.0.0** | **Conformance clear-out** | the spec testsuite to **zero failures / zero skips / zero unrun**, empty baseline, zero deliberate deviations — which brings the proposals the corpus contains into scope | ⬜ |
+| 1.0.1 | Hardening | the correctness punch-list, **module authenticity (`pin`)**, licensing, docs, size minimization, all gates green | ⬜ |
+| 1.0.2 | Bug hunt + code hygiene | a comprehensive audit across tested **and** untested paths — bugs, fall-throughs, stale workarounds, dead code, missing documentation | ⬜ |
+| 1.0.3 | Optimization review | measured options for making the shipped artifacts faster and smaller — judged at the binary and C-ABI boundary, not by micro-benchmarks | ⬜ |
+| 1.0.4 | Security review | an adversarial review of the penetration surfaces — hostile guests, malformed input, and C-ABI misuse — with recommended mitigations | ⬜ |
 
 ## What you can do with wasmrt (use-case matrix)
 
@@ -74,21 +79,21 @@ Checked off as each capability lands and passes its gate.
 | Host imports (link a module against another) | ✅ | 0.8 |
 | Restrict which proposals a guest may use | ✅ | 0.9 |
 | Configurable resource ceilings (memory, call depth, GC) | ✅ | 0.9 |
-| Tail calls (`return_call`/`return_call_indirect`) | ⬜ | 0.10 |
+| Tail calls (`return_call`/`return_call_indirect`/`return_call_ref`) | ✅ | 0.10 |
 
 ### Text & conformance
 | Use case | Status | Lands in |
 | --- | --- | --- |
 | Assemble `.wat` → `.wasm` | ✅ | 0.7 |
 | Run `.wast` spec scripts | ✅ | 0.7 |
-| Pass the official WebAssembly spec testsuite | 🚧 99.4% | 0.7 |
+| Pass the official WebAssembly spec testsuite | 🚧 99.4% — **zero failures and zero skips is the `1.0.0` gate** | 0.7 → 1.0.0 |
 
 ### WASI & the CLI
 | Use case | Status | Lands in |
 | --- | --- | --- |
 | Run a WASI preview-1 program (stdout/args/env/clock) | ✅ | 0.8 |
 | Sandboxed filesystem (`--dir` / `--ro-dir` preopens) | ✅ | 0.8 |
-| Module pin verification / signatures | ⬜ | 0.10 |
+| Module pin verification / signatures | ⬜ | 1.0.1 |
 
 ### Embed wasmrt
 | Use case | Status | Lands in |

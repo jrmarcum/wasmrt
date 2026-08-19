@@ -13,9 +13,10 @@ head is a *competitor's* design — following it is exactly backwards.
 
 `scripts/check-wazmrt.sh` is **deleted**; its baseline survives as `scripts/wazmrt-provenance.txt`, which
 nothing reads. **Correctness anchors on the official spec testsuite, wasmtime's observable behaviour, and
-the wasmtk WASI corpus** — always the harder tests. **`1.0.0` no longer means parity**: it means every
-in-scope proposal implemented, conformance at its ceiling, the C ABI stable, and the size/speed numbers
-measured and defended. Provenance is **not** retired — `cmem/licensing.md`'s attribution stays.
+the wasmtk WASI corpus** — always the harder tests. **`1.0.0` no longer means parity** — and since
+2026-08-19 it no longer means "complete on our own terms" either: 🆕 **`1.0.0` IS THE CONFORMANCE
+CLEAR-OUT** (T13 — the corpus to zero failed / zero skipped / zero unrun, empty baseline, zero deliberate
+deviations), with hardening / bug hunt / optimization / security behind it as `1.0.1`–`1.0.4`. Provenance is **not** retired — `cmem/licensing.md`'s attribution stays.
 
 ⚠️ **This re-weights the remaining work.** While the oracle defined success, *canonical* was the gate and
 fast/small were aspirations with a footnote. **Now fast and small ARE the gate**, so **T11 decides the
@@ -180,8 +181,18 @@ owner-authorized and deliberately re-baselined; `check-wazmrt.sh` reports NO DRI
 **T9a #1–#9 and #11 are now all closed.** ✅ **Tail calls landed 2026-08-14 (T9f), so no in-scope
 proposal is missing**, and `func.wast` 8 (the withdrawn body-order rule + duplicate identifiers) moved
 to T10 with the other bugs (owner, 2026-08-14). **`T9e pin` is the ONLY T9 item left.**
-Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
-**T12** security review — the order **measure → find → optimize → attack** is deliberate.
+🆕 **THE LADDER WAS RE-CUT (owner, 2026-08-19).** `1.0.0` is no longer "complete on our own terms" — it
+is **T13, the CONFORMANCE CLEAR-OUT**: the corpus to **zero failed / zero skipped / zero unrun**, an
+empty baseline and **zero deliberate deviations**, which brings the proposals the corpus contains into
+scope (custom-descriptors/`exact`, table64, wide-arithmetic, custom-page-sizes, custom-annotations,
+memory64-imports, legacy `delegate`). **It runs FIRST.** Behind it: **T9 hardening `1.0.1`**, **T10 bug
+hunt `1.0.2`**, **T11 optimization review `1.0.3`**, **T12 security review `1.0.4`** — **clear → measure
+→ find → optimize → attack**. ⚠️ **T-numbers are IDENTIFIERS, not an order** (they are cited across
+every `cmem/` file), so only the ordering moved. ⚠️ **T13-0 comes before any implementation**:
+instrument the skips and audit the runner's SCORING — that phase alone was worth 292 skips→passes and
+14 misfiled failures in the other runtime. **Rank by ASSERTIONS UNBLOCKED, not by failure count**, and
+expect failures to RISE honestly as skips convert — the gate is *no file lost a pass*, per-file.
+🚦 **`pin` is an OPEN owner question** (load-once vs. verification) — see `cmem/security-model.md`.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`
 fix was real but did not move `br_table.wast`, which needed three further unlisted fixes. The full set
 of recurring lessons is in [`cmem/best-practices.md`](cmem/best-practices.md); detail is in

@@ -1,5 +1,153 @@
 # Roadmap
 
+## 🎯 THE 1.0 PROGRAM — the ladder RE-CUT (owner, 2026-08-19). **THIS IS THE NEXT WORK.**
+
+**The version ladder changed shape.** `1.0.0` is no longer "complete on wasmrt's own terms" reached by
+finishing T9–T12; it is a **specific, measurable deliverable of its own** — *clearing the skips and
+failures out of the run list* — and the four review phases become the `1.0.x` line behind it.
+
+| stage | version | what it is | shape |
+| --- | --- | --- | --- |
+| **T13 — Conformance clear-out** | **`1.0.0`** | drive the spec corpus to **zero failures, zero skips, zero unrun**, with an empty baseline | do the work |
+| **T9 — Hardening** | `1.0.1` | `pin`, and making the *shipped* configuration defensible | do the work |
+| **T10 — Bug hunt + code hygiene** | `1.0.2` | the unknown ones, across tested **and untested** paths | do the work |
+| **T11 — Optimization review** | `1.0.3` | measured options presented for a decision | **review + recommend** |
+| **T12 — Security review** | `1.0.4` | penetration surfaces, recommended plugs | **review + recommend** |
+
+⚠️ **The T-numbers are IDENTIFIERS, not an order.** They are load-bearing across every `cmem/` file
+(`T9a#7`, `T10a`, `T12z`…), so renumbering them would break more than it clarifies. The **order** is now
+**T13 → T9 → T10 → T11 → T12**. *(This is the "renaming one member of a set" hazard from
+`best-practices.md` §3A.2 — so the whole set keeps its names and only the ordering column moves.)*
+
+🔒 **`measure → find → optimize → attack` still holds inside the `1.0.x` line**, and the clear-out sits
+in front of all of it for a reason of its own: **T10's bug hunt and T11's baselines are both measured
+against the corpus**, so running them while 2,416 assertions are unadjudicated means hunting bugs in code
+whose conformance is unknown and optimizing an engine that is about to grow several proposals.
+
+⚠️ **Consequence to state plainly, because the reordering causes it:** `pin` moves *behind* 1.0.0, so
+**`1.0.0` ships with no authenticity check of any kind** (`pin.rs` is still a doc-comment stub). That is
+a deliberate consequence of putting conformance first, not an oversight. The **authority** half of the
+security model — the WASI sandbox — is built and unaffected.
+
+---
+
+### T13 — the CONFORMANCE CLEAR-OUT. `1.0.0` `[ ]`
+
+**Target: 0 failed / 0 skipped / 0 files unrun, and an EMPTY baseline.** The starting position is
+**62,238 / 378 / 2,038** — so **2,416 assertions are not passing**, and the second number is the smaller
+one.
+
+🚦 **This REVERSES two recorded scope invariants, and the reversal is the owner's decision, recorded
+here rather than drifting in silently** (`design-decisions.md`):
+
+1. **"Tables stay 32-bit"** — table64 is the largest in-scope-adjacent block and it is in the corpus.
+2. **"Untargeted proposals: record, do not fix"** (T9g) — custom-descriptors, `exact`, custom-page-sizes,
+   wide-arithmetic, custom-annotations, memory64-imports all come **into** scope, because a corpus at
+   zero cannot contain them as permanent baseline lines.
+
+**WASI preview 2/3 and the component model stay OUT** — they are not in this corpus and nothing here
+touches them.
+
+⚠️ **The honest security framing, taken from the runtime that already did this:** the untargeted-proposal
+assertions are modules wasmrt **refuses**, and *a module that will not run cannot do harm*. **Implementing
+them ADDS attack surface rather than closing a hole.** That is a legitimate thing to want — it is
+completeness, and completeness is the stated goal — but it means **every track below carries a soundness
+checkpoint, not just an assertion count**, and every proposal ships **with a feature gate on the same
+day** (see T13-F).
+
+#### 🔬 T13-0 — SCORE AND INSTRUMENT FIRST. Nothing else starts until this lands. `[ ]`
+
+**This is the single highest-value item and it implements nothing.** In the other runtime this phase
+alone converted **292 skips into passes** and reclassified **14 of 104 "failures"** — before a line of
+proposal code was written.
+
+- **Instrument every skip site** — source line + error name at each `skip`, run the whole corpus, revert
+  the probe. ⚠️ **Do not reason about the skips from reading the files**: when that was tried, **two of
+  four cases classified as SCORING bugs turned out to be decoder and assembler gaps rejecting VALID
+  modules.** *A wrong diagnosis that agrees with the evidence you chose to look at is the expensive kind.*
+- **Audit the runner's scoring for the two known defects**, both of which wasmrt is structurally exposed
+  to:
+  - ⚠️ **A classification rule that one call site does not consult.** There, the bare `(module …)` arm
+    never called `isOurLimitation`, so the identical error scored as a *skip* on one path and a *defect*
+    on another — 14 of 104. **Score the same error the same way on every path.**
+  - ⚠️ **An error name that conflates "your input is bad" with "we are incomplete"** cannot be scored
+    correctly by any caller, so every instance had to be banked as our gap — **292 correct rejections
+    across CORE files were counted as skips.** Split it *where the information is*, at the point of
+    failure. **And note the asymmetry when you do:** an omission from the "we-are-incomplete" side is a
+    **false pass**, which is the one direction that cannot be noticed afterwards — so that list must be
+    over-inclusive and guarded by "the untargeted directories never gain passes".
+- **Report the FOURTH number.** A file that dies in the lexer contributes to none of passed / failed /
+  skipped. Quote *passed / failed / skipped / files-with-errors* from here on.
+
+**Gate:** a per-cause table of the whole residual, **ranked by ASSERTIONS UNBLOCKED**, with the
+files-with-errors count beside it. That table — not the estimates in T9g below, which are hypotheses —
+decides the order of everything after it.
+
+#### 📊 The ranking rule, and why the failure column is the wrong one to plan from
+
+⚠️⚠️ **A module that fails to BUILD takes every assertion targeting it into skips.** So:
+
+- **An item triaged from the FAILURE column undercounts any defect whose symptom is a SKIP** — three
+  times in a row over there, and once here already: T9a#5 was logged at 6 and delivered **88**; T9a#8 was
+  logged at "1 file" and delivered **76**. Their R3 was triaged at ~10 failures and unblocked **225
+  assertions**; R5 was filed as "~23" and was **1,291** — *more than half of every skip in the suite*,
+  from one `return error.BadCommand`.
+- **Read the skip column in the same row.** A file at `0 passed / 1 failed / 34 skipped` is not a small
+  item; it is a module that will not build.
+- **A skip total is dominated by CASCADES** — measure the causes, not the column. Of one 144-skip
+  residual, **109 were a single untargeted proposal** and only ~34 direct: ten modules that fail to
+  assemble, and 99 `assert_return`s cascading behind them.
+- 🚦 **EXPECT THE FAILURE COUNT TO RISE, and do not treat that as a regression.** When 978 suppressed
+  assertions started executing there, failures went **143 → 216** while passing went **61,429 → 62,333**.
+  ⚠️ **The gate is therefore NOT the totals — it is "no file lost a pass", verified by joining the
+  PER-FILE pass counts.** wasmrt has held that check through all eighteen T9 passes; it is the only one
+  that stays meaningful while skips convert into verdicts.
+- ⚠️ **Some causes are rules we INVENTED, not rules we missed.** Two of one batch's six were checks the
+  validator had added that the spec does not have — one deleted outright, not narrowed. **A clear-out is
+  not only "implement more".** wasmrt has already hit this once: a strict declared-subtyping version was
+  measured, found to refuse 6 VALID modules, and rejected.
+
+#### 🗂️ The tracks — provisional, to be RE-RANKED by T13-0's table
+
+Named after the equivalent tracks in the runtime that already cleared these, so the two records read
+against each other. **Counts are from T9g and are hypotheses about causes, not measurements.**
+
+| track | what | logged assertions | notes |
+| --- | --- | --- | --- |
+| **T13-F** | **the GATE for every proposal below** | — | ⚠️ **A proposal that ships without a gate is not "enabled by default" — it is UNREFUSABLE.** wasmrt already has real gating (15 flags, enforced at validation), so this is small: **one `Feature` per track, landed the same day as the track**, plus **T10b**'s pin so the three spellings of the list cannot drift. A per-proposal checklist cannot ask this question about itself — it lives here. |
+| **T13-D** | custom-descriptors + `exact` | ~460 | the largest feature since GC. `br_on_cast_desc_eq`/`_fail` 98 each, `ref_cast_desc_eq` 94, its `binary.wast` 44; `exact`/`exact-casts` 18 + 108. ⚠️ **It RETYPES `br_on_cast` rather than only adding instructions**, so the same module is `assert_invalid` in core and VALID in the proposal snapshot — the corpus states this by shipping it twice with opposite verdicts. Soundness checkpoint: *a cast that admits a subtype where the spec demands exact is type confusion*, and the score cannot see it — **write the wrong answer down.** |
+| **T13-T** | 64-bit tables | ~185 | `table_copy64` 22, `table_init64` 93, `table_fill64` 70, `float_memory64` 84. Reverses the "tables stay 32-bit" invariant. The memory64 work is the template — *a memory carries its own index type* already exists. |
+| **T13-W** | wide-arithmetic | 108 | ⚠️ **Take the wire format from the testsuite's `(module binary …)`, not by guessing** — the overlong LEBs there exist to pin those sub-opcodes. Had they been guessed wrong, **every TEXT assertion would still have passed**, because our assembler and decoder would agree with each other. Soundness checkpoint: the 128-bit halves travel as a pair of i64s, so **transposing them validates cleanly and returns wrong numbers** — pin a carry, a borrow, and a signed/unsigned pair that differs only in the high half. |
+| **T13-P** | custom-page-sizes | ~39 | small, and it proves the limits plumbing. ⚠️ Enumerate every hardcoded `65536`; demand a byte-granularity out-of-bounds test. |
+| **T13-M** | memory64-imports | 20 | |
+| **T13-A** | custom-annotations | 8 | what is left after T9a's lexer work: 7 × "empty annotation id" + one annotation-id UTF-8 case. ⚠️ The character class is **printable ASCII plus tab/nl/CR** — not "idchars", not "non-control", not "valid UTF-8"; each of those three plausible readings passes most of the file. **A residue clustered in one rule means the rule is wrong, not that the edge cases are exotic.** |
+| **T13-L** | legacy `delegate` | — | removes wasmrt's **last deliberate spec deviation**. ⚠️ **Enumerate what the blanket refusal is currently catching before deleting it** — over there the same `return error` was also the only thing rejecting a bare `(func (delegate 0))`, which the assembler happily emits and the spec calls malformed; removing it without adding the enclosing-frame rule converts a malformation into an accept-invalid. The three tests asserting the refusal are **tests of a DECISION and expire with it — rewrite them in place**, one of them has a security half that must survive verbatim. |
+| **T13-S** | `sqrt` is `std`-gated | 1 | the single no_std float gap (platform libm). Only if the freestanding target needs it. |
+
+**Do not fix this order now.** T13-0 exists precisely because the numbers above are estimates read off
+error messages, and every previous estimate in this project made from that source was low.
+
+#### 🧾 The baseline, and what "done" means
+
+- **A baseline is only honest if every line carries a reason** — otherwise it is a way to make a red
+  number green, and adding a line to pass the build is the failure mode it invites.
+- ⚠️ **"By design" is not "pass", and it is not "fail" either.** Calling an unimplementable module a pass
+  is green-washing; calling it a failure overstates the defect count by an order of magnitude. It is a
+  **refusal**, and it belongs in an explained baseline that gates on **regressions**.
+- ⚠️ **A well-argued entry in a baseline is still an entry**, and the better the argument the longer it
+  sits unexamined. **The target is an EMPTY baseline**, which is what the other runtime reached — its
+  own last-standing entry carried the best reasoning in the file and was closed in about 40 lines once
+  someone asked whether it had to stay.
+- **Never green-wash our own gaps** — but the mirror rule earned 292 assertions: **being conservative is
+  not free. It is a claim about our own ignorance, and that claim can be checked.** A mnemonic that
+  exists in no wasm proposal is a malformation, and refusing it is a verdict wasmrt is entitled to give.
+
+**Gate for T13 as a whole:** 0 failed / 0 skipped / 0 files with errors across all 284 files; the
+baseline file empty; **zero deliberate spec deviations**; every new proposal carries a `Feature` flag
+**and a test that the flag refuses it**; no file lost a pass at any step (per-file join, not totals); and
+the four workspace surfaces + C-ABI + Miri gates green throughout.
+
+---
 ## Status (2026-08-10) — PORT phase; gate OPEN, oracle **RE-BASELINED**. **T0–T8 DONE; T9 IN PROGRESS.**
 
 **Current tree (unreleased, ahead of the published v0.9.0; numbers re-audited 2026-08-19):** suite
@@ -41,7 +189,7 @@ of the bugs which is T10 anyway"*). The T8 block below is the v0.9.0 release rec
 **proposal gating** and **configurable resource ceilings** (the owner chose real gating over
 limits-only), a **`Linker` in core** shared by the C ABI / native crate / WASI / `.wast` runner, and
 fixed **two silent-wrong-output defects** that work surfaced. Suite **61,033 / 738 / 3,075 — 98.8%**.
-**Next: T9 (0.10.0)** — the correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin`. **Then T10 — bug hunt + code hygiene (0.11.0), and T11 — optimization review (0.12.0)**, both added by the owner 2026-08-06. **measure → find → optimize**, in that order and for a reason (see the Definition of done).
+🆕 **SUPERSEDED 2026-08-19 by the 1.0 PROGRAM at the top of this file.** This line read *"Next: T9 (0.10.0) … then T10 (0.11.0), T11 (0.12.0)"*. The ladder was re-cut by the owner: **T13 conformance clear-out ships as `1.0.0` and runs FIRST**, then T9 hardening `1.0.1`, T10 bug hunt `1.0.2`, T11 optimization `1.0.3`, T12 security `1.0.4`. **clear → measure → find → optimize → attack**, in that order and for a reason (see the Definition of done).
 
 ## 🔒 ANCHOR CHANGE (owner, 2026-08-11) — the oracle is retired; finish and compete
 
@@ -550,7 +698,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     `elem.wast` 17 → 13, `linking.wast` +4 passes. The one file that got worse is `i31.wast`
     (+1 visible failure, −1 skip): a module that now builds and meets the already-logged GC-const-expr
     gap. 351 workspace tests, clippy clean, all four surfaces.
-- **T9 — Correctness punch-list, licensing, docs, size, all gates green.** `[◐]`
+- **T9 — Hardening: correctness punch-list, `pin`, licensing, docs, size, all gates green.** 🆕 **Ships as `1.0.1`, and now runs AFTER T13 (owner, 2026-08-19).** `[◐]`
 
   **Scoped 2026-08-06 from a measured audit**, not from old notes: every item below was re-verified
   against the current build, and each carries what it actually costs. Two were **found during that
@@ -1179,7 +1327,28 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     rejects a `../../README.md` path — the trap `releasing.md` warned about. Verified with
     `cargo package --no-verify` on all three: clean.
 
-  ### T9e — `pin` (module authenticity) `[ ]`
+  ### T9e — `pin` (module authenticity) `[ ]` 🚦 **OWNER QUESTION OPEN 2026-08-19**
+
+  🚦 **The owner has proposed load-once-into-memory INSTEAD of the verification track** — *"the file
+  can't be swapped out mid-run"*. **Reviewed in full in [security-model.md](security-model.md); do not
+  act on this entry until that decision lands.** The three findings in brief:
+  1. ⚠️ **The premise does not hold — wazmrt does BOTH.** `pin.zig` (root-owned SHA-256 allow-list) and
+     `sign.zig` (Ed25519) are built and armed by default when a root key or DB is present. **Load-once
+     is how its gate is made TOCTOU-safe, not a replacement for it** — and this file already said so
+     (*"hash the in-memory bytes about to run, never re-read by path"*), before the question was asked.
+  2. ✅ **wasmrt already HAS load-once.** Every executing path goes through `read_module_bytes`
+     (`crates/wasmrt/src/main.rs:200`) — one `fs::read`, then owned bytes all the way to execution; the
+     C ABI never opens a file at all. ⚠️ **But it is a doc comment, not a gate**, so a future loader or
+     an `mmap` at T11 could take it away silently. **That test is the part actually missing.**
+  3. 🚦 **They answer different questions.** Load-once = *integrity over time* (stops the mid-run swap).
+     Pin = *authenticity* (stops the file being replaced **before** load, which needs no race and is the
+     strictly easier attack). ⚠️ Substituting one for the other keeps the defence against the hard
+     attack and drops it against the easy one.
+
+  **Recommendation: gate load-once (cheap, already true), and re-scope `pin` to a default-`off`
+  mechanism rather than deleting it** — or, if it is dropped, say so in `wasmrt.h` and the README, since
+  an undocumented gap gets found twice.
+
   - `crates/wasmrt-core/src/pin.rs` is a **doc-comment stub**, so **a wasmrt build performs no
     authenticity check of any kind**. Slated for T7, then T8, slipped both. The mechanism is fully
     decided — do **not** re-derive it — in `security-model.md`: SHA-256 content-addressed plaintext DB,
@@ -1313,7 +1482,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   some of those will be failures at first (the same accounting as the `register` work on 08-04 and the
   linker work on 08-06).
 
-- **T10 — Bug hunt + code hygiene.** *(Owner, 2026-08-06.)* `[ ]`
+- **T10 — Bug hunt + code hygiene.** *(Owner, 2026-08-06.)* 🆕 **Ships as `1.0.2` (owner, 2026-08-19).** `[ ]`
 
   **This is the `INDEX.md` "look for code issues" trigger run as a scheduled task**, not a new process —
   read that trigger first; it is binding and already specifies the method (fan out parallel read-only
@@ -1432,7 +1601,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   directions and pins the header's constants by **name and value**, not by count. *(wazmrt shipped this
   exact defect — its header advertised `TAIL_CALL = 14` while its C-ABI bound stopped at 13.)*
 
-- **T11 — Optimization review (a DISCUSSION, not a blind pass).** *(Owner, 2026-08-06.)* `[ ]`
+- **T11 — Optimization review (a DISCUSSION, not a blind pass).** *(Owner, 2026-08-06.)* 🆕 **Ships as `1.0.3` (owner, 2026-08-19).** `[ ]`
 
   **The deliverable is options presented to the owner with measurements and trade-offs — then a
   decision — not unilateral optimization.** Scope: making the code more efficient, faster and smaller,
@@ -1509,7 +1678,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   seriously without re-deriving is the *shape*: the **cdylib is where wasmrt is behind**, and the cdylib
   is the artifact wasmtk and every C consumer link.
 
-- **T12 — Security review: find the penetration surfaces, recommend the plugs.** *(Owner, 2026-08-06.)* `[ ]`
+- **T12 — Security review: find the penetration surfaces, recommend the plugs.** *(Owner, 2026-08-06.)* 🆕 **Ships as `1.0.4` (owner, 2026-08-19).** `[ ]`
 
   **A review-and-recommend phase, like T11** — the deliverable is *findings + recommended mitigations
   with their costs*, presented for a decision. Do not unilaterally harden: several plausible mitigations
@@ -1702,13 +1871,14 @@ clean (or the oracle re-baselined deliberately).
 
 | Task | Version | What it is | Why it is separate |
 | --- | --- | --- | --- |
-| **T9** | 0.10.0 | Correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin` | Closes the *known* gaps — everything already written down |
-| **T10** | 0.11.0 | Bug hunt + code hygiene | Finds the *unknown* ones, across tested **and untested** paths. Distinct from T9 on purpose: T9 works a list, T10 goes looking. |
-| **T11** | 0.12.0 | Optimization review | A **discussion with measurements**, not a pass. **Cannot start before T9's baselines exist** — optimizing without a baseline is guesswork. |
-| **T12** | 0.13.0 | Security review — find penetration surfaces, recommend plugs | Also **review-and-recommend**, and deliberately **last**: it must audit the code that ships, so it has to follow the bug hunt *and* the optimization pass. An optimization can introduce a surface (`overflow-checks`, a fast path that skips a bounds check), so reviewing before T11 would audit code that is about to change. |
+| **T13** | **1.0.0** | **Conformance clear-out** — the corpus to zero failed / zero skipped / zero unrun, empty baseline | 🆕 **Added by the owner 2026-08-19 and placed FIRST.** T10 and T11 are both measured against the corpus, so hunting bugs or setting baselines while 2,416 assertions are unadjudicated measures the wrong engine. |
+| **T9** | **1.0.1** | Hardening — correctness punch-list, `pin`, licensing/docs, size + perf measurement | Closes the *known* gaps — everything already written down |
+| **T10** | **1.0.2** | Bug hunt + code hygiene | Finds the *unknown* ones, across tested **and untested** paths. Distinct from T9 on purpose: T9 works a list, T10 goes looking. |
+| **T11** | **1.0.3** | Optimization review | A **discussion with measurements**, not a pass. **Cannot start before T9's baselines exist** — optimizing without a baseline is guesswork. |
+| **T12** | **1.0.4** | Security review — find penetration surfaces, recommend plugs | Also **review-and-recommend**, and deliberately **last**: it must audit the code that ships, so it has to follow the bug hunt *and* the optimization pass. An optimization can introduce a surface (`overflow-checks`, a fast path that skips a bounds check), so reviewing before T11 would audit code that is about to change. |
 
-Ordering is deliberate and should not be shuffled: **measure (T9) → find (T10) → optimize (T11) →
-attack (T12)**. Optimizing before the bug hunt risks micro-tuning code that is about to change or be
+Ordering is deliberate and should not be shuffled: **clear the corpus (T13) → measure (T9) → find (T10)
+→ optimize (T11) → attack (T12)**. Optimizing before the bug hunt risks micro-tuning code that is about to change or be
 deleted; reviewing performance before any baseline exists produces opinions rather than deltas; and a
 security review is only worth the paper it is written on if it examines the *final* code.
 

@@ -15,9 +15,21 @@ matrix + a fast cadence).
 (owner)** — see the 1.0 entry below.*
 
 - **`0.x`** — in progress; each release lands one gated stage.
-- **`1.0.0`** — **complete on wasmrt's own terms** on both targets: every in-scope proposal implemented,
-  conformance at its achievable ceiling, WASI corpus green, C ABI stable, and the size/speed numbers that
-  decide inclusion measured and defended. 🔒 **The wazmrt oracle was retired as the 1.0 criterion on
+- **`1.0.0`** — 🆕 **RE-CUT 2026-08-19 (owner): the CONFORMANCE CLEAR-OUT.** The spec corpus driven to
+  **zero failures, zero skips, zero unrun files**, an **empty baseline**, and **zero deliberate spec
+  deviations**. This is a specific deliverable, not a summary of the phases before it — and it brings the
+  proposals the corpus contains into scope (custom-descriptors/`exact`, table64, wide-arithmetic,
+  custom-page-sizes, custom-annotations, memory64-imports, legacy `delegate`). WASI p2/p3 and the
+  component model stay out. Task **T13** in `roadmap.md`.
+- **`1.0.x`** — the four review phases, behind it and in this order: **`1.0.1`** T9 hardening (incl.
+  `pin`), **`1.0.2`** T10 bug hunt + code hygiene, **`1.0.3`** T11 optimization review, **`1.0.4`** T12
+  security review. ⚠️ **The API stability promise starts at `1.0.0`**, so the C ABI and `wasmrt-core`
+  surfaces freeze when the clear-out ships — a proposal added at 1.0.0 may add a `wasmrt_feature_t`
+  value, which is additive and keeps `abi_version() == 1`; anything that is not additive must land
+  BEFORE 1.0.0 or wait for 2.0.
+- *(Superseded: `1.0.0` previously meant "complete on wasmrt's own terms — every in-scope proposal
+  implemented, conformance at its achievable ceiling, C ABI stable, size/speed measured and defended".
+  That reading made 1.0 a judgement call; the clear-out makes it a number.)* 🔒 **The wazmrt oracle was retired as the 1.0 criterion on
   2026-08-11 (owner)** — the two runtimes now compete independently for inclusion in wasmtk and the
   universalWasmLoader-\* runtimes, so parity with a competitor is neither the goal nor a meaningful gate.
 - Pre-1.0 the public API (both `wasmrt-core` and `wasmrt.h`) is **unstable** — breaking changes bump the
@@ -32,7 +44,12 @@ line fills up, the remaining stage→version map shifts down by one rather than 
 one from 0.8 onward when the 0.6 line filled up; T6 and the T4 completion then shipped together in 0.7.0*:
 0.1 T0 scaffold · 0.2 T1 types+reader · 0.3 T2 opcode · 0.4 T3 decode · 0.5 T4 validate (core) ·
 0.6.x T5 interp (patch per feature slice, 0.6.0–0.6.9) · **0.7 T6 text toolchain + T4 completion (the deferred SIMD/atomics/GC/EH typing arms)** ·
-0.8 T7 wasi+cli · 0.9 T8 C-ABI · 0.10 T9 hardening · **0.11 T10 bug hunt + code hygiene** · **0.12 T11 optimization review** · **0.13 T12 security review** · **1.0 = complete on its own terms**.
+0.8 T7 wasi+cli · 0.9 T8 C-ABI · 🆕 **1.0.0 T13 conformance clear-out** · **1.0.1 T9 hardening** · **1.0.2 T10 bug hunt + code hygiene** · **1.0.3 T11 optimization review** · **1.0.4 T12 security review**.
+
+🆕 **RE-CUT 2026-08-19 (owner).** The `0.10`–`0.13` rungs are gone: T9–T12 became the `1.0.x` line and a
+new task, **T13 — the conformance clear-out — takes `1.0.0` and runs FIRST**. ⚠️ **T-numbers are
+identifiers, not an order** (they are cited across every `cmem/` file), so the order is **T13 → T9 → T10
+→ T11 → T12** while the names stay put. The single-digit-patch rule is satisfied: `1.0.0`…`1.0.4`.
 
 *(T10, T11 and T12 added by the owner 2026-08-06. The single-digit-patch rule constrains the PATCH component
 only, so a two-digit MINOR — 0.10 … 0.13 — is correct and not a violation.)*
@@ -186,7 +203,7 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
   and the **full** `cmem/` sync were all in the release commit `a7abd83` itself, so the published
   artifact carries its own docs. Nine `cmem/` files plus `tests/README.md` were touched, and the v0
   header draft in `docs/port/` was marked HISTORICAL rather than left to mislead.
-- **Next release: T9 — the correctness punch-list, tail calls, licensing/docs, size + perf measurement, `pin`** (0.10.0). **Then T10 — bug hunt + code hygiene (0.11.0), T11 — optimization review (0.12.0), and T12 — security review (0.13.0)**, all added by the owner 2026-08-06. Order: **measure → find → optimize → attack**.
+- **Next release: T13 — the conformance clear-out** (`1.0.0`, owner 2026-08-19): the corpus to zero failed / zero skipped / zero unrun, empty baseline, zero deliberate deviations. **Then T9 hardening (`1.0.1`, and `pin` is its headline since the clear-out ships without it), T10 bug hunt + code hygiene (`1.0.2`), T11 optimization review (`1.0.3`), T12 security review (`1.0.4`)**. Order: **clear → measure → find → optimize → attack**. *(Superseded: "Next release: T9 … (0.10.0), then T10 (0.11.0), T11 (0.12.0), T12 (0.13.0)".)*
 
 ### Previous
 
@@ -209,7 +226,7 @@ hands over the publish commands. Established rhythm since v0.1.0; the pre-publis
   path is indeed rejected — cargo packages the readme, so it must live inside the package). Categories
   used: core `wasm`/`no-std`/`development-tools`, capi `wasm`/`external-ffi-bindings`/`development-tools`,
   CLI `wasm`/`command-line-utilities`/`development-tools`. Verified with `cargo package --no-verify` on
-  each: clean. **These ship with the next publish (0.10.0)** — the already-published 0.9.0 crates do not
+  each: clean. **These ship with the next publish (`1.0.0`)** — the already-published 0.9.0 crates do not
   have them.
 - **Next release after v0.7.0: T7 — host imports + WASI preview 1** (0.8.0). Per-release checklist above
   — full doc sync before the publish handoff.
