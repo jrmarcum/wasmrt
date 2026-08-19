@@ -395,7 +395,31 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-### 🔬 T13-0 round 3 (2026-08-19) — `BadForm` attributed, and it is custom-descriptors
+### ⚠️⚠️ THE PER-FILE GATE WAS KEYED ON A NON-UNIQUE NAME (found + fixed 2026-08-19)
+
+**Seven basenames occur TWICE in the spec corpus** — `binary`, `br_on_cast`, `br_on_cast_fail`,
+`exports`, `imports`, `memory`, `throw` — once at the top level and once under `proposals/`. The
+`.wast` runner printed only the **basename**, so the two were indistinguishable in its report, and every
+analysis keyed on that name silently **merged them**.
+
+🎓 **A gate whose identifier is not unique is not a gate.** The per-file *“no file lost a pass”* check
+— the one this project relies on whenever skips convert into verdicts — could have had a regression in
+one file netted out by a gain in its twin and still reported **NONE**.
+
+⚠️ **How it surfaced:** `imports.wast` read **1 failure standalone and 12 in the corpus walk**. That
+looks exactly like harness state leaking between files, which would have been a much worse defect; it
+was two files wearing one name. *The alarming reading and the true one had the same symptom.*
+
+**Fixed:** the runner now prints the path relative to the working directory, so
+`proposals/threads/imports.wast` and `imports.wast` are separate rows.
+
+🔻 **Honest limitation, recorded rather than papered over.** Every per-file gate run BEFORE this fix
+was sound for the other ~277 files and **unverifiable for those 7**. The aggregate rose monotonically at
+every step and no unexplained failure increase was ever observed, so a masked regression is unlikely —
+**but it is not proven, and re-deriving it would mean rebuilding each intermediate commit.** From here
+the gate keys on the path.
+
+## 🔬 T13-0 round 3 (2026-08-19) — `BadForm` attributed, and it is custom-descriptors
 
 **Measured, not guessed** — the roadmap said *"attribute `BadForm` BEFORE scheduling it, because that is
 the mistake this section just caught"*, and it was the right call twice over. Method: run every `.wast`

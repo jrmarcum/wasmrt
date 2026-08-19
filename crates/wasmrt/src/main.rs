@@ -401,7 +401,20 @@ fn run_wast(rest: &[String]) -> ExitCode {
             errored += 1;
             continue;
         };
-        let name = f.file_name().unwrap_or_default().to_string_lossy();
+        // ⚠️⚠️ The **path**, not the basename. Seven basenames occur twice in the spec corpus
+        // — `binary`, `br_on_cast`, `br_on_cast_fail`, `exports`, `imports`, `memory`, `throw`
+        // — once at the top level and once under `proposals/`. Printing only the basename made
+        // two different files indistinguishable in the report, and any analysis keyed on that
+        // name silently merged them: a regression in one could be netted out by a gain in the
+        // other and the per-file "no file lost a pass" check would report NONE.
+        //
+        // 🎓 **A gate whose identifier is not unique is not a gate.** Found 2026-08-19 when the
+        // same file read 1 failure standalone and 12 in the corpus walk — which looked like a
+        // harness state leak and was two files wearing one name.
+        let name = f
+            .strip_prefix(std::env::current_dir().unwrap_or_default())
+            .unwrap_or(f)
+            .to_string_lossy();
         match wasmrt_core::wast::run_script(&src) {
             Ok(s) => {
                 passed += s.passed;
