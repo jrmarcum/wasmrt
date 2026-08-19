@@ -1,7 +1,7 @@
 # interop.md — the **wasmrt ⇄ wazmrt swappability contract**
 
-**CONTRACT VERSION: 1** · opened 2026-08-19 (owner) · **this file is IDENTICAL in both repos**
-(`wasmrt/cmem/interop.md` and `wazmrt/cmem/interop.md`).
+**CONTRACT VERSION: 2** · opened 2026-08-19 (owner) · last change 2026-08-19 · **this file is IDENTICAL
+in both repos** (`wasmrt/cmem/interop.md` and `wazmrt/cmem/interop.md`).
 
 > *"I think this may require a common memory md file in both projects to confer with each other on from
 > this point further so that both projects are on the same end track."* — owner, 2026-08-19
@@ -94,6 +94,7 @@ only inspected it. 🔒 **The verification gate must land before, or with, that 
 | `--max-memory <size>` | ✅ | ❌ absent at the CLI | ⚠️ **wasmrt must expose** (the ceiling exists) |
 | `--max-table-elems <count>` | ✅ | ❌ absent at the CLI | ⚠️ **wasmrt must expose** (the ceiling exists) |
 | `--features <list>` | ✅ | ❌ absent at the CLI | ⚠️ **wasmrt must expose** (gating exists in the C ABI) |
+| `--max-iterations <count>` | ✅ (2026-08-19) | ❌ absent — **and so is the ceiling** | ⚠️⚠️ **DIVERGENT AND LIVE — see §3.7** |
 | `--` ends host flags, rest is guest argv | ✅ | ❌ (preopens must precede the path) | ⚠️ **wasmrt must add** |
 | `--pins <path>` | ✅ | ❌ | ⚠️ **wasmrt must add** (with `pin`) |
 | `--verify off\|warn\|enforce` | ✅ | ❌ | ⚠️ **wasmrt must add** (with `pin`) |
@@ -228,7 +229,71 @@ come from root.
 | max linear memory | **`1 << 30`** (1 GiB) | ✅ **AGREED** — verified in both, 2026-08-19 |
 | max table elements | **`1 << 27`** (128 M) | ✅ **AGREED** — verified in both, 2026-08-19 |
 | max call depth | **512** | ✅ **AGREED** — verified in both, 2026-08-19 |
-| an execution time / fuel bound | **neither has one** — a hostile guest can hang the host | ⬜ **OPEN in both.** wazmrt has it as a decision gate in its hardening track; wasmrt in T12. **Whatever is decided must be decided together, or the two stop being swappable under load.** |
+| an execution bound (non-termination) | **`1 << 30` iterations** per top-level call | ⚠️⚠️ **DIVERGENT AND LIVE — wazmrt shipped it 2026-08-19, wasmrt has nothing. See §3.7.1.** |
+
+### 3.7.1 The execution bound — ⚠️ **DIVERGENT AND LIVE, and the UNIT matters more than the number**
+
+🔒 **Owner decision, 2026-08-19** (this resolves §5 decision #3): *"We do not want an infinite loop on
+purpose or by accident by the user. We need an internal check mechanism if this occurs and an error
+message to the user with a break on occurrence."*
+
+⚠️ **PROCESS NOTE, RECORDED RATHER THAN TIDIED AWAY: wazmrt shipped this BEFORE the contract carried
+it, which §1 rule 1 forbids** (*"a change is proposed in one repo and lands in both … before either
+ships behaviour that depends on it"*). The behaviour was built in wazmrt's Track H3 while this row
+still read *"neither has one"*. Nothing about the design is retracted — the owner asked for it — but
+the ordering was wrong, and this row is the correction, not the announcement.
+
+**Verified by RUNNING both on the SAME BYTES** (§1 rule 4), 2026-08-19 — one `.wasm` assembled by
+wasmrt's own `wasmrt wat`, containing `(loop (br 0))` and `(func $f (return_call $f))`:
+
+| runtime | `spin` (loop) | `tailspin` (tail call) |
+| --- | --- | --- |
+| **wazmrt** | traps `IterationLimitExceeded`, exit 1 | traps `IterationLimitExceeded`, exit 1 |
+| **wasmrt** | ⚠️ **hung** (killed at 10 s) | ⚠️ **hung** (killed at 10 s) |
+
+**So a module that returns an error under one runtime hangs the host under the other. That is the
+swappability break §5 decision #3 predicted, and it is live today.**
+
+#### The agreed design — what wasmrt must implement to close it
+
+| item | agreed value | why it is in the contract |
+| --- | --- | --- |
+| **the unit — ONE ITERATION** | **one loop back-edge, OR one tail-call hop** | 🎯 **THIS IS THE ROW THAT MATTERS.** Two runtimes with "a limit of `1<<30`" that COUNT DIFFERENT THINGS are not swappable: a module finishing just under the ceiling on one traps on the other. Aligning the number while leaving the unit unstated would look like agreement and behave like divergence. **Counting instructions instead of back-edges is a contract breach even at the same number.** |
+| **default** | **`1 << 30`** (1,073,741,824) | measured, not chosen — see below |
+| **scope of the budget** | **per top-level invocation**, refilled on entry | so a long-running host loop calling many short guest functions is never starved |
+| **re-entry** | a host callback calling back in **inherits the remainder**; it does NOT refill | a guest that can refill its budget by bouncing through a host function does not have a budget |
+| **what happens** | a **trap** — an ordinary trap on the runtime's normal trap path | not an abort, not a process exit |
+| **CLI flag** | `--max-iterations <count>`, in the **leading run of host flags** (§2.4) | position is part of the flag contract, not a detail |
+| **`0` at the CLI** | **unlimited** | |
+| **the message** | must state the **ceiling that was hit** and **how to raise it** | |
+| **what it must NOT claim** | it bounds non-termination; it does **not** detect an infinite loop | a legitimately long-running module trips the same trap, and its owner needs to be told to raise the ceiling — not told a falsehood about their program |
+| **a count, NOT a clock** | binding | a wall-clock deadline makes the same module trap on a slow machine and pass on a fast one — the two runtimes would then disagree *by machine*, which is unswappable by construction. It also cannot be enforced without a thread and a clock, which the freestanding target does not have. |
+
+⚠️ **Why the tail-call tick is called out separately: a back-edge counter alone looks complete and is
+not.** A local `return_call` reuses the interpreter's native frame *by design*, so it makes no backward
+branch and grows no call depth — the call-depth ceiling cannot see it either. `(func $f (return_call
+$f))` runs forever under a back-edge-only design. **Both runtimes recurse natively for `call` and both
+implement tail calls, so this applies to both.** ⚠️ It is also the tick whose absence is invisible to an
+obvious test: delete it and the loop test still passes.
+
+**The default is measured, and the method transfers** — run the spec corpus at descending budgets until
+it breaks. wazmrt's result (284 files): green at `1<<20`; at `1<<18` **only** `return_call`,
+`return_call_indirect`, `return_call_ref` fail; at `1<<14`, 36 failures across 8 files. The heaviest
+legitimate workload in the suite is `return_call.wast`'s **million-hop chain**, which fits under `1<<20`
+with under 5% to spare — so `1<<30` is ~1000x the measured peak. ⚠️ **wasmrt should re-run this against
+its own corpus rather than adopting the number on trust**; if its peak differs materially, that is a
+finding about one of the two engines and belongs in §4 as an observation.
+
+⚠️ **Keep the new error OUT of the "is this a spec trap?" predicate** in the `.wast` runner (wazmrt:
+`isRuntimeTrap`). An engine resource cap must not satisfy an `assert_trap` meant for real trapping
+behaviour — and excluding it has a second payoff: **the conformance corpus becomes a live gate on the
+ceiling**, failing loudly when the budget is set too low instead of banking the timeout as the expected
+trap. That is what made the measurement above possible.
+
+**REOPEN / CLOSE CONDITION:** this row becomes ✅ AGREED when wasmrt ships the bound with the same unit
+and default, and the differential table above is re-run with both trapping. **Until then a deployment
+that swaps wasmrt in loses the protection silently** — there is no error, the workload simply never
+returns. *(Same failure shape as the pin-DB path risk in §3.3: a swap that disarms without saying so.)*
 
 ---
 
@@ -245,6 +310,8 @@ decays exactly like any other claim.
 | 3 | **run the same pin DB + the same module under both**, across all nine `decide()` rows | a policy that is honoured *differently*, which is worse than not being honoured |
 | 4 | **row-by-row diff of the WASI rights tables** (§3.6) | the original finding that opened this file: a right present in one and absent in the other, where the read-only test passes trivially because the right is not in the mask |
 | 5 | **the same CLI invocation under both**, for every row of §2 | the `--dir` separator class — a flag that does not error and does the wrong thing |
+| 6 | **run a non-terminating module under both, under a timeout** — one `.wasm` containing `(loop (br 0))` **and** `(func $f (return_call $f))`, both shapes, both runtimes, low `--max-iterations` | §3.7.1. ⚠️ **Must be run under a timeout and must assert the EXIT, not the output**: the failing side produces no output at all, so a check that greps stdout passes vacuously against a hung process. The two shapes are separate cases on purpose — a back-edge-only implementation passes the first and hangs on the second |
+| 7 | **the same module at a budget just under and just over its true cost**, both runtimes | that both count the SAME UNIT (§3.7.1). Equal defaults with different units disagree only near the ceiling, which is exactly where nobody looks |
 
 ⚠️ **A disagreement found by any of these is recorded as an OBSERVATION until its cause is traced.**
 Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
@@ -257,7 +324,8 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 | --- | --- | --- |
 | 1 | **The shared pin DB path** (§3.3) | until it is decided, a swap can silently disarm verification |
 | 2 | **Who accepts whose CLI spelling, and by when** (§2.1) | the additive plan needs both halves; `wasmrt wat` and `wazmrt pin` each exist on one side only |
-| 3 | **Fuel / execution bound** (§3.7) | if one ships a bound and the other does not, a workload that completes under one hangs under the other |
+| ~~3~~ | ~~**Fuel / execution bound** (§3.7)~~ | ✅ **DECIDED by the owner 2026-08-19** — a bound is wanted, with an error message and a break. Design agreed in **§3.7.1**. ⚠️ **The decision is closed; the DIVERGENCE is open**: wazmrt ships it, wasmrt does not, and the predicted failure ("a workload that completes under one hangs under the other") is **verified live**, not hypothetical |
+| 5 | **When does wasmrt land the execution bound** (§3.7.1) | until it does, swapping wasmrt in **silently removes** the protection — no error, the workload just never returns |
 | 4 | **Exit-code table** (§2.3) | only needed if scripts are expected to branch on specific codes |
 
 ---
@@ -267,3 +335,4 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 | version | date | change |
 | --- | --- | --- |
 | **1** | 2026-08-19 | Opened. Scope set by the owner (CLI options + security checks; C ABI explicitly out). Recorded: the `--dir` separator break and the bare-path-executes consequence, both live today; the pin DB path risk; the nine-row `decide()` matrix; the ceiling defaults, verified equal in both; the WASI rights rows already agreed. |
+| **2** | 2026-08-19 | **The execution bound (§3.7.1).** Owner decided a bound is wanted; §5 decision #3 closes. wazmrt shipped `--max-iterations` + `IterationLimitExceeded` (default `1<<30`) in its Track H3 — ⚠️ **before this file carried it, which §1 rule 1 forbids; recorded as a process breach rather than tidied away.** New rows: the flag in §2.2; the agreed design in §3.7.1, whose load-bearing clause is **the UNIT** (one loop back-edge **or** one tail-call hop) — equal defaults with different units are not swappable; differential checks 6 and 7. **Verified by running both on the same wasmrt-assembled bytes: wazmrt traps on both shapes, wasmrt hangs on both.** Status ⚠️ DIVERGENT AND LIVE until wasmrt lands it. |

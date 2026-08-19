@@ -1426,6 +1426,62 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   baseline does not reproduce here at all, so **build-to-build variance (~7%) exceeds the ~5%
   regression T11 is chasing** — T11's first job is a benchmark that can resolve 5%.
 
+  ### T9i — The ITERATION BUDGET: bound non-termination. `1.0.1` ✅ **DECIDED 2026-08-19** `[ ]`
+
+  🔒 **Owner, 2026-08-19: *"3 has already been decided in the wazmrt project, just follow their lead."***
+  It is a **contract row now** — [`interop.md`](interop.md) §3.7/§3.7a, CONTRACT VERSION 2 — so this is
+  not a wasmrt design decision to re-open, and a divergence here breaks swappability under load.
+
+  **The gap it closes, which is live in wasmrt today:** nothing bounds execution time.
+  `max_call_depth` (512) bounds recursion, the ceilings bound allocation, and `(loop br 0)` runs
+  forever with no interrupt and no error. The embedder has no timeout. **A hostile guest can hang the
+  host** — and under `panic = "abort"` there is nothing to catch.
+
+  **What to build** (values fixed by the contract, not by us):
+
+  - **An iteration budget — a COUNT, not a clock.** Default **`1 << 30`**, in `ResourceLimits`
+    beside `max_memory_bytes` / `max_table_elems` / `max_call_depth`.
+  - ⚠️⚠️ **TICK IN TWO PLACES, and the second is the one that matters.** The loop back-edge is the
+    obvious site. The other is **the tail-call trampoline** — and **wasmrt built exactly that
+    trampoline at T9f on 2026-08-14**: `run` reports the callee through a `TailCall` out-parameter and
+    `call_function` **loops at the same `depth`**. A local `return_call` therefore makes **no backward
+    branch and grows no call depth**, so `max_call_depth` cannot see it and neither can a back-edge
+    counter. **`(func $f (return_call $f))` runs forever in wasmrt right now.** 🎓 *The feature that was
+    a correctness win five days ago is the hole in this limit — the constant-stack property is exactly
+    what makes it invisible to both existing bounds.*
+  - **Refill per TOP-LEVEL invocation; re-entry inherits the remainder** — the same rule re-entrancy
+    already follows, and for the same reason: **a guest that can restart its own budget by bouncing
+    through a host callback does not have a budget.**
+  - **"Unlimited" is `u64::MAX` filled at refill**, so both tick sites keep exactly one test and the
+    hot path never branches on a mode. ⚠️ **T9a#7's lesson applies directly** — threading `pc` through
+    `run` measured **3.6% slower** and had to be redone; this touches the same loop, so **benchmark
+    A/B/A before and after** and treat a regression as a design problem, not a cost of doing business.
+  - **Two surfaces, two conventions for `0`, each documented where it is used:** the CLI's
+    `--max-iterations 0` means **unlimited**; the C ABI's `wasmrt_config_set_max_iterations(cfg, 0)`
+    means **leave at the default**, like every other ceiling — an embedder wanting none passes
+    `UINT64_MAX`. ✅ **Additive to the C ABI, so `abi_version()` stays 1.**
+  - **A distinct error**, not a §4.2 trap. ⚠️ **The `.wast` runner must NOT admit it as a runtime
+    trap** — that is what keeps the corpus a live gate on the number: too low a budget then fails the
+    run **loudly** instead of banking a timeout as the trap an `assert_trap` was asking for.
+    (`CallStackExhausted` **is** admitted, deliberately — `call.wast`'s runaway cases exist to make an
+    engine's recursion cap fire. **No spec test asks an engine to loop forever.**)
+  - **The message names the flag and does not overclaim:** *"did not terminate within N iterations"* —
+    **never** "infinite loop detected". It bounds non-termination; it does not *detect* an infinite
+    loop, which is not detectable, and a legitimately long-running module trips the same limit.
+
+  ⚠️ **RE-RUN THE DESCENT ON OUR OWN CORPUS — do not inherit the number blind.** wazmrt measured its
+  default by re-running its corpus at descending budgets until it broke: green at `1 << 20`, 11
+  failures at `1 << 18` (**only** the three `return_call*` files), 36 across 8 files at `1 << 14` — so
+  the heaviest legitimate workload in the suite is the tail-call family, and `1 << 30` sits ~1000×
+  above it. **The value is contract-fixed; the measurement is ours to reproduce.** If our corpus breaks
+  at a different budget, that disagreement is a finding about one of the two engines, not a reason to
+  pick a different default.
+
+  **Gate:** `(func $f (return_call $f))` and `(loop br 0)` both terminate with the iteration error
+  (**both**, or the second tick site is untested); the property is mutation-verified; the corpus descent
+  is re-run and recorded; steady-state throughput measured A/B/A with no regression; suite counts
+  unchanged; and the C-ABI + Miri gates green with `abi_version()` still **1**.
+
   ### T9h — Cross-module type identity: a type registry on the `Store` ✅ **DONE 2026-08-08** *(approach approved by the owner the same day)*
 
   **Suite 61,724/554 → 61,738 / 536 / 2,466. `type-subtyping.wast` reached 72/0/0** (from 36/44 that
