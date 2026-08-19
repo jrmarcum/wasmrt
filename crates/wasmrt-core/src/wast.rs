@@ -127,6 +127,9 @@ struct Runner {
     /// is that owner: a one-field module instantiated into the same store, so a guest importing
     /// `(memory 1 2)` genuinely shares its bytes.
     spectest_mem: Option<InstanceId>,
+    /// `(module definition $M …)` — assembled bytes held for a later `(module instance …)`,
+    /// deliberately NOT instantiated.
+    definitions: Vec<(String, Vec<u8>)>,
     summary: Summary,
 }
 
@@ -294,7 +297,16 @@ impl Runner {
 
     fn build(&mut self, form: &[Sexpr]) -> Result<InstanceId, BuildErr> {
         let bytes = Self::module_binary(form).map_err(BuildErr::Assemble)?;
-        let md = crate::module::decode(&bytes).map_err(BuildErr::Decode)?;
+        self.instantiate_bytes(&bytes)
+    }
+
+    /// decode → validate → link → instantiate, from module bytes.
+    ///
+    /// Split out of [`Self::build`] so `(module instance $I $M)` can instantiate a stored
+    /// definition **again** — instantiation is generative, and a second instance must get its
+    /// own globals, tables and memories rather than a handle to the first.
+    fn instantiate_bytes(&mut self, bytes: &[u8]) -> Result<InstanceId, BuildErr> {
+        let md = crate::module::decode(bytes).map_err(BuildErr::Decode)?;
         crate::validate::validate(&md).map_err(BuildErr::Validate)?;
         let imports = self.resolve_imports(&md)?;
         self.store
@@ -302,7 +314,84 @@ impl Runner {
             .map_err(BuildErr::Instantiate)
     }
 
+    /// `(module definition $M …)` and `(module instance $I $M)` — §: instantiation is
+    /// **generative**, so the suite needs to define a module once and instantiate it twice,
+    /// asserting the two instances have separate state.
+    ///
+    /// Returns `true` when the form was one of these, so the ordinary path is skipped.
+    /// ⚠️ A `definition` is **assembled but NOT instantiated** — that is the whole distinction,
+    /// and instantiating it here would make `instance.wast`'s generativity assertions pass for
+    /// the wrong reason by giving every `instance` the definition's own state.
+    fn try_module_definition_or_instance(&mut self, list: &[Sexpr]) -> bool {
+        // The optional `$name` may precede the keyword: `(module $M definition …)` does not
+        // occur, but `(module definition $M …)` does, so scan both positions.
+        let kw_at = list
+            .iter()
+            .take(3)
+            .position(|s| matches!(s.as_atom(), Some("definition" | "instance")));
+        let Some(k) = kw_at.filter(|&k| k > 0) else {
+            return false;
+        };
+        let kw = list[k].as_atom().unwrap_or("");
+        let name = list
+            .get(k + 1)
+            .and_then(Sexpr::as_atom)
+            .filter(|a| a.starts_with('$'))
+            .map(str::to_string);
+        if kw == "definition" {
+            // Assemble the remaining fields as an ordinary module, but only STORE the bytes.
+            let mut form: Vec<Sexpr> = alloc::vec![Sexpr::Atom(String::from("module"))];
+            form.extend(list[k + 1 + usize::from(name.is_some())..].iter().cloned());
+            match crate::wat::assemble_module(&form) {
+                Ok(bytes) => {
+                    if let Some(n) = name {
+                        self.definitions.push((n, bytes));
+                    }
+                }
+                Err(e) if BuildErr::Assemble(e.clone()).is_unsupported() => {
+                    self.summary.skipped += 1;
+                }
+                Err(e) => self.fail(format!("module definition failed to assemble: {e}")),
+            }
+            return true;
+        }
+        // `(module instance $I $M)` — instantiate a previously-defined module afresh.
+        let of = list
+            .get(k + 1 + usize::from(name.is_some()))
+            .and_then(Sexpr::as_atom)
+            .unwrap_or("");
+        let Some((_, bytes)) = self.definitions.iter().find(|(n, _)| n == of) else {
+            self.summary.skipped += 1;
+            return true;
+        };
+        let bytes = bytes.clone();
+        self.last_build_failed = false;
+        match self.instantiate_bytes(&bytes) {
+            Ok(inst) => {
+                if let Some(n) = name {
+                    self.named.push((n, inst));
+                    self.current = None;
+                } else {
+                    self.current = Some(inst);
+                }
+            }
+            Err(e) => {
+                if e.is_unsupported() {
+                    self.summary.skipped += 1;
+                } else {
+                    self.fail(format!("module instance failed to build: {e}"));
+                }
+                self.current = None;
+                self.last_build_failed = true;
+            }
+        }
+        true
+    }
+
     fn define_module(&mut self, list: &[Sexpr]) {
+        if self.try_module_definition_or_instance(list) {
+            return;
+        }
         self.last_build_failed = false;
         match self.build(list) {
             Ok(inst) => {
@@ -997,6 +1086,33 @@ mod tests {
                  "some reason")"#,
         );
         assert_eq!((s.passed, s.failed, s.skipped), (0, 0, 1), "our gap must SKIP");
+    }
+
+    /// `(module definition $M …)` + `(module instance $I $M)` — **instantiation is generative**,
+    /// so two instances of one definition must have SEPARATE state.
+    ///
+    /// ⚠️ This is the property the feature exists for, and the one a lazy implementation gets
+    /// wrong: instantiating the definition once and handing the same instance to every
+    /// `(module instance …)` would satisfy every *shape* check in `instance.wast` and fail this.
+    /// The mutation is not hypothetical — it is the obvious way to write it.
+    #[test]
+    fn module_instances_of_one_definition_have_separate_state() {
+        let s = run(
+            r#"
+            (module definition $M
+              (global (export "g") (mut i32) (i32.const 0))
+              (func (export "bump") (result i32)
+                (global.set 0 (i32.add (global.get 0) (i32.const 1)))
+                (global.get 0)))
+            (module instance $A $M)
+            (module instance $B $M)
+            (assert_return (invoke $A "bump") (i32.const 1))
+            (assert_return (invoke $A "bump") (i32.const 2))
+            ;; $B must start from zero — if it shared $A's globals it would return 3.
+            (assert_return (invoke $B "bump") (i32.const 1))
+            "#,
+        );
+        assert_eq!((s.passed, s.failed, s.skipped), (3, 0, 0), "{:?}", s.failures);
     }
 
     /// 🔒 The inverse, pinned beside it — without this, "skip everything we cannot assemble"
