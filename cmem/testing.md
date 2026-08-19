@@ -395,7 +395,59 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-### 🔬 T13-0 COMPLETE (2026-08-19) — all 2,038 skips attributed, and the track order was WRONG
+### 🔬 T13-0 round 3 (2026-08-19) — `BadForm` attributed, and it is custom-descriptors
+
+**Measured, not guessed** — the roadmap said *"attribute `BadForm` BEFORE scheduling it, because that is
+the mistake this section just caught"*, and it was the right call twice over. Method: run every `.wast`
+with `-v`, collect the `module failed to build:` lines, group by file. **116 module-build failures
+remain** (was 216 at the T13 baseline).
+
+| cause | modules | attributed to |
+| --- | --- | --- |
+| `BadForm` | **37** | ⚠️ **33 are custom-descriptors** (`ref_get_desc` 6, `descriptors` 6, `struct_new_desc` 5, `br_on_cast_desc_eq_fail` 5, `br_on_cast_desc_eq` 5, `ref_cast_desc_eq` 3, `exact-casts` 3) · 2 `imports` · 2 `custom-page-sizes` |
+| `BadValType` | **18** | ⚠️ **all 18 are `exact`** (`exact` 14, `exact-func-import` 3, `array_new_exact` 1) — the custom-descriptors type former |
+| `BadModuleField` | 16 | `instance` 5, `binary` 4, `exact-func-import` 3, then `table64`/`table`/`memory64` 1 each |
+| `validate: TypeMismatch` | 14 | `elem` 5, `br_on_non_null` 3, `imports` 2, `try_table`/`call_indirect64`/`br_on_cast_fail` 1 each |
+| `UnknownInstr` | 4 | `id`, `select` ×2, `stack` — **newly visible**, surfaced by the scoring split |
+| decode / link / other | 27 | mixed |
+
+### ⚠️⚠️ Three error-name clusters, three features. The pattern is now the finding.
+
+| cluster | looked like | actually was |
+| --- | --- | --- |
+| `BadNumber` 63 | a number-parsing bug | **table64** |
+| `BadForm` 37 | a text-format shape bug | **custom-descriptors** (33 of 37) |
+| `BadValType` 18 | a value-type bug | **`exact`** (18 of 18) |
+
+🎓 **An error name describes the STAGE THAT NOTICED, never the feature that is missing.** Grouping
+failures by message — which is the natural triage, and which T9 did — produces a work-list of *parser
+areas* when the real work-list is *proposals*. **Only attributing each failure to its FILE recovers the
+cause.** This is §1.1 (*a cost logged beside a defect is a hypothesis about its cause*) at the level of
+a whole triage rather than a single entry.
+
+### The re-ranked remainder
+
+**Track D (custom-descriptors + `exact`) is 54 module-build failures — 33 `BadForm` + 18 `BadValType` +
+3 `BadModuleField` — plus ~420 direct skips.** It is the largest single lever left by a wide margin.
+
+⚠️ **But it does not go first, by the rule that already promoted the GC array ops: IN-SCOPE OUTRANKS
+UNTARGETED.** A missing in-scope instruction is a **correctness gap**; an unimplemented untargeted
+proposal is a **scope decision**. Sorting the remainder that way:
+
+1. **The in-scope cluster — ~31 modules and rising.** `instance` 5 + `binary` 4 `BadModuleField`;
+   `elem` 5 + `br_on_non_null` 3 + `try_table` 1 + `br_on_cast_fail` 1 `TypeMismatch`; `id`/`select`/
+   `stack` 4 `UnknownInstr`; plus the decode/link residue. **None of these is a proposal we declined —
+   they are defects in language wasmrt claims to run**, and `br_on_non_null` / `try_table` /
+   `br_on_cast_fail` are especially pointed, because those files test features recorded as DONE.
+2. **Track D** — custom-descriptors + `exact`, 54 modules + ~420 skips.
+3. **Track W** — wide-arithmetic, 108 skips, 4 mnemonics.
+4. P / M / A / L.
+
+⚠️ **`imports.wast` appears in three different clusters** (2 `BadForm`, 2 `TypeMismatch`, plus link
+failures). Worth treating as one investigation rather than three tickets — the same-file coincidence is
+usually one cause, as `call_ref` was at T9a#8.
+
+## 🔬 T13-0 COMPLETE (2026-08-19) — all 2,038 skips attributed, and the track order was WRONG
 
 **Method:** every one of the 13 skip sites in `wast.rs` rewritten to a `skip_at(line!())` probe, plus a
 probe on the module-build failure arm; corpus run; **probe reverted from a file copy taken beforehand**,

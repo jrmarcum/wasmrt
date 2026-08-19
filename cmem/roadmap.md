@@ -152,9 +152,22 @@ triage grouped failures by message, read “`BadNumber` 63”, and filed a **tex
 
 **Order now:** **(1) Track T — table64**, 63 build failures + ~326 direct skips, the biggest single lever
 and one coherent feature rather than six; **(2) ✅ DONE 2026-08-19 — the assembler scoring split**, ~300 assertions with **no
-feature work**, independent of every track; **(3) attribute `BadForm` (46 modules) BEFORE scheduling
-it**; then D, W, P, M, A, L. ⚠ **`BadForm` / `BadValType` / `BadModuleField` — 80 modules between them —
-remain UNATTRIBUTED, and the correct entry for that is “unknown”, not a guess.** Full breakdown in
+feature work**, independent of every track; **(3) ✅ `BadForm` ATTRIBUTED 2026-08-19**; then D, W, P, M, A, L.
+
+✅ **ATTRIBUTION DONE — and it is a THIRD feature wearing a parser error’s name.** `BadForm` is
+**custom-descriptors** (33 of 37) and `BadValType` is **`exact`** (18 of 18). With `BadNumber`=table64
+that is three clusters, three features: 🎓 **an error name describes the STAGE THAT NOTICED, never the
+feature that is missing**, so grouping failures by message yields a work-list of *parser areas* when
+the real one is *proposals*. Only per-FILE attribution recovers the cause.
+
+**Re-ranked remainder:** **(a) the IN-SCOPE cluster first** — ~31 modules across `instance` 5,
+`binary` 4, `elem` 5, `br_on_non_null` 3, `id`/`select`/`stack` 4, `try_table`, `br_on_cast_fail`.
+These are **defects in language wasmrt claims to run**, and three of those files test features recorded
+as DONE. **In-scope outranks untargeted**, the same rule that promoted the GC array ops. **(b) Track D**
+— custom-descriptors + `exact`, **54 module-build failures** (33 BadForm + 18 BadValType + 3
+BadModuleField) plus ~420 skips, the largest single lever but a scope decision rather than a defect.
+**(c) Track W**, then P/M/A/L. ⚠️ `imports.wast` appears in three clusters at once — treat it as one
+investigation, not three tickets. Full breakdown in
 [testing.md](testing.md).
 
 #### 🧾 The baseline, and what "done" means
