@@ -3439,13 +3439,25 @@ fn emit_op_with_immediates(
         }
         O::MemoryInit => {
             *ctx.needs_data_count = true;
-            let d = resolve_by_name(ctx.data_names, imm(0)?)?;
-            uleb(&mut ctx.out, u64::from(d));
-            let m = match items.get(start + 1) {
-                Some(s) => resolve_by_name(ctx.mem_names, s)?,
-                None => 0,
+            // Two spellings: `memory.init $mem $data`, or `memory.init $data` with the memory
+            // defaulting to 0. The binary order is always data then memory.
+            //
+            // ⚠️⚠️ The operands were read in the WRONG ORDER for the two-operand form — first
+            // as the data segment, second as the memory — so `(memory.init $mem2 0 …)` wrote
+            // into the wrong memory. Silent wrong output where both indices exist, and a
+            // spurious out-of-bounds trap where the mistaken memory is smaller.
+            //
+            // 🎓 `table.init` immediately below has had the correct two-spelling handling all
+            // along, comment and all. **The sibling was right and this one was wrong** — a rule
+            // applied at one of two sites, which is the shape that keeps recurring here.
+            let (mem, data) = match (items.get(start), items.get(start + 1)) {
+                (Some(m), Some(d)) => (resolve_by_name(ctx.mem_names, m)?, d),
+                (Some(d), None) => (0, d),
+                _ => return Err(Error::BadImmediate),
             };
-            uleb(&mut ctx.out, u64::from(m));
+            let d = resolve_by_name(ctx.data_names, data)?;
+            uleb(&mut ctx.out, u64::from(d));
+            uleb(&mut ctx.out, u64::from(mem));
         }
         O::MemoryCopy => {
             let d = items
@@ -5878,6 +5890,46 @@ mod tests {
             crate::validate::validate(&m).is_ok(),
             "a standalone type must still be reused by an implicit use"
         );
+    }
+
+    /// `memory.init $mem $data` — **memory first, data second**; `memory.init $data` defaults
+    /// the memory to 0. The binary order is the reverse (data then memory), which is exactly
+    /// where the confusion came from.
+    ///
+    /// ⚠️⚠️ Read backwards for the two-operand form until 2026-08-19, so `(memory.init $mem2 0 …)`
+    /// wrote into the **wrong memory**: silent wrong output where both indices exist, and a
+    /// spurious out-of-bounds trap where the mistaken memory is smaller. 🎓 `table.init` next
+    /// door has had the correct two-spelling handling all along — *a rule applied at one of two
+    /// sites*.
+    #[test]
+    fn memory_init_takes_the_memory_first_and_the_data_second() {
+        // Two memories, so writing into the wrong one is observable rather than harmless.
+        let two = r#"(module
+            (memory $a 1) (memory $b 1)
+            (data $d "\77")
+            (func (export "go") (result i32)
+              (memory.init $b $d (i32.const 3) (i32.const 0) (i32.const 1))
+              (i32.load8_u $b (i32.const 3))))"#;
+        assert_eq!(crate::interp::as_i32(run(two, "go", &[])[0]), 0x77);
+        // …and the named memory really is `$b`: `$a` must be untouched.
+        let untouched = two.replace("(i32.load8_u $b", "(i32.load8_u $a");
+        assert_eq!(crate::interp::as_i32(run(&untouched, "go", &[])[0]), 0);
+        // The one-operand spelling still means the DATA index, memory 0.
+        let one = r#"(module
+            (memory 1)
+            (data $d "\55")
+            (func (export "go") (result i32)
+              (memory.init $d (i32.const 0) (i32.const 0) (i32.const 1))
+              (i32.load8_u (i32.const 0))))"#;
+        assert_eq!(crate::interp::as_i32(run(one, "go", &[])[0]), 0x55);
+        // The sibling that was already right, pinned so it stays right.
+        let copy = r#"(module
+            (memory $a 1) (memory $b 1)
+            (func (export "go") (result i32)
+              (i32.store8 $a (i32.const 3) (i32.const 88))
+              (memory.copy $b $a (i32.const 5) (i32.const 3) (i32.const 1))
+              (i32.load8_u $b (i32.const 5))))"#;
+        assert_eq!(crate::interp::as_i32(run(copy, "go", &[])[0]), 88);
     }
 
     #[test]
