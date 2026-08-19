@@ -1,7 +1,7 @@
 # interop.md — the **wasmrt ⇄ wazmrt swappability contract**
 
-**CONTRACT VERSION: 5** · opened 2026-08-19 (owner) · last change 2026-08-19 · **this file is IDENTICAL
-in both repos** (`wasmrt/cmem/interop.md` and `wazmrt/cmem/interop.md`).
+**CONTRACT VERSION: 6** ⏳ **PENDING MIRROR — wasmrt's copy is at 5** · opened 2026-08-19 (owner) · last change 2026-08-19 · **this file must be kept IDENTICAL
+in both repos**, each side editing ONLY its own copy (§1a) (`wasmrt/cmem/interop.md` and `wazmrt/cmem/interop.md`).
 
 > *"I think this may require a common memory md file in both projects to confer with each other on from
 > this point further so that both projects are on the same end track."* — owner, 2026-08-19
@@ -42,50 +42,58 @@ security checks are the same they are also swappable."*
 🤝 **The one-word order is "coordinate" (owner, 2026-08-19), and it is a BINDING TRIGGER in both
 projects' `INDEX.md`.** Saying it means: run the procedure below and in that trigger — read this file
 first, byte-compare the two copies, verify rows by **running** both rather than reading either, record
-status + date + evidence, bump the CONTRACT VERSION **in your own copy**, and — per §1.0 — **propose**
-the change to the sibling rather than writing it into their tree. ⚠️ **It also binds in the inverse direction, which is the half that gets skipped:
-coordinate BEFORE shipping a change to a contract surface** — any CLI option, any security check, any
-resource ceiling, any exit code — **not after**.
+status + date + evidence, and bump the CONTRACT VERSION **in your own copy**. ⚠️ **It also binds in the
+inverse direction, which is the half that gets skipped: coordinate BEFORE shipping a change to a
+contract surface** — any CLI option, any security check, any resource ceiling, any exit code — **not
+after**.
 
-## 🔒 1.0 THE EDITING BOUNDARY — **NEITHER PROJECT EDITS THE OTHER'S FILES. AT ALL.**
+### 1a. 🔒🔒 THE EDITING BOUNDARY — **ABSOLUTE** (owner, 2026-08-19)
 
-🔒 **Owner, 2026-08-19 — this is the strictest rule in this file and it overrides everything below it:**
+> *"Let's place a note to not edit the other's md file unless specifically directed by me. This is just
+> a coordination effort. Each project needs to edit their own files. This is important for tracking and
+> integrity."* — owner
 
-> *"Do not edit the other's md file unless specifically directed by me. This is just a coordination
-> effort. Each project needs to edit their own files. This is important for tracking and integrity."*
+🚫 **NEITHER PROJECT WRITES ANYTHING INTO THE OTHER'S TREE. NOT THEIR `cmem/`, NOT THEIR SOURCE, NOT
+THEIR TESTS — AND NOT THEIR COPY OF THIS FILE.** The only exception is an **explicit, specific
+direction from the owner**, given for that edit. There is no standing permission, and `coordinate` does
+**not** grant one — ⚠️ **`coordinate` is an order to CONFER, never a licence to WRITE.**
 
-**There is NO standing permission to write into the sibling's tree — not its source, not its `cmem/`,
-and NOT its copy of this file.** ⚠️ **That last clause is the correction**: CONTRACT VERSION 4 granted
-exactly that exception, and it was wrong. **Reading the sibling is free and expected. Writing to it
-requires the owner to direct it, explicitly, that time.**
+**This supersedes the earlier rule that made this file the one thing either side could write into the
+other's tree.** It was wrong, and it was wrong in a way that had already caused damage twice in one
+day: a blind copy destroyed a section of in-flight work, and the reconciliation destroyed another
+(change-log rows 3b and 4). 🎓 **The reason is integrity of the record, not politeness — each repo's
+history must show only what that repo's own agent did.** A commit in wasmrt authored by whoever was
+working in wazmrt makes the history a bad witness, and *the history is the thing both projects fall
+back on when a claim is disputed.*
 
-**Why: tracking and integrity.** Every change to a project must appear in **that project's own git
-history, made by that project's own session.** A cross-repo write launders authorship — the commit that
-should record *"wazmrt agreed to X"* instead shows a file arriving from outside, and neither history can
-be trusted to say who agreed to what. ⚠️ It also destroys work that is not yet committed, which is
-exactly what happened on 2026-08-19 (change-log row 3b).
+### So how does a change reach both copies?
 
-### 1.0.1 So how does a change to THIS file propagate?
+**By the owner, not by an agent.** The proposing side does all of this **in its own copy only**:
 
-**By each project applying it to its own copy, in its own commit.** That is the whole mechanism:
+1. Write the change, bump the **CONTRACT VERSION**, and add a change-log row.
+2. Mark the affected rows and the change-log entry **⏳ PENDING MIRROR** — meaning *agreed on this
+   side, not yet carried across.*
+3. **Tell the owner explicitly** that the sibling's copy is behind, and at which version.
+4. The owner directs the other project to mirror it — and **that project makes the edit in its own
+   tree**, which is what keeps its history honest.
 
-1. **Propose** — one project writes the change into **its own** copy, bumps the CONTRACT VERSION, and
-   adds a change-log row saying what changed and why.
-2. **Notify** — it reports the proposal to the owner. It does **not** touch the sibling.
-3. **Adopt** — the sibling's own session **reads** the proposal (reading is always allowed) and applies
-   **the identical change to its own copy, in its own commit**, or comes back with an objection.
-4. **Converge** — the byte-compare in §4 check 1 is what confirms they actually matched. Until it
-   passes, **the contract is IN FLIGHT.**
+⚠️ **A VERSION MISMATCH IS THEREFORE NORMAL NOW, AND IT MEANS SOMETHING PRECISE.** §1's drift rule
+still holds — *a mismatch means the contract is unknown* — but the resolution is **never** "copy over
+it". It is: **read both, report the delta and its direction to the owner, and wait to be directed.**
+The mismatch is the coordination signal working, not a fault to be cleaned up unilaterally.
 
-⚠️ **While the two copies sit at different versions, the rows that changed since the last matching
-version are NOT YET BINDING** — they are a proposal, not a contract. Rows unchanged since the last
-agreed version stay binding throughout. **A version mismatch is a normal working state, not an error;
-what is not acceptable is one side shipping behaviour that depends on an unadopted row.**
+⚠️ **Reading the sibling's tree remains fine and is required by `coordinate`** — read their `cmem/`,
+their in-flight uncommitted work, their source; run their binary. 🔒 **Read freely, write never.**
+*(This does not reopen the retired oracle: reading their code for DESIGN GUIDANCE is still off-limits.
+Reading it to check a CONTRACT ROW is what this file is for.)*
 
 
-1. **Neither project edits this file unilaterally, and neither writes the other’s copy.** A change is
-   *proposed* in one repo (§1.0.1) and is **adopted by the sibling in the sibling’s own commit**, at the
-   same **CONTRACT VERSION**, before either ships behaviour that depends on it.
+1. **Neither project edits this file unilaterally.** A change is *proposed* in one repo — **in that
+   repo's own copy only** — with a **CONTRACT VERSION** bump, and must be agreed and mirrored before
+   either ships behaviour that depends on it. ⚠️ **The proposing agent does NOT carry it across**; the
+   owner directs the other project, which makes the edit in its own tree (see the editing boundary
+   above). *Superseded the original wording, which told one agent to "land the identical file in both
+   repos" — that instruction is what produced two destructive overwrites on 2026-08-19.*
 2. **Every row carries a status and a date.** ✅ AGREED (with the evidence that verified it) ·
    ⚠️ DIVERGENT (with the agreed resolution) · ⬜ UNVERIFIED (nobody has checked; **do not quote it**).
 3. **Every accepted divergence carries a REOPEN CONDITION.** *An entry that loses its condition has
@@ -98,9 +106,8 @@ what is not acceptable is one side shipping behaviour that depends on an unadopt
 time is a list that will drift* — the projects have already been bitten by exactly this shape (a feature
 list spelled three times; a header advertising a switch that was not there). Two repos cannot share one
 file, so the pin is the **CONTRACT VERSION** plus rule 1. **The gate:** when both trees are present, a
-check compares the two copies byte-for-byte and reports any difference.
-
-⚠️ **Refined by §1.0.1 (v5): a version MISMATCH is a normal in-flight state — a proposal awaiting adoption — not an error.** What is never acceptable is treating an **unadopted** row as binding, or shipping behaviour that depends on one. **Rows unchanged since the last matching version stay binding throughout**; only the changed rows are in flight. *(This paragraph previously read "treat a version mismatch as the contract being unknown", which was written when both copies were expected to move in one step — the editing boundary makes that impossible by design.)*
+check compares the two copies byte-for-byte and fails on any difference. Until that check exists, treat
+a version mismatch between the copies as **the contract being unknown**, not as "close enough".
 
 ---
 
@@ -423,10 +430,10 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 
 | version | date | change |
 | --- | --- | --- |
-| **1** | 2026-08-19 | Opened. Scope set by the owner (CLI options + security checks; C ABI explicitly out). Recorded: the `--dir` separator break and the bare-path-executes consequence, both live today; the pin DB path risk; the nine-row `decide()` matrix; the ceiling defaults, verified equal in both; the WASI rights rows already agreed. |
+| **6** ⏳ | 2026-08-19 | 🔒🔒 **THE EDITING BOUNDARY IS NOW ABSOLUTE (owner) — §1a.** *"Not to edit the other's md file unless specifically directed by me … each project needs to edit their own files … important for tracking and integrity."* **Neither project writes ANYTHING into the other's tree — including this file** — without a specific owner direction. `coordinate` is an order to CONFER, never a licence to WRITE. Supersedes the earlier "this file is the one thing you may write there" rule, which caused two destructive overwrites in one day (rows 3b, 4). Rule 1 rewritten: propose in your OWN copy, bump the version, mark ⏳ **PENDING MIRROR**, and TELL THE OWNER the sibling is behind — the owner directs the other project, which makes the edit in its own tree. A version mismatch is now a normal coordination signal, resolved by reporting, **never** by copying over it. ⚠️ **This row is itself pending mirror: wasmrt's copy is at 5.** |
 | **5** | 2026-08-19 | wazmrt ran the **A/B/A throughput** measurement wasmrt's T9i plan called for (§3.7a): the tick costs **~3% on a tight loop** — 34.29 → 33.45 → 34.62 ns/loop-iter, A-to-A spread ~1%, B a single sample. Recorded for wasmrt's planning, **not** as a contract row (§0 puts performance out of scope). ⚠️ Names the one performance response that WOULD be a contract change: amortizing the tick to every *N*th back-edge alters the UNIT's granularity, so the ceiling would stop meaning the same thing on both sides. |
-| **5** | 2026-08-19 | 🔒🔒 **THE EDITING BOUNDARY, CORRECTED AND TIGHTENED (owner) — §1.0.** *“Do not edit the other’s md file unless specifically directed by me… each project needs to edit their own files. This is important for tracking and integrity.”* **v4 granted a standing permission to write this file into the sibling’s tree; that permission is REVOKED.** Neither project may write anything into the other’s tree — source, `cmem/`, or this file — without the owner directing it that time. Reading stays free. §1.0.1 adds the propagation model this forces and that it should always have used: **propose in your own copy → notify → the sibling’s own session adopts it in its own commit → the byte-compare confirms convergence.** A version mismatch is now a **normal in-flight state**, and rows changed since the last matching version are **a proposal, not a contract**. ⚠️ Consequence, applied immediately: wazmrt’s copy stays at **v4** and this project will not touch it. |
 | **4** | 2026-08-19 | 🔒 **The EDITING BOUNDARY added to §1** (reconstructed from row 3’s description, since the §0.5 it named was destroyed): this file is the only thing either project may write into the other’s tree, and ⚠⚠ **read the other copy before overwriting it** — it starts untracked in both repos, so a blind copy is unrecoverable. §2’s owner ruling restored. The duplicate row-3 entries reconciled into 3 + 3b. |
 | **3b** | 2026-08-19 | ⚠️⚠️ **A CONCURRENT-EDIT COLLISION, recorded rather than tidied away — the drift hazard §1 predicts, arriving on day one.** Both projects edited this file at once. wazmrt's §3.7a rewrite (better than what it replaced: it had *built* the feature and found that **the UNIT matters more than the number**) landed in wasmrt's tree mid-session and was committed there without being noticed; in the other direction, wasmrt `cp`-ed its copy over wazmrt's **untracked** working copy without checking it first, destroying wazmrt's in-flight **§0.5** — which row 3 below still references and which is **NOT PRESENT in either copy**. 🚩 **wazmrt must restore §0.5 from its own context; nobody else has it.** Restored here: the §2 owner ruling, dropped in the same collision. **Two lessons, both already in the rulebooks:** *a version is a pin, not a lock — it makes drift detectable, it does not prevent a simultaneous write*, and **check before you overwrite**, which is exactly the editing boundary row 3 was adding. |
 | **3** | 2026-08-19 | 🔑 **`coordinate` — the one-word binding order (§0.5), owner.** One word from the owner now obliges the full cross-project protocol: byte-compare both copies, read the sibling's **uncommitted** in-flight work, diff shipped behaviour against every in-scope row, **verify by RUNNING both on the same bytes**, land changes in both copies with a version bump, and report divergences with reopen conditions. Carries **the editing boundary** — this file is the only thing either project may write into the other's tree, and the sibling's own `cmem/` stays theirs. |
 | **2** | 2026-08-19 | **The execution bound (§3.7a).** Owner decided a bound is wanted; §5 decision #3 closes. wazmrt shipped `--max-iterations` + `IterationLimitExceeded` (default `1<<30`) in its Track H3 — ⚠️ **before this file carried it, which §1 rule 1 forbids; recorded as a process breach rather than tidied away.** New rows: the flag in §2.2; the agreed design in §3.7a, whose load-bearing clause is **the UNIT** (one loop back-edge **or** one tail-call hop) — equal defaults with different units are not swappable; differential checks 6 and 7. **Verified by running both on the same wasmrt-assembled bytes: wazmrt traps on both shapes, wasmrt hangs on both.** Status ⚠️ DIVERGENT AND LIVE until wasmrt lands it. |
+| **1** | 2026-08-19 | Opened. Scope set by the owner (CLI options + security checks; C ABI explicitly out). Recorded: the `--dir` separator break and the bare-path-executes consequence, both live today; the pin DB path risk; the nine-row `decide()` matrix; the ceiling defaults, verified equal in both; the WASI rights rows already agreed. |
