@@ -44,14 +44,52 @@ struct Preopen {
     read_only: bool,
 }
 
-/// Pull the leading `--dir` / `--ro-dir` flags off the command line, returning the preopens
-/// as `(host, guest, read_only)` plus whatever is left.
+/// Every flag this CLI recognises that takes a following value. Used to tell a **misplaced**
+/// host flag from a guest argument that merely looks like one.
+const HOST_FLAGS_WITH_VALUE: &[&str] = &["--dir", "--ro-dir"];
+/// Every valueless flag this CLI recognises.
+const HOST_FLAGS_BARE: &[&str] = &["--allow-symlink"];
+
+/// Warn when a host flag appears where only the **guest** will ever see it.
+///
+/// ⚠️⚠️ **This is the fail-open half, and it is why the function exists.** Host flags are
+/// recognised positionally; anything outside those positions is the guest's argv. For a
+/// *preopen* a misplacement fails **closed** — the grant is simply never made, so the guest
+/// gets less access than intended. **For a restriction flag it fails OPEN**: `--verify`,
+/// `--pins` (T9e) and `--max-iterations` / `--max-*` (T9i) would be silently dropped, and the
+/// user who asked for a bound would run without one and see no error.
+///
+/// **Warn, never refuse:** a guest may legitimately take `--dir` as its own argument, so
+/// rejecting would break valid command lines. And **nothing after an explicit `--` is
+/// examined** — that marker is the user saying "the rest is the guest's", and second-guessing
+/// it would make `--` useless.
+///
+/// Matches wazmrt's behaviour (their H7); see `cmem/interop.md` §2.2.
+fn warn_misplaced_host_flags(guest_argv: &[String]) {
+    for a in guest_argv {
+        if a == "--" {
+            return; // everything past here is deliberately the guest's
+        }
+        if HOST_FLAGS_WITH_VALUE.contains(&a.as_str()) || HOST_FLAGS_BARE.contains(&a.as_str()) {
+            eprintln!(
+                "wasmrt: warning: `{a}` here is passed to the GUEST, not applied by wasmrt — \
+                 host flags go before the module path or immediately after it \
+                 (use `--` to pass it to the guest deliberately)"
+            );
+        }
+    }
+}
+
+/// Pull the `--dir` / `--ro-dir` / `--allow-symlink` flags off one run of arguments,
+/// returning the preopens plus whatever is left.
 ///
 /// `--dir <host>` maps the directory under its own name; `--dir <host>::<guest>` renames it
 /// for the guest. `::` rather than `:` because a Windows host path starts `C:`.
 ///
-/// Parsing stops at the first non-flag, so a guest argument that happens to look like
-/// `--dir` is passed through to the guest rather than granting it access to anything.
+/// Parsing stops at the first non-flag. ⚠️ An **unrecognised** `--flag` in a leading position
+/// is an **error**, not a module path: treating it as the path is how a typo becomes
+/// "cannot read '--dir'" instead of a usable message, and how a misplaced restriction flag
+/// disappears silently.
 fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, bool, &[String]), String> {
     let mut out = Vec::new();
     let mut allow_symlink = false;
@@ -63,9 +101,19 @@ fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, bool, &[String]), St
             i += 1;
             continue;
         }
+        // `--` ends host flags: everything after it belongs to the guest, verbatim.
+        if args[i] == "--" {
+            return Ok((out, allow_symlink, &args[i..]));
+        }
         let ro = match args[i].as_str() {
             "--dir" => false,
             "--ro-dir" => true,
+            // ⚠️ An unrecognised `--flag` is an ERROR, not the module path. Falling through
+            // made `wasmrt wasi --typo x.wasm` report "cannot read '--typo'", and — the half
+            // that matters — let a misplaced restriction flag vanish without a word.
+            other if other.starts_with("--") => {
+                return Err(format!("unknown option `{other}` (use `--` to pass it to the guest)"));
+            }
             _ => break,
         };
         let Some(spec) = args.get(i + 1) else {
@@ -86,9 +134,12 @@ fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, bool, &[String]), St
 /// Exits with the guest's `proc_exit` code when it calls one, so shell pipelines see the
 /// status the program intended.
 fn run_wasi_module(rest: &[String]) -> ExitCode {
-    // Preopens come first, so everything after the module path is the guest's own argv and
-    // is never mistaken for a host flag.
-    let (dirs, allow_symlink, rest) = match take_dir_flags(rest) {
+    // Host flags are accepted in BOTH positions — before the module path (wasmrt's spelling)
+    // and immediately after it (wazmrt's). 🔒 `cmem/interop.md` §2.2: a command line must do
+    // the same thing under either runtime with only the program name changed, and flag
+    // POSITION is part of an argument shape. Everything after the trailing run — or after an
+    // explicit `--` — is the guest's argv.
+    let (mut dirs, mut allow_symlink, rest) = match take_dir_flags(rest) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("wasmrt: {e}");
@@ -97,10 +148,31 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
     };
     let Some(path) = rest.first() else {
         eprintln!(
-            "wasmrt: usage: wasmrt wasi [--dir <host>[::<guest>]] [--ro-dir …] [--allow-symlink] <file> [args...]"
+            "wasmrt: usage: wasmrt wasi [--dir <host>[::<guest>]] [--ro-dir …] [--allow-symlink] <file> [flags] [--] [args...]"
         );
         return ExitCode::FAILURE;
     };
+    let path = path.clone();
+    // The TRAILING run of host flags, immediately after the module path (wazmrt's spelling).
+    let guest_argv: Vec<String> = match take_dir_flags(&rest[1..]) {
+        Ok((more, sym, tail)) => {
+            dirs.extend(more);
+            allow_symlink |= sym;
+            // ⚠️ Warn on the tail *including* any `--`, so the marker can stop the scan —
+            // stripping it first made `wasmrt wasi m.wasm -- --dir X` warn about a flag the
+            // user had explicitly handed to the guest, which is the one case that must stay
+            // quiet. Caught by the case-5 probe, not by reading this.
+            warn_misplaced_host_flags(tail);
+            // Then drop the marker itself: the guest sees its arguments, not our separator.
+            let tail = if tail.first().is_some_and(|a| a == "--") { &tail[1..] } else { tail };
+            tail.to_vec()
+        }
+        Err(e) => {
+            eprintln!("wasmrt: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = path.as_str();
     let bytes = match read_module_bytes(path) {
         Ok(b) => b,
         Err(e) => {
@@ -127,7 +199,7 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
     };
     // argv[0] is the module path, then whatever follows on our command line.
     let mut ctx = ctx
-        .with_args(std::iter::once(path.clone()).chain(rest[1..].iter().cloned()))
+        .with_args(std::iter::once(path.to_string()).chain(guest_argv.iter().cloned()))
         .with_env(std::env::vars());
     // **The guest reaches nothing it was not explicitly granted.** With no `--dir`, every
     // path call returns BADF; there is no implicit cwd preopen.

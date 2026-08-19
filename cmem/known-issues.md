@@ -82,7 +82,35 @@ seven would have been classified **malformed** and their `assert_malformed` case
 what saves it: the "we are incomplete" list must be a positive allow-list of real instructions we lack,
 and everything reclassified as malformed must be provably not an instruction in any proposal.**
 
-## ⚠️⚠️ OPEN (found 2026-08-19 by RUNNING the CLI) — a trailing `--dir` is handed to the GUEST, so the sandbox is silently never granted
+## ✅ FIXED 2026-08-19 — a trailing `--dir` was handed to the GUEST; the sandbox was silently never granted
+
+**Fixed the same day it was found, and BEFORE the flags that would have made it dangerous.** Host
+flags are now accepted in **both** positions — before the module path (wasmrt’s spelling) and
+immediately after it (wazmrt’s) — so a command line does the same thing under either runtime with only
+the program name changed (`interop.md` §2.2). Four behaviours, five tests
+(`crates/wasmrt/tests/cli_flag_position.rs`):
+
+| case | behaviour |
+| --- | --- |
+| `wasi --dir D <mod>` / `wasi <mod> --dir D` | **identical** — the preopen is applied either way |
+| `wasi --typo <mod>` | ⚠️ **error naming the unknown OPTION** — it used to be read as the module path, reporting `cannot read '--typo'` |
+| `wasi <mod> arg --dir D` | **warns**, never refuses — a guest may legitimately take `--dir` as its own argument |
+| `wasi <mod> -- --dir D` | **silent** — `--` is the user saying “the rest is the guest’s” |
+
+⚠️ **The `--` case failed on the first implementation**: the marker was stripped *before* the warning
+scan, so the scan never saw its own stop condition and warned about a flag the user had explicitly
+handed over. Found by probing all five cases rather than by re-reading the code — and the inverse is
+now pinned beside the positive, so a blanket warn cannot pass for the rule.
+
+🎓 **The sequencing is the point.** Today the only host flags are preopens, so a misplacement fails
+**closed**. `--verify`/`--pins` (T9e) and `--max-iterations` (T9i) would have made the identical slip
+fail **OPEN** — restriction requested, no error, no restriction. **The parser was fixed before the
+flags that make it dangerous arrive**, which is the whole reason it was promoted ahead of them.
+
+*(Diagnosis kept below — it is the reusable part, and it came from the first real run of `interop.md`
+§4 check 5.)*
+
+### ⚠️⚠️ How it was found — a trailing `--dir` handed to the GUEST
 
 **Severity: live, security-relevant, and silent.** `wasmrt wasi <module> --dir <spec>` **does not
 error.** `take_dir_flags` (`crates/wasmrt/src/main.rs:55`) consumes preopen flags only from the

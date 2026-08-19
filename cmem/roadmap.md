@@ -1458,7 +1458,13 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
 
   ### T9i — The ITERATION BUDGET: bound non-termination. `1.0.1` ✅ **DECIDED 2026-08-19** `[ ]`
 
-  🔒⚠⚠ **BLOCKED ON THE FLAG-POSITION FIX (coordinate, 2026-08-19).** `--max-iterations` is a
+  ✅ **UNBLOCKED 2026-08-19 — the flag-position fix landed** (`known-issues.md`): host flags are now
+  accepted in both positions, an unknown leading `--flag` is an error rather than a path, a stranded
+  host flag warns, and nothing after `--` is examined. `--max-iterations` can be added without the
+  fail-open hazard below. *(Original blocker, kept because the reasoning is why it was sequenced
+  first:)*
+
+  🔒⚠⚠ **WAS BLOCKED ON THE FLAG-POSITION FIX (coordinate, 2026-08-19).** `--max-iterations` is a
   RESTRICTION flag, and wasmrt’s CLI currently donates any flag written after the module path to the
   **guest**, silently (`known-issues.md`). Today that fails **closed** — the only such flags are
   preopens, so a misplaced one grants *less* access. **`--max-iterations` makes it fail OPEN**: the user
