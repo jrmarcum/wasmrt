@@ -49,6 +49,10 @@ pub enum Error {
     BadImmediate,
     /// A `$name` no index space defines.
     UnknownIdentifier,
+    /// Two entries in one index space share a `$name` (§6.3.5). Checked once over the finished
+    /// name vectors, because a space is filled by **both** imports and definitions and the rule
+    /// spans them — so no single writer can see the conflict.
+    DuplicateName,
     /// A mnemonic that is **not an instruction in any WebAssembly proposal** — so the input is
     /// malformed, and saying so is a verdict wasmrt is entitled to give.
     ///
@@ -1198,6 +1202,35 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
                 data_offsets.push(Some(out));
             }
             None => data_offsets.push(None),
+        }
+    }
+
+    // §6.3.5: within an index space, a `$name` must be UNIQUE.
+    //
+    // 🔒 **Checked on the NAMESPACE, not at each writer.** Every index space is filled from two
+    // places — an import and a definition — and the uniqueness rule spans both, so a
+    // per-push-site check structurally cannot see `(import "" "" (memory $foo 1))` beside
+    // `(memory $foo 1)`. Running it once over the finished vectors catches all three shapes
+    // (def+def, import+def, import+import) with one rule and no duplication.
+    //
+    // ⚠️ Worth 7 `assert_malformed`s that were **accepting** a malformed module — the dangerous
+    // direction — across `memory.wast` and `func.wast`.
+    for (space, names) in [
+        ("type", &b.type_names),
+        ("func", &b.func_names),
+        ("table", &b.table_names),
+        ("memory", &b.mem_names),
+        ("global", &b.global_names),
+        ("tag", &b.tag_names),
+        ("elem", &b.elem_names),
+        ("data", &b.data_names),
+    ] {
+        let _ = space; // named for the reader; the error carries no payload
+        for i in 0..names.len() {
+            let Some(n) = names[i].as_deref() else { continue };
+            if names[..i].iter().any(|m| m.as_deref() == Some(n)) {
+                return Err(Error::DuplicateName);
+            }
         }
     }
 
@@ -5759,6 +5792,38 @@ mod tests {
         }
         // …and the range check still bites on its own.
         assert_eq!(asm(&m("999")), Err(Error::BadImmediate));
+    }
+
+    /// §6.3.5: a `$name` must be unique **within its index space** — and the space is filled by
+    /// both imports and definitions, so the rule spans them.
+    ///
+    /// ⚠️ Missing until 2026-08-19, and in the **accepting** direction: 7 `assert_malformed`s
+    /// across `memory.wast` and `func.wast` were admitting a malformed module. 🔒 The check runs
+    /// once over the finished name vectors rather than at each writer, because *a rule about a
+    /// NAMESPACE belongs on the namespace* — no single push site can see an import colliding
+    /// with a later definition.
+    #[test]
+    fn a_name_must_be_unique_within_its_index_space() {
+        // All three shapes: def+def, import+def, import+import.
+        assert_eq!(
+            asm(r#"(module (memory $foo 1) (memory $foo 1))"#),
+            Err(Error::DuplicateName)
+        );
+        assert_eq!(
+            asm(r#"(module (import "" "" (memory $foo 1)) (memory $foo 1))"#),
+            Err(Error::DuplicateName)
+        );
+        assert_eq!(
+            asm(r#"(module (func $f) (func $f))"#),
+            Err(Error::DuplicateName)
+        );
+        // ⚠️ The same name in DIFFERENT spaces is legal and must stay so — this is the case a
+        // careless "no duplicate identifiers anywhere" rule would break.
+        assert!(asm(r#"(module (memory $x 1) (table $x 1 funcref) (func $x))"#).is_ok());
+        // …as is reusing a name for a local, which lives in its own per-function space.
+        assert!(asm(r#"(module (global $g i32 (i32.const 0))
+            (func (param $g i32) (drop (local.get $g))))"#)
+        .is_ok());
     }
 
     #[test]
