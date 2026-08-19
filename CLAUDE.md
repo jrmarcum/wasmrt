@@ -205,6 +205,7 @@ per domain — same convention as wazmrt. **Start with [`cmem/INDEX.md`](cmem/IN
 
 - [`cmem/overview.md`](cmem/overview.md) · [`cmem/vision.md`](cmem/vision.md) — what/why (canonical / fast / small)
 - [`cmem/architecture.md`](cmem/architecture.md) · [`cmem/design-decisions.md`](cmem/design-decisions.md) — crates, dual-target, invariants NOT to drift
+- 🤝 [`cmem/interop.md`](cmem/interop.md) — 🆕 **THE wasmrt ⇄ wazmrt SWAPPABILITY CONTRACT (owner, 2026-08-19).** The **only** file either project may treat as binding on the other, IDENTICAL in both repos, **CONTRACT VERSION 1**. 🔒 The oracle stays retired — this is a contract about *observable behaviour*, not permission to follow a competitor’s design. **IN: the CLI options + the security checks. OUT: the C ABI, internals, and performance/size** (that is the contest). **Read it before changing a CLI flag, the pin mechanism, the WASI rights masks or a resource ceiling** — those are contract surfaces now, and neither side edits it unilaterally.
 - [`cmem/loaders.md`](cmem/loaders.md) — the `universalWasmLoader-*` consumers + the `wasmrt.h` surface
 - [`cmem/testing.md`](cmem/testing.md) · [`cmem/security-model.md`](cmem/security-model.md) · [`cmem/licensing.md`](cmem/licensing.md)
 - 🎓 [`cmem/best-practices.md`](cmem/best-practices.md) — **the lessons this port paid for, each with the
