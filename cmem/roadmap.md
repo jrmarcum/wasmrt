@@ -151,7 +151,7 @@ assembler refusing an `i64` table index type. **One feature wearing a parser err
 triage grouped failures by message, read “`BadNumber` 63”, and filed a **text-assembler** cluster.
 
 **Order now:** **(1) Track T — table64**, 63 build failures + ~326 direct skips, the biggest single lever
-and one coherent feature rather than six; **(2) the assembler scoring split**, ~300 assertions with **no
+and one coherent feature rather than six; **(2) ✅ DONE 2026-08-19 — the assembler scoring split**, ~300 assertions with **no
 feature work**, independent of every track; **(3) attribute `BadForm` (46 modules) BEFORE scheduling
 it**; then D, W, P, M, A, L. ⚠ **`BadForm` / `BadValType` / `BadModuleField` — 80 modules between them —
 remain UNATTRIBUTED, and the correct entry for that is “unknown”, not a guess.** Full breakdown in

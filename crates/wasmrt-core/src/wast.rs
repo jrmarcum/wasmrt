@@ -592,8 +592,20 @@ impl BuildErr {
     fn is_unsupported(&self) -> bool {
         matches!(
             self,
+            // ⚠️⚠️ `wat::Error::UnknownInstr` was here until 2026-08-19 and it was worth ~300
+            // assertions. It meant BOTH "no such instruction exists in any proposal" — a
+            // malformed-input verdict wasmrt is entitled to give — and "an instruction we have
+            // not implemented", which must never score as a pass. Listing it made every right
+            // answer a skip: `load.wast` asserts `i32.load32` is malformed, wasmrt says so, and
+            // it scored a SKIP.
+            //
+            // The assembler now splits them (`wat::classify_unknown_mnemonic`), so only the
+            // genuine gap is listed. 🔒 **Do not add `UnknownInstr` back**: the honest way to
+            // widen this list is to widen the classifier, where the information is.
             BuildErr::Assemble(
-                wat::Error::Unsupported(_) | wat::Error::UnknownInstr | wat::Error::NotAModule
+                wat::Error::Unsupported(_)
+                    | wat::Error::UnimplementedInstr
+                    | wat::Error::NotAModule
             ) | BuildErr::UnsupportedLink(_)
                 | BuildErr::Validate(crate::validate::ValidateError::UnsupportedValidation)
                 | BuildErr::Instantiate(Trap::UnsupportedImportKind | Trap::UnsupportedInstruction)
@@ -971,14 +983,39 @@ mod tests {
     fn an_assembler_gap_is_skipped_not_passed() {
         // THE honesty property: a construct the assembler cannot express must not satisfy
         // an `assert_invalid`, or missing features would masquerade as conformance.
+        //
+        // 🔻 **The EXAMPLE moved on 2026-08-19; the property did not.** It used to be
+        // `i32.nonexistent_opcode`, chosen to stand for "a mnemonic our assembler does not
+        // know". After the `UnknownInstr` split that name is no longer an instance of the
+        // property at all — it exists in **no** proposal, so refusing it is a *verdict*, not a
+        // gap. **A test that fails because its example was reclassified is STALE, not broken:**
+        // keep the property, re-pick the example. The example must now be a mnemonic that is a
+        // real instruction wasmrt has not built.
         let s = run(
             r#"(assert_invalid
-                 (module (func (i32.nonexistent_opcode)))
+                 (module (func (i64.add128)))
                  "some reason")"#,
         );
-        assert_eq!(s.passed, 0);
-        assert_eq!(s.failed, 0);
-        assert_eq!(s.skipped, 1);
+        assert_eq!((s.passed, s.failed, s.skipped), (0, 0, 1), "our gap must SKIP");
+    }
+
+    /// 🔒 The inverse, pinned beside it — without this, "skip everything we cannot assemble"
+    /// would pass the test above and the ~300 assertions the split recovered would be lost
+    /// again.
+    #[test]
+    fn a_mnemonic_in_no_proposal_is_a_verdict_not_a_gap() {
+        // `i32.load32` is not an instruction in any WebAssembly proposal — `load.wast` asserts
+        // exactly this, and being unknown IS the malformation under test.
+        let s = run(
+            r#"(assert_malformed
+                 (module quote "(func (i32.load32 (i32.const 0)))")
+                 "unknown operator")"#,
+        );
+        assert_eq!(
+            (s.passed, s.failed, s.skipped),
+            (1, 0, 0),
+            "a mnemonic that exists nowhere must PASS an assert_malformed, not skip"
+        );
     }
 
     #[test]

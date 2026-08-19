@@ -49,8 +49,27 @@ pub enum Error {
     BadImmediate,
     /// A `$name` no index space defines.
     UnknownIdentifier,
-    /// An instruction name the assembler does not know.
+    /// A mnemonic that is **not an instruction in any WebAssembly proposal** — so the input is
+    /// malformed, and saying so is a verdict wasmrt is entitled to give.
+    ///
+    /// ⚠️⚠️ **This used to mean two different things, and that cost ~300 conformance
+    /// assertions.** It covered both "no such instruction exists" *and* "an instruction from a
+    /// proposal wasmrt does not implement" — and because the `.wast` runner cannot tell those
+    /// apart, it had to score **every** instance as *our* gap. So `load.wast` asserting that
+    /// `i32.load32` is malformed — which it is; that mnemonic exists nowhere — got a **skip**
+    /// instead of a pass. *An error name that conflates "your input is bad" with "we are
+    /// incomplete" cannot be scored correctly by any caller.* The split is
+    /// [`Error::UnimplementedInstr`], and it lives here because this is the only place that
+    /// knows which of the two it is.
     UnknownInstr,
+    /// A real instruction from a proposal **wasmrt has not implemented**. Our gap, never a
+    /// verdict about the input — the `.wast` runner must score it as a skip.
+    ///
+    /// 🔒 **The list behind this must be OVER-INCLUSIVE.** Misfiling a real instruction as
+    /// [`Error::UnknownInstr`] turns an `assert_malformed` into a **false pass**, and a false
+    /// pass is the one direction that cannot be noticed afterwards. Misfiling in this direction
+    /// only costs a skip.
+    UnimplementedInstr,
     /// A form of the wrong shape (an atom where a list was required, etc.).
     BadForm,
     /// A numeric literal that does not parse, or does not fit its type.
@@ -1605,6 +1624,41 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     Ok(())
 }
 
+/// Classify a mnemonic `Op::from_text_name` could not resolve.
+///
+/// Returns [`Error::UnimplementedInstr`] when the name is a **real instruction from a proposal
+/// wasmrt does not implement**, and [`Error::UnknownInstr`] — a malformed-input verdict —
+/// otherwise. Only the assembler can draw this line, because only here is the full set of
+/// mnemonics known; downstream all that survives is an error name.
+///
+/// ✅ **wasmrt only became able to draw it on 2026-08-14**, when tail calls made every
+/// **in-scope** proposal implemented. Before that, “a mnemonic we do not know” could always have
+/// been an in-scope gap, and conservatism was the only honest answer.
+///
+/// 🔒 **OVER-INCLUSIVE BY CONSTRUCTION.** Every rule below errs toward “ours”: a whole-family
+/// substring rather than an enumeration, so a member nobody listed still lands on the safe side.
+/// Adding a name here costs a skip; omitting one banks a **false pass**, which is unrecoverable.
+fn classify_unknown_mnemonic(name: &str) -> Error {
+    // custom-descriptors — every instruction it adds carries `desc` in its name
+    // (`ref.get_desc`, `ref.cast_desc`, `ref.cast_desc_eq`, `struct.new_desc`,
+    // `br_on_cast_desc`/`_fail`/`_eq`/`_eq_fail` …). Matched as a substring on purpose:
+    // enumerating them invites exactly the omission this function must not make.
+    if name.contains("desc") {
+        return Error::UnimplementedInstr;
+    }
+    // wide-arithmetic.
+    if matches!(name, "i64.add128" | "i64.sub128" | "i64.mul_wide_s" | "i64.mul_wide_u") {
+        return Error::UnimplementedInstr;
+    }
+    // The externref/anyref bridge — IN scope, and deliberately deferred until `Value` can tag an
+    // externref (`opcode.rs`, the `0xFB 0x1a`/`0x1b` note). A recorded deferral is still our
+    // gap, never a verdict about the input.
+    if matches!(name, "any.convert_extern" | "extern.convert_any") {
+        return Error::UnimplementedInstr;
+    }
+    Error::UnknownInstr
+}
+
 fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let mut j = 1;
     let name = opt_name(items, &mut j);
@@ -2542,7 +2596,8 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
         emit_atomic(ctx, sub, l, 1, true)?;
         return Ok(());
     }
-    let op = crate::opcode::Op::from_text_name(&kw).ok_or(Error::UnknownInstr)?;
+    let op = crate::opcode::Op::from_text_name(&kw)
+        .ok_or_else(|| classify_unknown_mnemonic(&kw))?;
     use crate::opcode::Op as O;
     if op == O::CallIndirect || op == O::ReturnCallIndirect {
         let opcode = if op == O::CallIndirect { 0x11 } else { 0x13 };
@@ -2890,7 +2945,7 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
     if let Some(sub) = lookup_atomic(name) {
         return emit_atomic(ctx, sub, items, i + 1, false);
     }
-    let op = O::from_text_name(name).ok_or(Error::UnknownInstr)?;
+    let op = O::from_text_name(name).ok_or_else(|| classify_unknown_mnemonic(name))?;
     match op {
         O::Block | O::Loop | O::If => {
             let mut j = i + 1;
