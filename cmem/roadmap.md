@@ -1327,33 +1327,68 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     rejects a `../../README.md` path — the trap `releasing.md` warned about. Verified with
     `cargo package --no-verify` on all three: clean.
 
-  ### T9e — `pin` (module authenticity) `[ ]` 🚦 **OWNER QUESTION OPEN 2026-08-19**
+  ### T9e — `pin` + CLI swappability. `1.0.1` ✅ **DECIDED 2026-08-19** `[ ]`
 
-  🚦 **The owner has proposed load-once-into-memory INSTEAD of the verification track** — *"the file
-  can't be swapped out mid-run"*. **Reviewed in full in [security-model.md](security-model.md); do not
-  act on this entry until that decision lands.** The three findings in brief:
-  1. ⚠️ **The premise does not hold — wazmrt does BOTH.** `pin.zig` (root-owned SHA-256 allow-list) and
-     `sign.zig` (Ed25519) are built and armed by default when a root key or DB is present. **Load-once
-     is how its gate is made TOCTOU-safe, not a replacement for it** — and this file already said so
-     (*"hash the in-memory bytes about to run, never re-read by path"*), before the question was asked.
-  2. ✅ **wasmrt already HAS load-once.** Every executing path goes through `read_module_bytes`
-     (`crates/wasmrt/src/main.rs:200`) — one `fs::read`, then owned bytes all the way to execution; the
-     C ABI never opens a file at all. ⚠️ **But it is a doc comment, not a gate**, so a future loader or
-     an `mmap` at T11 could take it away silently. **That test is the part actually missing.**
-  3. 🚦 **They answer different questions.** Load-once = *integrity over time* (stops the mid-run swap).
-     Pin = *authenticity* (stops the file being replaced **before** load, which needs no race and is the
-     strictly easier attack). ⚠️ Substituting one for the other keeps the defence against the hard
-     attack and drops it against the easy one.
+  🔒 **Owner decisions, all three on 2026-08-19:** *(1)* gate load-once and **re-scope** `pin` to a
+  default-`off` mechanism rather than deleting it; *(2)* **"the idea is to be swappable with the wazmrt
+  project"**; *(3)* **"if our CLI options are the same they are swappable — if our security checks are
+  the same they are also swappable."**
 
-  **Recommendation: gate load-once (cheap, already true), and re-scope `pin` to a default-`off`
-  mechanism rather than deleting it** — or, if it is dropped, say so in `wasmrt.h` and the README, since
-  an undocumented gap gets found twice.
+  **The full buildable spec is in [security-model.md](security-model.md)** — do not re-derive it. What
+  follows is the work breakdown and the findings that change other tasks.
 
-  - `crates/wasmrt-core/src/pin.rs` is a **doc-comment stub**, so **a wasmrt build performs no
-    authenticity check of any kind**. Slated for T7, then T8, slipped both. The mechanism is fully
-    decided — do **not** re-derive it — in `security-model.md`: SHA-256 content-addressed plaintext DB,
-    root-owned, `off|warn|enforce`, a pure `decide()` matrix, hash the **in-memory bytes about to run**,
-    and the opt-out may only *raise* strictness.
+  - **T9e-1 — the load-once GATE (do this first; it is small and it is already true in behaviour).**
+    Make `read_module_bytes` return a `Loaded { bytes, digest }` and have every executing entry point
+    require that type, so re-reading from a path **cannot produce** the value execution demands. ⚠️ This
+    deliberately diverges from wazmrt, which passes a byte slice and re-derives the digest inside the
+    gate: Rust can make *"these bytes came from one read"* a compiler-checked capability. It also
+    computes the digest exactly once, at the single point where bytes enter the process.
+  - **T9e-2 — `wasmrt-core/src/pin.rs`**: `Digest`/hex, `Mode {Off<Warn<Enforce}`, `stricter`,
+    `mode_from_db`, `Action`, the pure `decide(explicit, pinned, opt_out, tty, armed)`, and `Db`.
+    ⚠️ **Two fail-closed rules are load-bearing** — an unrecognised `# mode:` value means **`Enforce`**,
+    not "no policy"; and a non-hex content line is an **error**, not a skipped line. ⚠️ **wasmrt must
+    implement SHA-256 itself** (Rust `std` has none, zero-deps is an invariant) — acceptable *here*
+    because there is no key and no secret, and pinned by the NIST vectors. The same argument does **not**
+    extend to Ed25519, which is why signatures stay design-only.
+  - **T9e-3 — the CLI gate**: `verify_gate` on a `will_execute` predicate, running **before**
+    validation. ⚠️⚠️ **`wasmrt wast` must be gated** (`main.rs:307`) — a `.wast` instantiates and invokes
+    the modules it contains, including `(module binary "…")` payloads, and **that exact bypass shipped in
+    wazmrt**: any wasm can be wrapped in a script, the attacker picks the extension, and it needed no
+    privilege. ⚠️ **The `--no-verify`/`--yes` flag region** must be the leading run of wasmrt flags only —
+    `wasmrt wasi prog.wasm install --yes` has no `--`, so scanning "before `--`" searches the *guest's*
+    argv and a `--yes` meant for the guest silently disables verification.
+  - **T9e-4 — `wasmrt pin <file|dir> [--db <path>]`**, hashing the **assembled** bytes for `.wat`.
+
+  #### 🔀 The swappability half — and it turned up a break that exists TODAY
+
+  ⚠️⚠️ **`--dir` uses a different separator in each runtime**: wazmrt `<host>[:<guest>]`, wasmrt
+  `<host>[::<guest>]`. `--dir .:/` is a working wazmrt invocation; on wasmrt `split_once("::")` finds
+  nothing, so host **and** guest both become the literal `.:/` — **it does not error, it preopens the
+  wrong thing.** Each side has a real reason (a single `:` collides with a Windows drive letter), so
+  **both should accept both** rather than converging on one spelling and breaking existing commands.
+  **This has nothing to do with `pin` and is live right now.**
+
+  ⚠️⚠️ **Aligning the run modes changes what a bare path DOES.** wazmrt's `will_execute` is *"an export
+  was named **or** the module exports `_start`"*, so `wazmrt prog.wasm` **runs** a WASI command while
+  `wasmrt prog.wasm` today **summarizes** it. Alignment means the most casual invocation there is starts
+  **executing** code where it used to only inspect it. 🔒 **Land the pin gate before, or with, that
+  change — never after.**
+
+  **Also missing at wasmrt's CLI** (all present in wazmrt, and all needed for a swap): `--env`,
+  `--max-memory`, `--max-table-elems`, `--features`, and `--` as an end-of-host-flags marker. ⚠️ Note
+  that the last two already exist **in the C ABI** and simply have no CLI surface — so this is mostly
+  exposure, not new engine work. `wasmrt wat` is wasmrt-only and has no wazmrt equivalent.
+
+  **Recommended shape: ADDITIVE.** wasmrt keeps `run`/`wasi`/`wat`/`wast` and *additionally* accepts the
+  positional forms, so a command written for either runtime drives both; symmetric swappability needs
+  wazmrt to accept the subcommand forms, which is wazmrt's half.
+
+  🆕 **A new differential for T12x:** the pin DB is a **shared on-disk artifact**, and a `.wat` digest is
+  the hash of the **assembled** bytes — produced by **two independent assemblers**. **Assemble the shared
+  corpus with both runtimes and diff the SHA-256s.** If they disagree, only `.wasm` digests are portable.
+  ⚠️ And the DB **path** must be shared (`/etc/wasmtk/pins`), or swapping the binary finds no DB, reports
+  `armed = false`, and **silently runs everything** — a security downgrade with no error message.
+
 
   ### T9f — Tail calls ✅ **DONE 2026-08-14** — and `return_call_ref` had been a FAKE tail call
 

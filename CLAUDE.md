@@ -192,7 +192,7 @@ every `cmem/` file), so only the ordering moved. ⚠️ **T13-0 comes before any
 instrument the skips and audit the runner's SCORING — that phase alone was worth 292 skips→passes and
 14 misfiled failures in the other runtime. **Rank by ASSERTIONS UNBLOCKED, not by failure count**, and
 expect failures to RISE honestly as skips convert — the gate is *no file lost a pass*, per-file.
-🚦 **`pin` is an OPEN owner question** (load-once vs. verification) — see `cmem/security-model.md`.
+✅ **`pin` is DECIDED (owner, 2026-08-19)** — gate load-once, build it to wazmrt’s application, and be **SWAPPABLE**: *“if our CLI options are the same they are swappable — if our security checks are the same they are also swappable.”* Buildable spec in `cmem/security-model.md`; work breakdown in `roadmap.md` T9e. ⚠⚠ Two swappability breaks are live **today, unrelated to pin**: `--dir` uses `:` in wazmrt and `::` in wasmrt (so `--dir .:/` silently preopens the wrong thing here), and aligning the run modes makes a **bare path EXECUTE** a `_start` module where wasmrt currently summarizes — land the pin gate before that, never after.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`
 fix was real but did not move `br_table.wast`, which needed three further unlisted fixes. The full set
 of recurring lessons is in [`cmem/best-practices.md`](cmem/best-practices.md); detail is in
