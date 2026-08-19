@@ -868,6 +868,27 @@ conformance number cannot be inflated by what we do not handle. Equally: disting
 this" (a real verdict) from "we cannot back this kind" (a gap) — collapsing them is what made
 `assert_unlinkable` unimplementable.
 
+### 5.5a 🔒 Read the skip column to RANK; work the FAILURE column to FIX
+
+**Borrowed from wazmrt, and measured here before adopting (owner, 2026-08-19):** *"fixing the failures
+first cleared a lot of the skips."*
+
+Probed against our own corpus rather than agreed with, and it holds: of 930 cascade skips, **739 (79%)
+sit in files that also carry failures**, and only 191 sit in files with none. `exact-casts.wast` has
+**3 failures, 108 skips and zero capability gaps** — all 108 clear when the 3 are fixed.
+
+⚠️ **This is the inverse of §5.6 and both are true, because they answer different questions.** §5.6
+says a failure count *undercounts* a defect whose symptom is a skip — so **rank** with the skip column.
+This says a failure is a root you can act on while a cascade is not actionable until its root moves —
+so **fix** down the failure column. Reading one rule as contradicting the other is how a work-list ends
+up ordered by neither.
+
+🔻 **The residue is the part that matters, and it is where the biggest item hides.** After the failure
+pass, what remains is *by construction* the skips no failure could reach — here, 160 of the surviving
+191 are one item (the externref/anyref bridge) across four files with **zero failures between them**.
+**A failures-first order is a sequencing rule, not a claim that the skip column is derivative** — so
+the second phase is mandatory, and it is re-measured, never carried over from the first estimate.
+
 ### 5.6 🎓 A number the report cannot ATTRIBUTE is not a measurement
 
 **Bought by (2026-08-19):** "1,024 skipped" was printed in every conformance summary for the whole

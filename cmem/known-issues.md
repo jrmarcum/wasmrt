@@ -1,6 +1,12 @@
 # Known Issues
 
-## 🔎 OPEN — S1: the externref/anyref bridge. **The highest-leverage item in the project, and it was invisible.**
+## 🔎 OPEN — S1: the externref/anyref bridge. **Phase 2, and the one item the failure pass cannot reach.**
+
+🔒 **Scheduled behind the failure pass (owner, 2026-08-19): all 172 failures first, then the skips.**
+That order is measured-correct — 739 of 930 cascade skips live in files that also carry failures — but
+**S1 is in the 191 that do not.** `ref_test`, `ref_cast`, `br_on_cast` and `br_on_cast_fail` have
+**zero failures between them** and hold 160 cascades, so no amount of failure work will surface this.
+It heads phase 2. See `roadmap.md` and `best-practices.md` §5.5a.
 
 `any.convert_extern` (`0xFB 0x1a`) and `extern.convert_any` (`0x1b`) are **deliberately absent** —
 recorded in `opcode.rs` with the reason, and that deferral is still correct. What was **not** known

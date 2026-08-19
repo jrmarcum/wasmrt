@@ -222,7 +222,51 @@ host handle 2 reads as GC object #2.
 invent work, it *re-ranked* it and surfaced **three items (S1, S2, S7) that no track covered**. S2 is
 41 assertions of pure runner work with no engine risk at all.
 
-**Order: S1 → F1 → S2 → S3 → F2–F7 → S7 → tracks D/W/P/M/A/L.**
+##### 🔒 THE ORDER: **ALL FAILURES FIRST, THEN THE SKIPS** (owner, 2026-08-19)
+
+> *"The wazmrt team found that fixing the failures first cleared a lot of the skips. We need to focus
+> there first. Then work on the remaining skips afterward."*
+
+⚠️ **PROBED, not merely adopted** — a stated constraint is worth measuring (`best-practices.md`), and
+this one **holds on our own corpus**:
+
+| where the cascades live | cascades | files |
+| --- | --- | --- |
+| **files that ALSO carry failures** | **739** (79%) | 20 |
+| files with **zero** failures | 191 (21%) | 8 |
+| | **930** | 28 |
+
+**So ~79% of the skip work is downstream of the failure work and needs no skip-specific pass at all.**
+`exact-casts.wast` is the shape in miniature: **3 failures, 108 skips, zero capability gaps** — every
+one of those 108 clears when the 3 are fixed. `ref_null.wast` is 1 failure holding 27.
+
+🎓 **The rule this establishes, and it is the inverse of the census's own lesson.** The census showed
+that *a failure count undercounts a defect whose symptom is a skip* — true, and it is why the skip
+column must be **read**. But the **fix order** runs the other way: a failure is a root you can act on
+directly; a cascade is not actionable at all until its root moves. **Read the skip column to RANK; work
+the failure column to FIX.**
+
+##### 📐 Phase 1 — FAILURES. All 172. `[ ]`
+
+**F1 → F2 → F3 → F4 → F5 → F6 → F7**, then the proposal failures (custom-descriptors 65,
+custom-page-sizes 34, threads 14, wide-arithmetic 1). F1 leads on **direction**: accept-invalid is the
+silent-wrong-output class and 55% of the core failures.
+
+🚦 **Expect the skip total to fall on its own, and expect the failure count to RISE at times** as
+cascades convert into verdicts. **The gate stays "no file lost a pass", per file** —
+`scripts/conformance-diff.sh`, never the totals.
+
+##### 📐 Phase 2 — the RESIDUAL SKIPS. `[ ]`
+
+Only what phase 1 could not reach: the **191 cascades in the 8 files with zero failures**, plus the 96
+capability gaps. **Re-measure before starting** — the S-list will have shrunk, and some of it will have
+*moved into the failure column* rather than disappeared.
+
+⚠️⚠️ **The one item phase 1 provably cannot touch is the biggest: S1.** `ref_test` (67 cascades),
+`ref_cast` (41), `br_on_cast` (26) and `br_on_cast_fail` (26) carry **zero failures between them** —
+160 of the 191. Working the failure column will never surface them, which is exactly why the owner's
+instruction has a *"then work on the remaining skips afterward"* half. **S1 heads phase 2**; then S2
+(41), S3 (~28), S7 (3), then tracks D/W/P/M/A/L.
 
 #### 🧾 The baseline, and what "done" means
 

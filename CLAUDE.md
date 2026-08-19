@@ -46,8 +46,17 @@ report** — and a skip was a bare counter at all twenty sites. Both fixed; the 
 root that produces it.** 🎓 *A number the report cannot attribute is not a measurement*
 (`cmem/best-practices.md` §5.6). The remaining work is scoped in `cmem/roadmap.md` as **F1–F7** (the
 172 failures; **F1 = accept-invalid, 32 core, ranked first on DIRECTION not count**) and **S1–S7** (the
-1,024 skips). **S1 — the externref/anyref bridge — is worth ~181 assertions on its own**; fix the
-`Value` representation FIRST, or host handle 2 reads as GC object #2. The `.wat`
+1,024 skips).
+🔒 **THE ORDER IS ALL FAILURES FIRST, THEN THE SKIPS (owner, 2026-08-19)** — wazmrt found that fixing
+the failures cleared a lot of the skips, and it was **probed here rather than agreed with**: **739 of
+930 cascade skips (79%) sit in files that ALSO carry failures**, so most of phase 2 clears itself.
+`exact-casts.wast` is 3 failures holding 108 skips with zero capability gaps. 🎓 **Read the skip column
+to RANK; work the failure column to FIX** (`cmem/best-practices.md` §5.5a — the inverse of §5.6, and
+both are true because they answer different questions).
+⚠️⚠️ **Phase 2 is mandatory and re-measured, because the biggest single item is in the 21% the failure
+pass cannot reach**: S1 — the externref/anyref bridge, ~181 assertions — sits behind `ref_test`,
+`ref_cast`, `br_on_cast` and `br_on_cast_fail`, which have **zero failures between them**. When it is
+reached, fix the `Value` representation FIRST, or host handle 2 reads as GC object #2. The `.wat`
 corpus figure is ⚠️ **UNVERIFIED as of 2026-08-19** — its denominator moved (532 `.wat` files in the
 wasmtk tree today; see `cmem/testing.md`) — and **every CLI command that takes a module
 now accepts that `.wat` directly** — `run`, `wasi` and summarize assemble text before decoding, through one
