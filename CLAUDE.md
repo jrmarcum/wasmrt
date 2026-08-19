@@ -223,12 +223,19 @@ finalized C ABI is [`crates/wasmrt-capi/include/wasmrt.h`](crates/wasmrt-capi/in
 ## 🤝 "**coordinate**" = sync with `wazmrt` through the contract (owner, 2026-08-19)
 
 **One word, binding.** When the owner says **"coordinate"**, synchronise this project with the sibling
-runtime through [`cmem/interop.md`](cmem/interop.md) — the swappability contract, identical in both
-repos. Read it first; **byte-compare the two copies** (a difference means the contract is *unknown*, not
-"close enough"); **verify rows by RUNNING both, never by reading either**; record status + date +
-evidence; **bump the CONTRACT VERSION and land the identical file in BOTH repos in the same change**;
-and treat a disagreement as an **observation until its cause is traced** — neither runtime is the
-oracle. 🔒 Scope is **the CLI options and the security checks only**; this does *not* reopen the oracle
+runtime through [`cmem/interop.md`](cmem/interop.md) — the swappability contract, versioned and kept
+identical in both repos. Read it first; **byte-compare the two copies**; **verify rows by RUNNING both,
+never by reading either**; record status + date + evidence; **bump the CONTRACT VERSION in THIS repo's
+copy**; and treat a disagreement as an **observation until its cause is traced** — neither runtime is
+the oracle.
+
+🔒🔒 **NEVER WRITE INTO THE OTHER PROJECT'S TREE** — not its source, not its `cmem/`, **not its copy of
+`interop.md`** — **unless the owner directs it that time** (owner, 2026-08-19: *"each project needs to
+edit their own files … important for tracking and integrity"*). **Reading the sibling is free; writing
+to it is not.** Propose the change and let their own session adopt it in their own commit: a cross-repo
+write launders authorship and destroys uncommitted work, both of which happened on 2026-08-19. A
+version mismatch between the copies is therefore a **normal in-flight state** — an unadopted proposal —
+not an error; only a row both copies carry is binding. 🔒 Scope is **the CLI options and the security checks only**; this does *not* reopen the oracle
 for design, and **performance/size are explicitly out** — that is the contest.
 
 ⚠️ **The inverse binds too, and it is the half that gets skipped: coordinate BEFORE shipping a change

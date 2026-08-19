@@ -696,15 +696,20 @@ following, **in this order**:
    the other project to *verify a contract row* is allowed and expected; reading it to **adopt a
    design** is not, and **performance and size are explicitly out** — those are what the two are
    competing on, so a contract row must never be justified by "the other one is faster."
-5. **Record what you found, in the contract, with its date and its evidence.** Change a row's status
-   only with the check that earned it. **Bump the CONTRACT VERSION for any row change**, add a
-   `## 6. Change log` entry, and **land the identical file in BOTH repos in the same change** — the
-   version is the pin that makes drift detectable, and it is worthless if one side moves alone.
+5. **Record what you found — in THIS project's copy of the contract — with its date and its
+   evidence.** Change a row's status only with the check that earned it. **Bump the CONTRACT VERSION**
+   and add a `## 6. Change log` entry. 🔒 **Then PROPOSE it to the sibling; do not write it into their
+   tree** (step 7). A version mismatch between the copies is a **normal in-flight state** — an unadopted
+   proposal — not an error; what is never acceptable is treating an unadopted row as binding.
 6. **A disagreement is an OBSERVATION until its cause is traced.** Neither runtime is the oracle, so
    *"the other one does X"* is not a diagnosis. Record it, then trace it.
-7. **Commit and push** this repo's copy (per the "update the project memory" trigger). Place the
-   sibling's copy for its own session and **say plainly that it is unlanded** — do not commit into
-   the other repo's history without the owner asking.
+7. 🔒🔒 **COMMIT AND PUSH ONLY THIS REPO. NEVER WRITE INTO THE SIBLING'S TREE** — not its source,
+   not its `cmem/`, **not its copy of `interop.md`** — **unless the owner directs it that time.**
+   Owner, 2026-08-19: *"each project needs to edit their own files … important for tracking and
+   integrity"*. **Reading the sibling is free; writing to it is not.** Report the proposal instead and
+   let the sibling's own session adopt it **in the sibling's own commit** — a cross-repo write launders
+   authorship (the history that should record *"they agreed"* instead shows a file arriving from
+   outside) and destroys uncommitted work. Both happened on 2026-08-19; that is why this rule exists.
 
 ⚠️ **THE INVERSE IS ALSO BINDING, AND IT IS THE HALF THAT GETS SKIPPED.** *Neither project edits the
 contract unilaterally* — so **coordinate BEFORE shipping a change to a contract surface, not after**.
