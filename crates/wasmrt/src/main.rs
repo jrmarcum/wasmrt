@@ -395,6 +395,10 @@ fn run_wast(rest: &[String]) -> ExitCode {
 
     let (mut passed, mut failed, mut skipped, mut errored) = (0usize, 0usize, 0usize, 0usize);
     let mut worst: Vec<(String, usize)> = Vec::new();
+    // Corpus-wide skip census, keyed by the reason with its variable tail stripped. A skip
+    // total nobody can attribute is a number, not a measurement — this is what makes the
+    // remaining skip work scopeable.
+    let mut skip_census: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for f in &files {
         let Ok(src) = std::fs::read(f) else {
             eprintln!("wasmrt: cannot read {}", f.display());
@@ -423,13 +427,28 @@ fn run_wast(rest: &[String]) -> ExitCode {
                 if s.failed > 0 {
                     worst.push((name.to_string(), s.failed));
                 }
-                if verbose || s.failed > 0 {
+                // ⚠⚠ Report a file that only SKIPS, too. Listing on `failed > 0` alone made
+                // every skips-only file invisible — so the skip total could be read but never
+                // ATTRIBUTED, and scoping the remaining skip work from this report was
+                // impossible: 234 of 1,024 skips lived in files that printed nothing.
+                // A report that cannot account for a number it prints is not a report.
+                for r in &s.skips {
+                    // Group on the reason's stable head: everything before the parenthesised
+                    // detail, which carries file-specific text (a type index, a name) and
+                    // would otherwise make every skip its own category.
+                    let key = r.split_once(" (").map_or(r.as_str(), |(h, _)| h).to_string();
+                    *skip_census.entry(key).or_default() += 1;
+                }
+                if verbose || s.failed > 0 || s.skipped > 0 {
                     println!("{name}: {s}");
                     if verbose {
                         // All recorded failures, not a sample: triaging a file means seeing
                         // the distinct reasons, and three of forty-six is not a diagnosis.
                         for m in &s.failures {
                             println!("    {m}");
+                        }
+                        for m in &s.skips {
+                            println!("    SKIP {m}");
                         }
                     }
                 }
@@ -457,6 +476,14 @@ fn run_wast(rest: &[String]) -> ExitCode {
     if !worst.is_empty() {
         println!("\nworst files:");
         for (n, c) in worst.iter().take(15) {
+            println!("  {c:>6}  {n}");
+        }
+    }
+    if !skip_census.is_empty() {
+        let mut rows: Vec<(&String, &usize)> = skip_census.iter().collect();
+        rows.sort_by_key(|(n, c)| (core::cmp::Reverse(**c), (*n).clone()));
+        println!("\nskip reasons:");
+        for (n, c) in rows.iter().take(20) {
             println!("  {c:>6}  {n}");
         }
     }

@@ -43,6 +43,10 @@ pub struct Summary {
     /// Descriptions of the failures, for debugging. Capped so a badly-broken file cannot
     /// produce unbounded output.
     pub failures: Vec<String>,
+    /// Why each skip happened. ⚠️⚠️ A skip used to be a bare COUNT, so "1,024 skipped" could
+    /// be read but never attributed: scoping the remaining skip work meant guessing from the
+    /// file name. A number the report cannot explain is not a measurement.
+    pub skips: Vec<String>,
 }
 
 impl Summary {
@@ -87,6 +91,11 @@ impl core::error::Error for Error {}
 
 /// Cap on recorded failure descriptions.
 const MAX_RECORDED_FAILURES: usize = 25;
+/// Skips are far denser than failures — one unbuildable module skips every assertion behind
+/// it, and the worst file in the corpus carries 108. The cap sits well clear of that so the
+/// reason list is COMPLETE in practice; a cap that silently truncated would reintroduce the
+/// exact blindness `Summary::skips` was added to remove.
+const MAX_RECORDED_SKIPS: usize = 512;
 
 /// Parse and run a whole `.wast` source.
 ///
@@ -160,9 +169,18 @@ impl Runner {
         }
     }
 
+    /// Record a skip WITH its reason. Every `skipped += 1` goes through here: a skip site
+    /// that only bumps the counter is a hole in the report.
+    fn skip(&mut self, msg: String) {
+        self.summary.skipped += 1;
+        if self.summary.skips.len() < MAX_RECORDED_SKIPS {
+            self.summary.skips.push(msg);
+        }
+    }
+
     fn command(&mut self, cmd: &Sexpr) {
         let Some(kw) = cmd.keyword() else {
-            self.summary.skipped += 1;
+            self.skip(String::from("command: no leading keyword"));
             return;
         };
         let list = cmd.as_list().unwrap_or(&[]);
@@ -176,7 +194,9 @@ impl Runner {
             "assert_unlinkable" => self.assert_unlinkable(list),
             "invoke" | "get" => match self.run_action(cmd) {
                 Ok(_) => self.summary.passed += 1,
-                Err(ActionErr::NoTarget) => self.summary.skipped += 1,
+                Err(ActionErr::NoTarget) => {
+                    self.skip(format!("{kw}: no target instance (an earlier module did not build)"));
+                }
                 Err(ActionErr::Trap(t)) => self.fail(format!("action trapped: {t}")),
                 Err(ActionErr::Bad(m)) => self.fail(m),
             },
@@ -205,10 +225,12 @@ impl Runner {
                         self.registered.push((name, id));
                         self.summary.passed += 1;
                     }
-                    _ => self.summary.skipped += 1,
+                    _ => self.skip(String::from(
+                        "register: no target instance (an earlier module did not build)",
+                    )),
                 }
             }
-            _ => self.summary.skipped += 1,
+            _ => self.skip(format!("unhandled command `{kw}`")),
         }
     }
 
@@ -359,7 +381,7 @@ impl Runner {
                     }
                 }
                 Err(e) if BuildErr::Assemble(e.clone()).is_unsupported() => {
-                    self.summary.skipped += 1;
+                    self.skip(format!("module definition: unsupported ({e})"));
                 }
                 Err(e) => self.fail(format!("module definition failed to assemble: {e}")),
             }
@@ -371,7 +393,7 @@ impl Runner {
             .and_then(Sexpr::as_atom)
             .unwrap_or("");
         let Some((_, bytes)) = self.definitions.iter().find(|(n, _)| n == of) else {
-            self.summary.skipped += 1;
+            self.skip(format!("module instance: no definition named `{of}`"));
             return true;
         };
         let bytes = bytes.clone();
@@ -387,7 +409,7 @@ impl Runner {
             }
             Err(e) => {
                 if e.is_unsupported() {
-                    self.summary.skipped += 1;
+                    self.skip(format!("module instance: unsupported ({e})"));
                 } else {
                     self.fail(format!("module instance failed to build: {e}"));
                 }
@@ -422,7 +444,7 @@ impl Runner {
                 // A module that does not build is a real failure UNLESS the assembler
                 // simply cannot express it yet — that is a gap, not a conformance result.
                 if e.is_unsupported() {
-                    self.summary.skipped += 1;
+                    self.skip(format!("module: unsupported ({e})"));
                 } else {
                     self.fail(format!("module failed to build: {e}"));
                 }
@@ -496,7 +518,9 @@ impl Runner {
         let results = match self.run_action(action) {
             Ok(r) => r,
             Err(ActionErr::NoTarget) => {
-                self.summary.skipped += 1;
+                self.skip(String::from(
+                    "assert_return: no target instance (an earlier module did not build)",
+                ));
                 return;
             }
             Err(ActionErr::Trap(t)) => {
@@ -549,7 +573,9 @@ impl Runner {
             match self.build(operand.as_list().unwrap_or(&[])) {
                 Ok(_) => self.fail("assert_trap: module instantiated without trapping".to_string()),
                 Err(BuildErr::Instantiate(_)) => self.summary.passed += 1,
-                Err(e) if e.is_unsupported() => self.summary.skipped += 1,
+                Err(e) if e.is_unsupported() => {
+                    self.skip(format!("assert_trap: unsupported ({e})"));
+                }
                 Err(e) => self.fail(format!("assert_trap: non-trap error {e}")),
             }
             return;
@@ -557,7 +583,9 @@ impl Runner {
         match self.run_action(operand) {
             Ok(_) => self.fail("assert_trap: expected a trap, got a result".to_string()),
             Err(ActionErr::Trap(_)) => self.summary.passed += 1,
-            Err(ActionErr::NoTarget) => self.summary.skipped += 1,
+            Err(ActionErr::NoTarget) => {
+                self.skip(String::from("assert_trap: no target instance"));
+            }
             Err(ActionErr::Bad(m)) => self.fail(m),
         }
     }
@@ -571,7 +599,9 @@ impl Runner {
             Ok(_) => self.fail("assert_exhaustion: expected exhaustion, got a result".to_string()),
             Err(ActionErr::Trap(Trap::CallStackExhausted)) => self.summary.passed += 1,
             Err(ActionErr::Trap(t)) => self.fail(format!("assert_exhaustion: got {t}")),
-            Err(ActionErr::NoTarget) => self.summary.skipped += 1,
+            Err(ActionErr::NoTarget) => {
+                self.skip(String::from("assert_exhaustion: no target instance"));
+            }
             Err(ActionErr::Bad(m)) => self.fail(m),
         }
     }
@@ -580,7 +610,7 @@ impl Runner {
     /// rejected, and by the **right stage**.
     fn assert_rejected(&mut self, form: &[Sexpr], kind: Rejection) {
         let Some(inner) = form.get(1).filter(|s| s.keyword() == Some("module")) else {
-            self.summary.skipped += 1;
+            self.skip(format!("{kind:?}: operand is not a (module …)"));
             return;
         };
         match self.build(inner.as_list().unwrap_or(&[])) {
@@ -600,7 +630,7 @@ impl Runner {
                 // the module was never really put to the test, and scoring it as a pass
                 // would make missing features look like conformance.
                 if e.is_unsupported() {
-                    self.summary.skipped += 1;
+                    self.skip(format!("{kind:?}: unsupported ({e})"));
                 } else if kind.accepts(&e) {
                     self.summary.passed += 1;
                 } else {
@@ -619,7 +649,7 @@ impl Runner {
     /// at all stays a skip.
     fn assert_unlinkable(&mut self, form: &[Sexpr]) {
         let Some(inner) = form.get(1).filter(|s| s.keyword() == Some("module")) else {
-            self.summary.skipped += 1;
+            self.skip(String::from("Unlinkable: operand is not a (module …)"));
             return;
         };
         match self.build(inner.as_list().unwrap_or(&[])) {
@@ -631,7 +661,9 @@ impl Runner {
                     _ => String::from("<no reason given>"),
                 }
             )),
-            Err(e) if e.is_unsupported() => self.summary.skipped += 1,
+            Err(e) if e.is_unsupported() => {
+                self.skip(format!("Unlinkable: unsupported ({e})"));
+            }
             Err(e) if e.is_link_failure() => self.summary.passed += 1,
             Err(e) => self.fail(format!("Unlinkable: rejected before linking ({e})")),
         }
@@ -1243,6 +1275,50 @@ mod tests {
                (assert_return (invoke "f") (i32.const 9))"#,
         );
         assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
+    }
+
+    /// ⚠️⚠️ **Every skip must carry a reason.** A skip site that only bumps the counter is
+    /// invisible in the report, and this project spent the whole port unable to say what its
+    /// 1,024 skips *were* — the census that finally answered it showed **91% were cascades**
+    /// behind a handful of roots, not 1,024 pieces of work. A bare counter is not a
+    /// measurement, so the invariant is pinned rather than trusted.
+    ///
+    /// The script below deliberately trips several DIFFERENT skip paths in one run: an
+    /// unhandled command, a module that will not assemble, and the actions stranded behind it.
+    #[test]
+    fn every_skip_records_a_reason() {
+        let s = run_script(
+            br#"(assert_exception (invoke "nope"))
+                (module (func (export "f") (result i32) (any.convert_extern (ref.null extern))))
+                (assert_return (invoke "f") (i32.const 1))
+                (assert_trap (invoke "f") "x")
+                (invoke "f")"#,
+        )
+        .unwrap();
+        assert!(s.skipped > 0, "the fixture must actually skip: {s}");
+        assert_eq!(
+            s.skips.len(),
+            s.skipped,
+            "a skip without a reason is a hole in the report: {:?}",
+            s.skips
+        );
+        // …and the reasons must DISTINGUISH the paths. One catch-all string would satisfy the
+        // count above while telling a reader nothing, which is the failure mode being pinned.
+        assert!(
+            s.skips.iter().any(|r| r.contains("unhandled command")),
+            "{:?}",
+            s.skips
+        );
+        assert!(
+            s.skips.iter().any(|r| r.starts_with("module: unsupported")),
+            "{:?}",
+            s.skips
+        );
+        assert!(
+            s.skips.iter().any(|r| r.contains("no target instance")),
+            "{:?}",
+            s.skips
+        );
     }
 
     #[test]
