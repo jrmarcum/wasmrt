@@ -1603,10 +1603,21 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         if sig.params.is_empty() && sig.results.is_empty() {
             if let Some(s) = func_sig_at(&b.types, ti) {
                 sig = s.clone();
-                // The referenced type's params are unnamed here.
-                if local_names.is_empty() {
-                    local_names = vec![None; sig.params.len()];
-                }
+                // The referenced type's params are unnamed, and they occupy the FIRST local
+                // indices — so every declared local name shifts up by the param count.
+                //
+                // ⚠️⚠️ This used to be `if local_names.is_empty() { … }`, which is exactly
+                // wrong whenever the function declares a local: the `(local $var …)` clause
+                // has ALREADY pushed its name by the time this runs, so the placeholders were
+                // never inserted and `$var` resolved to **index 0 — the parameter**.
+                //
+                // `(func $g (type $sig) (local $var i32) (local.get $var))` therefore returned
+                // the ARGUMENT instead of the fresh zero local. **Silent wrong output**: no
+                // error, no diagnostic, just a different number — the class this project ranks
+                // worst, sitting in `func.wast` behind an "8 failures" line.
+                let mut names = alloc::vec![None; sig.params.len()];
+                names.append(&mut local_names);
+                local_names = names;
             }
         }
     }
@@ -5674,6 +5685,38 @@ mod tests {
             // …and the payload and sign are preserved, so "quiet" did not become "canonicalise".
             assert_eq!(got, 0x7fe0_0000, "f32.{op} must keep sign and payload");
         }
+    }
+
+    /// A function whose signature comes from `(type $sig)` alone still has its **parameters at
+    /// local indices 0..n**, so a named local declared afterwards starts at `n`.
+    ///
+    /// ⚠️⚠️ **SILENT WRONG OUTPUT until 2026-08-19.** The parameter placeholders were inserted
+    /// only `if local_names.is_empty()`, and a `(local $var …)` clause has already pushed its
+    /// name by then — so `$var` resolved to **index 0, the parameter**, and the function
+    /// returned its ARGUMENT instead of a fresh zero local. No error, no diagnostic, just a
+    /// different number. It sat inside `func.wast`'s "8 failures" line.
+    #[test]
+    fn a_named_local_starts_after_the_params_of_a_referenced_type() {
+        let src = r#"(module
+            (type $sig (func (param i32) (result i32)))
+            (func (export "f") (type $sig)
+              (local $var i32)
+              (local.get $var))
+            (func (export "g") (type $sig)
+              (local $a i32) (local $b i32)
+              (local.set $b (i32.const 7))
+              (local.get $b)))"#;
+        // The argument is 42; `$var` is a FRESH local, so the answer is 0 — not 42.
+        assert_eq!(
+            crate::interp::as_i32(run(src, "f", &[crate::interp::Value::from(42u32)])[0]),
+            0,
+            "a named local must not alias the parameter"
+        );
+        // Two named locals: the second must be index 2, after the param and `$a`.
+        assert_eq!(
+            crate::interp::as_i32(run(src, "g", &[crate::interp::Value::from(42u32)])[0]),
+            7
+        );
     }
 
     #[test]
