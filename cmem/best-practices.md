@@ -553,7 +553,11 @@ compares them**.
 consult is a rule with an exception nobody wrote down — 14 of a reported 104 "failures" were that one
 inconsistency.
 
-#### For triage — how to read what is left (378 failures, 2,038 skips)
+#### For triage — how to read what is left (172 failures, 1,024 skips)
+
+✅ **DONE 2026-08-19, and the borrowed rule paid twice.** The skip census is now **permanent**
+(`Summary::skips`), not a throwaway probe — see §5.6 and `testing.md`. It showed 91% of the skips were
+cascades and reduced 1,024 of them to **seven items**.
 
 ⚠️ **When a skip has no recorded reason, INSTRUMENT it — do not reason about it.** A throwaway probe
 (source line plus error name at every skip site, run over the corpus, then reverted) produced wazmrt's
@@ -863,6 +867,36 @@ A construct the build cannot put to the test is not a pass. Skips are counted se
 conformance number cannot be inflated by what we do not handle. Equally: distinguish "nothing defines
 this" (a real verdict) from "we cannot back this kind" (a gap) — collapsing them is what made
 `assert_unlinkable` unimplementable.
+
+### 5.6 🎓 A number the report cannot ATTRIBUTE is not a measurement
+
+**Bought by (2026-08-19):** "1,024 skipped" was printed in every conformance summary for the whole
+port, and it was **unscopeable**. Two holes, both in the *instrument*:
+
+1. The runner printed a per-file line only when `failed > 0`. **234 of 1,024 skips lived in files that
+   produced no output at all** — `ref_test.wast` (68 skips), `ref_cast.wast` (42), both
+   `br_on_cast*.wast` (27 each) had **never once appeared in a conformance report**.
+2. A skip was a bare counter at all twenty skip sites, so even a *listed* file could not say why.
+
+Adding a reason to every skip showed that **928 of 1,024 (91%) were cascades** — assertions stranded
+behind a module that never built — and that only **96** were real gaps, resolving to **seven items**.
+One of them (the externref/anyref bridge) accounted for ~176 assertions across five files.
+
+**The rules, and they generalise past conformance:**
+
+- **A count with no cause cannot be ranked.** Planning off the skip column would have put a 108-skip
+  cascade *above* the single root that produces it. Rank by cause, and rank by **assertions unblocked**.
+- **A report that lists only the loud category cannot scope the quiet one.** `failed > 0` is a
+  perfectly sensible filter for reading failures and a total blind spot for everything else. Ask what
+  the report **omits**, not only what it says — the sibling of §3.8.
+- **Instrument BEFORE triaging, every time.** T13-0 already established this and was worth 292
+  skips→passes; the day it was skipped for the skip column, the same lesson cost the same way again.
+- **Give a counter a reason at the site, not a post-hoc classifier.** The reason is free where the
+  decision is made and unrecoverable afterwards.
+
+Pinned by `every_skip_records_a_reason`, which asserts both that every skip carries a reason **and
+that the reasons distinguish the paths** — a single catch-all string would satisfy a count-only check,
+which is §4.1 (a gate that cannot fail is decoration) applied to the fix for this very lesson.
 
 ---
 

@@ -33,16 +33,61 @@ leads produced by that arrangement** ("the oracle runs this, so our type-checker
 running an entry point that skipped validation, `best-practices.md` §2.3a). Retiring the oracle removes
 the class; do not reintroduce it by reasoning about what wazmrt would do.
 
-## Spec-suite conformance — current (2026-08-14, T9f tail calls) — **99.4%**
+## Spec-suite conformance — current (2026-08-19, T13 clear-out day 1) — **99.7%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 
-| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | T9a#7 + start (08-08) | charset (08-08) | **T9a#8 (08-08)** | **T9f tail calls (08-14)** |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | 61,987 | 62,037 | **62,113** | **62,238** |
-| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | 441 | 393 | **385** | **378** |
-| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | 2,245 | **2,163** | **2,038** |
-| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | 99.4% | **99.4%** of 62,498 | **99.4%** of 62,616 |
+| | T6 gate (08-03) | post-linking (08-04) | post-T7 (08-05) | T8 (08-06) | type-use I (08-08) | type-use II (08-08) | T9a#4 tables (08-08) | T9a#5 GC consts (08-08) | T9a#7 + start (08-08) | charset (08-08) | **T9a#8 (08-08)** | T9f tail calls (08-14) | **T13 day 1 (08-19)** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **passed** | 54,509 | 56,541 | 61,013 | 61,033 | 61,778 | 61,802 | 61,887 | 61,975 | 61,987 | 62,037 | 62,113 | 62,238 | **63,333** |
+| failed | 871 | 1,521 | 751 | 738 | 496 | 472 | 457 | 453 | 441 | 393 | 385 | 378 | **172** |
+| skipped | 9,608 | 6,821 | 3,094 | 3,075 | 2,466 | 2,466 | 2,339 | 2,247 | 2,247 | 2,245 | 2,163 | 2,038 | **1,024** |
+| **pass rate** | 98.4% | 97.4% | 98.8% | 98.8% | 99.2% | 99.2% | 99.3% | 99.3% | 99.3% | 99.4% | 99.4% | 99.4% of 62,616 | **99.7%** of 63,505 |
+
+⚠️ **The denominator MOVES, so the pass rate alone hides progress.** 2026-08-19 converted 1,014 skips
+into verdicts, which is why *adjudicated* grew from 62,616 to 63,505 while failures more than halved.
+**Read the three numbers, never the percentage on its own** — a run that converts a skip into a failure
+lowers the rate and is still forward motion.
+
+### 🔬 2026-08-19 — THE SKIP CENSUS. The report could not attribute the number it printed.
+
+Two holes in the **instrument**, both found while scoping the remaining work rather than by any test:
+
+1. The runner printed a per-file line only when `failed > 0`. **Every skips-only file was invisible** —
+   234 of 1,024 skips lived in files that produced no output at all, and `ref_test.wast` (68 skips),
+   `ref_cast.wast` (42) and both `br_on_cast*.wast` (27 each) had **never appeared in a conformance
+   report** in the history of the port.
+2. A skip was a bare counter at all **twenty** skip sites. Even a listed file could not say *why*.
+
+Both are fixed: `Summary::skips` records a reason at every site, the CLI lists skips-only files, prints
+reasons under `-v`, and ends with a corpus-wide **skip census**. Pinned by
+`every_skip_records_a_reason`, which trips three different skip paths and asserts both that every skip
+carries a reason *and* that the reasons distinguish the paths — a single catch-all string would satisfy
+a count-only check. Mutation-verified, with the mutation's arrival confirmed (bare-site count 1 → 2)
+**before** believing the failure.
+
+**The census is the finding:**
+
+| skip reason | count |
+| --- | --- |
+| `assert_return: no target instance` | 666 |
+| `assert_trap: no target instance` | 255 |
+| `unhandled command \`assert_exception\`` | 41 |
+| `Invalid: unsupported` | 26 |
+| `module: unsupported` | 17 |
+| `Unlinkable: unsupported` | 7 |
+| `invoke: no target instance` | 7 |
+| `register: no target instance` | 2 |
+| `unhandled command \`func\`` / \`memory\` | 3 |
+
+⚠️⚠️ **928 of 1,024 (91%) are CASCADES** — assertions stranded behind a module that never built. They
+are not 1,024 pieces of work; they are the shadow of a handful of roots. `ref_test.wast` skips **68
+assertions behind ONE unassemblable module**. Only **96** skips are genuine capability gaps.
+
+🎓 **Ranking by the skip count would have ranked 108 cascades above the single root that produces
+them.** This is §3.8 again — the instrument measured what it could reach rather than what the question
+needed — and it is why `best-practices.md` now carries *"a number the report cannot attribute is not a
+measurement"*.
 
 ### T9a#9 (2026-08-08) — no column, because the suite did not move, and should not have
 
@@ -630,10 +675,10 @@ proposals T13 brings into scope: `exact-casts` 108 · `wide-arithmetic` 108 ·
 independent of every track, and cheaper than any of them. That ordering is the whole reason T13-0 runs
 before T13's tracks rather than after.
 
-## Current test state (2026-08-14, T9f tail calls; audited 2026-08-19)
+## Current test state (2026-08-19, T13 clear-out day 1)
 
-**458 workspace tests, all green** (420 core + 28 capi + 10 CLI integration), clippy clean on all four
-build surfaces. Suite **62,238 / 378 / 2,038 — 99.4%** of 62,616.
+**484 workspace tests, all green**, clippy clean on all four build surfaces. Suite
+**63,333 / 172 / 1,024 — 99.7%** of **63,505**. *(Was 458 tests and 62,238 / 378 / 2,038 at T9f.)*
 
 ### ⚠️ The `.wat` corpus figure is UNVERIFIED — its denominator moved (found 2026-08-19)
 

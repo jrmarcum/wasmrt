@@ -28,10 +28,26 @@ than the thing the consumer uses.
 
 ## Where the port actually is (keep this line current)
 
-**T0–T8 DONE (published through v0.9.0); T9 IN PROGRESS — eighteen passes landed 2026-08-14, unreleased.**
+**T0–T8 DONE (published through v0.9.0); T9's eighteen passes landed 2026-08-14; 🆕 T13 — the
+CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 1 landed 2026-08-19, all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,238 / 378 / 2,038 of 62,616),
-**458 workspace tests** (420 core + 28 capi + 10 CLI), Miri 28/28, no file lost a pass in any pass. The `.wat`
+**embeddable from C** via `wasmrt.h`. Spec suite **99.7%** (**63,333 / 172 / 1,024** of 63,505),
+**484 workspace tests**, Miri 28/28, no file lost a pass in any pass.
+**Day 1 moved 62,238 / 378 / 2,038 → 63,333 / 172 / 1,024** (+1,095 passes, **−206 failures**) across
+~20 fixes — WasmGC array bulk ops, table64 end to end, the assembler scoring split, and a dozen text
+format / validator defects. ⚠️ *Adjudicated GREW, because skips became verdicts; read the three
+numbers, never the rate alone.*
+🔬 **The day ended on the INSTRUMENT.** The `.wast` runner listed a file only when it had **failures**,
+so **234 of 1,024 skips lived in files that printed nothing** — `ref_test.wast` (68 skips),
+`ref_cast.wast` (42) and both `br_on_cast*.wast` (27 each) had **never appeared in a conformance
+report** — and a skip was a bare counter at all twenty sites. Both fixed; the census shows **928 of
+1,024 skips (91%) are CASCADES** behind a handful of roots and only **96** are real gaps, resolving to
+**seven items**. ⚠️⚠️ **Ranking by the skip column would have put a 108-skip cascade above the single
+root that produces it.** 🎓 *A number the report cannot attribute is not a measurement*
+(`cmem/best-practices.md` §5.6). The remaining work is scoped in `cmem/roadmap.md` as **F1–F7** (the
+172 failures; **F1 = accept-invalid, 32 core, ranked first on DIRECTION not count**) and **S1–S7** (the
+1,024 skips). **S1 — the externref/anyref bridge — is worth ~181 assertions on its own**; fix the
+`Value` representation FIRST, or host handle 2 reads as GC object #2. The `.wat`
 corpus figure is ⚠️ **UNVERIFIED as of 2026-08-19** — its denominator moved (532 `.wat` files in the
 wasmtk tree today; see `cmem/testing.md`) — and **every CLI command that takes a module
 now accepts that `.wat` directly** — `run`, `wasi` and summarize assemble text before decoding, through one

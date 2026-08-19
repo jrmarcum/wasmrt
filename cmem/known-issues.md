@@ -1,5 +1,37 @@
 # Known Issues
 
+## 🔎 OPEN — S1: the externref/anyref bridge. **The highest-leverage item in the project, and it was invisible.**
+
+`any.convert_extern` (`0xFB 0x1a`) and `extern.convert_any` (`0x1b`) are **deliberately absent** —
+recorded in `opcode.rs` with the reason, and that deferral is still correct. What was **not** known
+until the skip census of 2026-08-19 is what it costs: **~181 assertions**.
+
+Five modules fail to assemble because of it, and each strands every assertion behind it:
+
+| file | passed | failed | skipped | root |
+| --- | --- | --- | --- | --- |
+| `ref_test.wast` | 2 | 0 | **68** | 1 unassemblable module |
+| `ref_cast.wast` | 2 | 0 | **42** | 1 |
+| `br_on_cast.wast` | 8 | 0 | **27** | 1 |
+| `br_on_cast_fail.wast` | 8 | 0 | **27** | 1 |
+| `extern.wast` | 0 | 1 | **17** | 1 |
+
+⚠️⚠️ **None of these five files had ever appeared in a conformance report.** The runner listed a file
+only when it had *failures*, and four of the five have none — so 164 skips sat behind a filter for the
+whole port. See `best-practices.md` §5.6.
+
+🔒 **Fix the REPRESENTATION first, then add the two decoder arms.** An `externref` crosses the C ABI as
+a raw pass-through `uint64_t`, while `ref_matches`' `Any` arm treats any non-null, non-i31 reference as
+a **GC heap index**. They share one numeric space, so the moment a host handle can become an `anyref`,
+**host handle 2 reads as GC object #2** — a type-confused read the cast believes it verified. `Value`
+is a `u128` and every reference form lives in the low 64 bits, so the high 64 are free for an externref
+tag: no widening, and the C ABI's pass-through contract survives by tagging on entry and stripping on
+exit in `wasmrt-capi`'s two conversion functions. **Adding the arms first is the silent-wrong-answer
+order.**
+
+Also blocked on it: `ref.host` as a value literal (`extern.wast`, 1 failure — item F7).
+
+
 ## ⚠️⚠️ OPEN (proven 2026-08-19, fix ATTEMPTED AND REVERTED) — try_table catch labels resolve one frame too deep
 
 **The defect is proven; the fix is not.** `try_table`’s catch-clause labels resolve **with the

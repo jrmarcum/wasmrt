@@ -33,9 +33,13 @@ security model — the WASI sandbox — is built and unaffected.
 
 ### T13 — the CONFORMANCE CLEAR-OUT. `1.0.0` `[ ]`
 
-**Target: 0 failed / 0 skipped / 0 files unrun, and an EMPTY baseline.** The starting position is
-**62,238 / 378 / 2,038** — so **2,416 assertions are not passing**, and the second number is the smaller
-one.
+**Target: 0 failed / 0 skipped / 0 files unrun, and an EMPTY baseline.** The starting position was
+**62,238 / 378 / 2,038** — **2,416 assertions not passing**, and the second number was the smaller one.
+
+📍 **AFTER DAY 1 (2026-08-19): 63,333 / 172 / 1,024 — 99.7% of 63,505 adjudicated, 484 tests.**
++1,095 passes, −206 failures, −1,014 skips, **no file lost a pass**. **1,196 assertions remain.**
+⚠️ *Adjudicated grew 62,616 → 63,505 because skips became verdicts, so the rate understates the move —
+read the three numbers, never the percentage alone.*
 
 🚦 **This REVERSES two recorded scope invariants, and the reversal is the owner's decision, recorded
 here rather than drifting in silently** (`design-decisions.md`):
@@ -170,6 +174,56 @@ BadModuleField) plus ~420 skips, the largest single lever but a scope decision r
 investigation, not three tickets. Full breakdown in
 [testing.md](testing.md).
 
+#### 📋 THE SCOPED WORK-LIST — measured 2026-08-19, and it SUPERSEDES the track table above
+
+Produced after the **skip census** (`testing.md`) made the skip column attributable for the first time.
+⚠️ **The track table was ranked on numbers that could not distinguish a root from its shadow;** these
+are ranked on *assertions unblocked*, which is what the ranking rule above actually asks for.
+
+##### FAILURES — 172 = **58 core** + 114 proposals
+
+| # | item | core fails | where |
+| --- | --- | --- | --- |
+| **F1** | **accept-invalid** — a module is ACCEPTED that the spec rejects | **32** | annotations 8, func 3, simd_const/f32/f64/const 2 each, align 2, type-rec 2, try_table 2, legacy/rethrow 2, struct/obsolete-keywords/type-equivalence/ref_func/global 1 each |
+| **F2** | rejected at the **wrong stage** — validate caught what decode should | 3 | align 2 (`InvalidAlignment`), binary 1 (`ControlUnderflow`) |
+| **F3** | `assert_unlinkable`: **the module linked** | 5 | memory64-imports 4, imports 1 |
+| **F4** | module failed to build | 7 | try_table 2, table64 1 (`spectest.table64` — harness), ref_null 1, call_indirect64 1, global 1, linking 1 |
+| **F5** | `assert_trap` got a **result** | 4 | struct 2, array 2 |
+| **F6** | wrong result / unexpected trap | 6 | linking 2, try_table 1, legacy/try_catch 1, legacy/rethrow 1, linking0 1 |
+| **F7** | `ref.host` value literal unsupported | 1 | extern |
+
+Proposals (114): custom-descriptors 65, custom-page-sizes 34, threads 14, wide-arithmetic 1.
+
+🚦 **F1 ranks first on DIRECTION, not count.** Accepting an invalid module is the silent-wrong-output
+class — the direction every serious defect in this port has come from — and it is **55% of the core
+failures**. *Which direction to err in is a property of the consequence* (`best-practices.md`).
+
+##### SKIPS — 1,024 = **928 cascades** + **96 real gaps**, and the gaps are SEVEN items
+
+| # | item | gap skips | cascades behind it | total |
+| --- | --- | --- | --- | --- |
+| **S1** | **the externref/anyref bridge** — `any.convert_extern` / `extern.convert_any`, deferred until `Value` can tag an externref (`opcode.rs` 0xFB 0x1a/0x1b) | 5 | **~176** | **~181** |
+| **S2** | `assert_exception` — the wast command is **not handled at all** | 41 | 0 | 41 |
+| **S3** | an imported **Tag** cannot link | 16 | ~12 | ~28 |
+| **S4** | custom-descriptors `*desc*` instructions *(= track D)* | 18 | ~330 | ~348 |
+| **S5** | wide-arithmetic `i64.add128` etc. *(= track W)* | 9 | 99 | 108 |
+| **S6** | legacy `delegate` *(= track L)* — refused **"matching the oracle"**, a rationale that RETIRED on 2026-08-11 | 3 | ~13 | ~16 |
+| **S7** | `inline-module.wast`: `func` / `memory` as top-level commands | 3 | 0 | 3 |
+
+⚠️⚠️ **S1 is the highest-leverage item in the project and nobody could see it.** Five unassemblable
+modules strand **176 assertions** across `ref_test` (68 skips), `ref_cast` (42), `br_on_cast` (27),
+`br_on_cast_fail` (27) and `extern` (17) — and **none of those five files had ever appeared in a
+conformance report**, because the runner listed only files with failures. The fix is already specified
+in `opcode.rs`: tag an externref in the free high 64 bits of the `u128` `Value`, then add the two
+decoder arms. **Do the representation first**; adding the arms first opens a type-confusion hole where
+host handle 2 reads as GC object #2.
+
+🎓 **Three of the seven (S4, S5, S6) are the existing tracks D, W and L** — so the census did not
+invent work, it *re-ranked* it and surfaced **three items (S1, S2, S7) that no track covered**. S2 is
+41 assertions of pure runner work with no engine risk at all.
+
+**Order: S1 → F1 → S2 → S3 → F2–F7 → S7 → tracks D/W/P/M/A/L.**
+
 #### 🧾 The baseline, and what "done" means
 
 - **A baseline is only honest if every line carries a reason** — otherwise it is a way to make a red
@@ -191,11 +245,11 @@ baseline file empty; **zero deliberate spec deviations**; every new proposal car
 the four workspace surfaces + C-ABI + Miri gates green throughout.
 
 ---
-## Status (2026-08-10) — PORT phase; gate OPEN, oracle **RE-BASELINED**. **T0–T8 DONE; T9 IN PROGRESS.**
+## Status (2026-08-19) — **T0–T8 DONE; T9 eighteen passes landed; T13 CLEAR-OUT IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0; numbers re-audited 2026-08-19):** suite
-**62,238 / 378 / 2,038 — 99.4%** of 62,616 adjudicated, **458 workspace tests** (420 core + 28 capi +
-10 CLI), Miri **28/28**. ⚠️ **The `.wat` corpus figure needs a re-run before it is quoted** — the last
+**Current tree (unreleased, ahead of the published v0.9.0; re-measured 2026-08-19):** suite
+**63,333 / 172 / 1,024 — 99.7%** of **63,505** adjudicated, **484 workspace tests**, Miri **28/28**.
+*(Was 62,238 / 378 / 2,038 — 99.4% of 62,616 with 458 tests before T13 day 1.)* ⚠️ **The `.wat` corpus figure needs a re-run before it is quoted** — the last
 recorded round trip read **534/534 assemble, 0 decode failures**, but the wasmtk tree holds **532**
 `.wat` files today (the two stale `39_JstyperMixed` duplicates are gone), so every figure on record —
 533/534, 534/534, 533/533 — is against a denominator that no longer exists. *(This block itself read

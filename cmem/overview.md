@@ -92,7 +92,12 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-- **T9 (now `1.0.1`, IN PROGRESS)** 🆕 *(the ladder was re-cut 2026-08-19: `1.0.0` is the conformance clear-out, T13, and it runs first)* — **eighteen passes landed 2026-08-07/14**, unreleased. Suite
+- **T13 (`1.0.0`, IN PROGRESS)** — the **conformance clear-out**, day 1 landed 2026-08-19: suite
+  **62,238 / 378 / 2,038 → 63,333 / 172 / 1,024 — 99.7%** of 63,505, **484 tests**, no file lost a pass.
+  ~20 fixes plus the **skip census**, which showed 91% of the remaining skips are cascades and cut the
+  work-list to **F1–F7 + S1–S7** (see `roadmap.md`). **1,196 assertions remain.**
+
+- **T9 (now `1.0.1`, IN PROGRESS)** 🆕 *(the ladder was re-cut 2026-08-19: `1.0.0` is the conformance clear-out, T13, and it runs first)* — **eighteen passes landed 2026-08-07/14**, unreleased. Suite at the time
   **62,238 / 378 / 2,038 — 99.4%** of 62,616, **458 tests** (420 core + 28 capi + 10 CLI), Miri 28/28,
   and **no file lost a pass in any pass**. ⚠️ **The `.wat` corpus figure is UNVERIFIED as of 2026-08-19**
   — the last recorded round trip read 534/534 assemble with 0 decode failures, but the wasmtk tree holds
