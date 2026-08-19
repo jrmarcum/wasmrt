@@ -403,6 +403,23 @@ and two of the three lines were byte-identical, so one replacement consumed both
 expect to FIND before replacing, and assert none remain after* — §4.2a wearing different clothes:
 confirming a change applied is not confirming it applied **everywhere**.
 
+
+### 3.12 A WRONG TYPE WITH A RIGHT ARITY PASSES EVERY SHAPE CHECK
+
+`br_on_non_null`’s validator popped its label’s types **wholesale**, so it demanded `(ref ht)` from a
+stack holding `(ref null ht)` — and **rejected the canonical idiom the instruction exists for**.
+
+⚠️ **The stack EFFECT was already correct** (pop all, push all, pop the ref), so every arity and
+balance check agreed with it and the arm read as plausible. Only the *type* it asked for was wrong.
+**Arity is the property tests and eyeballs check; the type is the one the spec cares about.**
+
+🎓 **And it survived because it erred in the REFUSING direction** — a rejected valid module is a
+failing assertion, never a wrong answer, so nothing miscompiled and no user hit a bad result. That is
+the same asymmetry §4.6 records from the other side: *which direction to err in is a property of the
+consequence*. A refusing bug is cheap to live with and therefore **cheap to not notice**, so the place
+to look for one is a conformance file that has sat at a few failures for a long time — not a bug
+report.
+
 ## 3A. Borrowed lessons — from wazmrt's `best-practices.md` (owner-authorized read, 2026-08-14)
 
 🔒 **Scope of this exception.** The oracle is retired for *correctness answers and design* (§

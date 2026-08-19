@@ -5518,6 +5518,48 @@ mod tests {
         assert!(bare.contains(&0x1b) && !bare.contains(&0x1c));
     }
 
+    /// `br_on_non_null` takes the **nullable** form of its label's last type — which is the
+    /// whole point of the instruction.
+    ///
+    /// ⚠️ The validator popped the label types wholesale until 2026-08-19, demanding
+    /// `(ref $t)` from a stack holding `(ref null $t)`, and so **rejected the canonical idiom**:
+    /// take a nullable reference, branch with it made non-null, fall through when it was null.
+    /// 🎓 The stack *effect* was already correct, so the arm looked right and only the demanded
+    /// TYPE was wrong — **a wrong type with a right arity passes every shape check**.
+    #[test]
+    fn br_on_non_null_accepts_a_nullable_operand_for_a_non_null_label() {
+        let ok = |src: &str| {
+            let m = crate::module::decode(&asm(src).expect("assembles")).expect("decodes");
+            crate::validate::validate(&m)
+        };
+        // The idiom the instruction exists for: nullable in, non-null at the label.
+        assert!(ok(r#"(module (type $t (func (result i32)))
+            (func (param $r (ref null $t)) (result i32)
+              (call_ref $t (block $l (result (ref $t))
+                (br_on_non_null $l (local.get $r))
+                (return (i32.const -1))))))"#)
+        .is_ok());
+        // An already-non-null operand still works — subtyping, not equality.
+        assert!(ok(r#"(module (type $t (func (result i32)))
+            (func (param $r (ref $t)) (result i32)
+              (call_ref $t (block $l (result (ref $t))
+                (br_on_non_null $l (local.get $r))
+                (return (i32.const -1))))))"#)
+        .is_ok());
+        // With extra label operands — `[t'* (ref null ht)] -> [t'*]`.
+        assert!(ok(r#"(module (type $t (func (param i32) (result i32)))
+            (func (param $n i32) (param $r (ref null $t)) (result i32)
+              (call_ref $t (block $l (result i32 (ref $t))
+                (return (br_on_non_null $l (local.get $n) (local.get $r)))))))"#)
+        .is_ok());
+        // ⚠️ And the rule still BITES: a label whose last type is not a reference is invalid,
+        // so this did not simply stop checking.
+        assert!(ok(r#"(module
+            (func (param $r i32) (block $l (result i32)
+              (br_on_non_null $l (local.get $r)) (unreachable))))"#)
+        .is_err());
+    }
+
     #[test]
     fn runs_i31_and_ref_test() {
         let src = r#"(module

@@ -2134,18 +2134,34 @@ impl<'a> FuncValidator<'a> {
                     StackType::Unknown => self.push_val(StackType::Unknown),
                 }
             }
+            // §: `C.labels[l] = [t'* (ref ht)]` ⊢ `br_on_non_null l : [t'* (ref null ht)] → [t'*]`
+            //
+            // ⚠️⚠️ **The operand is the NULLABLE form of the label's last type.** Popping the
+            // label types wholesale — which is what this arm did until 2026-08-19 — demands
+            // `(ref ht)` from a stack holding `(ref null ht)` and rejects **the canonical idiom
+            // the instruction exists for**: take a nullable reference, branch with it made
+            // non-null, fall through when it was null. `br_on_non_null.wast`'s `$n` and `$n2`
+            // are exactly that shape.
+            //
+            // 🎓 The stack *effect* was already right (pop all, push all, pop the ref), so the
+            // arm looked plausible and the defect was purely in the type it demanded. **A wrong
+            // TYPE with a right ARITY passes every shape check** — and it errs in the refusing
+            // direction, which is why nothing silently miscompiled and why it survived: a
+            // rejected valid module is a failing assertion, never a wrong answer.
             Op::BrOnNonNull => {
                 let lt = self.label_types_at(expect_label(&instr.imm)?)?;
-                if lt.is_empty() || !lt[lt.len() - 1].is_ref() {
+                let Some((last, init)) = lt.split_last() else {
+                    return Err(ValidateError::TypeMismatch);
+                };
+                if !last.is_ref() {
                     return Err(ValidateError::TypeMismatch);
                 }
-                self.pop_vals(&lt)?;
-                self.push_vals(&lt);
-                if let StackType::Val(v) = self.pop_ref()? {
-                    if !subtype_of(self.module, v, lt[lt.len() - 1].nullable()) {
-                        return Err(ValidateError::TypeMismatch);
-                    }
-                }
+                // The reference the branch would carry, in its nullable form.
+                self.pop_expect(last.nullable())?;
+                // …then the values the label carries alongside it, which the fall-through
+                // path keeps.
+                self.pop_vals(init)?;
+                self.push_vals(init);
             }
 
             Op::LocalGet => {
