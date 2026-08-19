@@ -1,6 +1,43 @@
 # Known Issues
 
-## ⚠️⚠️ OPEN (found 2026-08-19) — SEVEN WasmGC instructions are MISSING, in a proposal recorded as DONE
+## ✅ FIXED 2026-08-19 (same day) — the SIX missing WasmGC array instructions now ship
+
+**`array.new_data` / `array.new_elem` / `array.init_data` / `array.init_elem` / `array.fill` /
+`array.copy`** are implemented end to end — `Op` tags, decoder (`0xFB 0x09/0x0a/0x10..0x13`),
+validator, interpreter and assembler. **Suite 62,238 / 378 / 2,038 → 62,435 / 378 / 1,825**: **+197
+passes, −213 skips, failures UNCHANGED**, and **no file lost a pass** (verified by joining the per-file
+counts, not by reading the totals). 460 workspace tests, clippy clean.
+
+⚠⚠ **The pass introduced an ACCEPT-INVALID and the corpus caught it on the first run.** `array.copy`’s
+type check compared `storage.unpacked()`, which maps **both `i8` and `i16` onto `i32`** — so copying
+between differently-packed arrays was accepted. `array_copy.wast`’s *“array types do not match”* case
+failed immediately. 🎓 *An encoding chosen to make EXECUTION agree can erase the distinction
+VALIDATION runs on* — the projection is right for the operand stack and wrong for a type-identity
+question. Fixed by comparing **storage** types, and pinned by
+`array_copy_between_differently_packed_arrays_is_refused`, which asserts the refusal in **both**
+directions **and** that the matching cases still pass, so a blanket ban cannot masquerade as the rule.
+✅ **Mutation-verified, with the mutation confirmed applied before the result was believed** (§4.2a).
+
+⚠⚠ **A second hazard, caught while writing it:** the six new internal `Op` tags include `0xcd..0xcf`,
+which sit **outside** the decoder’s existing `0xd7..=0xfa` internal-tag guard — so a raw `0xcd` byte in a
+function body would have **decoded as `array.copy`**. That is exactly *a synthetic internal tag placed
+in a real encoding space eventually means something else*, recorded in `best-practices.md` §3A.2 the
+same morning and re-created within hours. The guard now covers both ranges, with a comment saying it
+moves whenever a tag is added.
+
+*(Original entry below, kept because the diagnosis is the reusable part.)*
+
+### ⚠️⚠️ How it was found — SIX WasmGC array instructions were MISSING, in a proposal recorded as DONE
+
+🔻 **CORRECTED within the hour: it is SIX, not seven.** The seventh, `any.convert_extern`, is **not an
+oversight** — `opcode.rs` carries a ⚠⚠ comment at the `0xFB 0x1a`/`0x1b` decode site saying both convert
+ops are **DELIBERATELY ABSENT**, with a soundness reason: an `externref` crosses the C ABI as a raw
+`uint64_t` while `ref_matches`' `Any` arm treats any non-null non-i31 reference as a **GC heap index**,
+so converting a host handle to `anyref` makes host handle 2 read as GC object 2 — **type confusion the
+cast believes it verified.** The recorded fix is to tag externrefs in `Value`'s free high 64 bits
+**first**. ⚠️ **My error, and it is the one this project keeps paying for in the other direction: I read
+the opcode TABLES and not the COMMENTS beside them, then wrote “no recorded reason”.** *Read the struct,
+not the prose above it* has a mirror — **read the prose, not only the table.**
 
 **`overview.md` has said since v0.6.4 that WasmGC landed** — *"GC struct/array heap + `i31` +
 `ref.test`/`ref.cast`/`br_on_cast`"* — and `vision.md`'s canonical axis says **"every proposal in the

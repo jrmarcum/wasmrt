@@ -3081,6 +3081,68 @@ fn run(
                     frame.push_i32(store.gc_heap[idx].fields.len() as i32);
                     pc += 1;
                 }
+                // --- WasmGC array bulk ops (added 2026-08-19) ---
+                Op::ArrayNewData | Op::ArrayNewElem => {
+                    exec_array_new_seg(frame, ctx, store, instr)?;
+                    pc += 1;
+                }
+                Op::ArrayFill => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let f = ctx.module.array_field(ti).ok_or(Trap::UndefinedType)?;
+                    let n = frame.pop_i32() as u32 as usize;
+                    let v = pack_field(f.storage, frame.pop());
+                    let off = frame.pop_i32() as u32 as usize;
+                    let idx = gc_object_index(store, frame.pop())?;
+                    let len = store.gc_heap[idx].fields.len();
+                    // Bounds are checked BEFORE any write, so a partially-applied fill can
+                    // never be observed — the spec traps without side effects.
+                    if off.checked_add(n).is_none_or(|end| end > len) {
+                        return Err(Trap::GcOutOfBounds);
+                    }
+                    for k in 0..n {
+                        store.gc_heap[idx].fields[off + k] = v;
+                    }
+                    pc += 1;
+                }
+                Op::ArrayCopy => {
+                    let Imm::GcArrayCopy { dst, src } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let df = ctx.module.array_field(dst).ok_or(Trap::UndefinedType)?;
+                    let sf = ctx.module.array_field(src).ok_or(Trap::UndefinedType)?;
+                    let n = frame.pop_i32() as u32 as usize;
+                    let soff = frame.pop_i32() as u32 as usize;
+                    let sidx = gc_object_index(store, frame.pop())?;
+                    let doff = frame.pop_i32() as u32 as usize;
+                    let didx = gc_object_index(store, frame.pop())?;
+                    let (dlen, slen) =
+                        (store.gc_heap[didx].fields.len(), store.gc_heap[sidx].fields.len());
+                    if doff.checked_add(n).is_none_or(|e| e > dlen)
+                        || soff.checked_add(n).is_none_or(|e| e > slen)
+                    {
+                        return Err(Trap::GcOutOfBounds);
+                    }
+                    // Read the whole source run first: the two arrays may be the SAME object,
+                    // and an overlapping forward copy would otherwise read values it just wrote.
+                    let run: Vec<Value> = (0..n)
+                        .map(|k| {
+                            let raw = store.gc_heap[sidx].fields[soff + k];
+                            // Re-pack through the destination's storage: a packed source read
+                            // as i32 must be re-narrowed if the destination is narrower.
+                            pack_field(df.storage, unpack_field(sf.storage, raw, false))
+                        })
+                        .collect();
+                    for (k, v) in run.into_iter().enumerate() {
+                        store.gc_heap[didx].fields[doff + k] = v;
+                    }
+                    pc += 1;
+                }
+                Op::ArrayInitData | Op::ArrayInitElem => {
+                    exec_array_init_seg(frame, ctx, store, instr)?;
+                    pc += 1;
+                }
 
                 // --- WasmGC: casts ---
                 Op::RefTest => {
@@ -3433,6 +3495,142 @@ fn exec_memory_fill(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, inst
     let mem = &mut store.memories[mi];
     let di = mem_range(dst, n, mem.bytes.len()).ok_or(Trap::MemoryOutOfBounds)?;
     mem.bytes[di..di + n as usize].fill(byte);
+    Ok(())
+}
+
+/// The byte width one array element occupies inside a **data segment**.
+///
+/// Packed fields keep their narrow width; everything else is its natural size. A reference
+/// field has no byte form at all, which is why the validator refuses `array.*_data` on one —
+/// this returning `None` is the belt to that braces, and it is reachable on the unvalidated
+/// run path where a hand-built module can pair any field type with any opcode.
+fn data_elem_width(s: StorageType) -> Option<usize> {
+    Some(match s {
+        StorageType::I8 => 1,
+        StorageType::I16 => 2,
+        StorageType::Val(v) if v == crate::types::ValType::I32 || v == crate::types::ValType::F32 => 4,
+        StorageType::Val(v) if v == crate::types::ValType::I64 || v == crate::types::ValType::F64 => 8,
+        StorageType::Val(v) if v == crate::types::ValType::V128 => 16,
+        StorageType::Val(_) => return None,
+    })
+}
+
+/// Read one array element out of a data segment's bytes, little-endian.
+fn read_data_elem(s: StorageType, b: &[u8]) -> Value {
+    let mut buf = [0u8; 16];
+    buf[..b.len()].copy_from_slice(b);
+    let raw = u128::from_le_bytes(buf);
+    // Packed fields are stored packed; wider ones keep their bits as-is.
+    match s {
+        StorageType::I8 => raw & 0xff,
+        StorageType::I16 => raw & 0xffff,
+        StorageType::Val(_) => raw,
+    }
+}
+
+/// The values of a passive/consumed element segment, as the runtime holds them.
+///
+/// A dropped segment reads as EMPTY rather than as an error — the same convention `table.init`
+/// follows, so an out-of-range access after a drop traps on the bounds check instead of on the
+/// drop flag, which is what the spec asks for.
+fn elem_segment_values<'a>(ctx: &Ctx, store: &'a Pools, seg: u32) -> Result<&'a [Value]> {
+    let ei = ctx.maps.elem(seg);
+    let dropped = *store.elem_dropped.get(ei).ok_or(Trap::UndefinedElement)?;
+    Ok(if dropped { &[] } else { store.elem_values.get(ei).ok_or(Trap::UndefinedElement)? })
+}
+
+/// `array.new_data` / `array.new_elem` — build a fresh array from a segment.
+fn exec_array_new_seg(
+    frame: &mut Frame,
+    ctx: &Ctx,
+    store: &mut Pools,
+    instr: &Instr,
+) -> Result<Value> {
+    let Imm::GcTypeSeg { type_index, seg } = instr.imm else {
+        return Err(Trap::UnsupportedInstruction);
+    };
+    let f = ctx.module.array_field(type_index).ok_or(Trap::UndefinedType)?;
+    let n = frame.pop_i32() as u32 as usize;
+    let off = frame.pop_i32() as u32 as usize;
+    let fields: Vec<Value> = if instr.op == Op::ArrayNewData {
+        let dropped = *store
+            .data_dropped
+            .get(ctx.maps.data(seg))
+            .ok_or(Trap::UndefinedData)?;
+        let bytes: &[u8] = if dropped {
+            &[]
+        } else {
+            &ctx.module.data.get(seg as usize).ok_or(Trap::UndefinedData)?.bytes
+        };
+        let w = data_elem_width(f.storage).ok_or(Trap::UnsupportedInstruction)?;
+        let end = off
+            .checked_add(n.checked_mul(w).ok_or(Trap::MemoryOutOfBounds)?)
+            .ok_or(Trap::MemoryOutOfBounds)?;
+        if end > bytes.len() {
+            return Err(Trap::MemoryOutOfBounds);
+        }
+        (0..n).map(|k| read_data_elem(f.storage, &bytes[off + k * w..off + (k + 1) * w])).collect()
+    } else {
+        let vals = elem_segment_values(ctx, store, seg)?;
+        let end = off.checked_add(n).ok_or(Trap::TableOutOfBounds)?;
+        if end > vals.len() {
+            return Err(Trap::TableOutOfBounds);
+        }
+        vals[off..end].to_vec()
+    };
+    let r = alloc_object(store, ctx.inst, type_index, fields)?;
+    frame.push(r);
+    Ok(r)
+}
+
+/// `array.init_data` / `array.init_elem` — fill an existing array from a segment.
+fn exec_array_init_seg(
+    frame: &mut Frame,
+    ctx: &Ctx,
+    store: &mut Pools,
+    instr: &Instr,
+) -> Result<()> {
+    let Imm::GcTypeSeg { type_index, seg } = instr.imm else {
+        return Err(Trap::UnsupportedInstruction);
+    };
+    let f = ctx.module.array_field(type_index).ok_or(Trap::UndefinedType)?;
+    let n = frame.pop_i32() as u32 as usize;
+    let soff = frame.pop_i32() as u32 as usize;
+    let doff = frame.pop_i32() as u32 as usize;
+    let idx = gc_object_index(store, frame.pop())?;
+    let len = store.gc_heap[idx].fields.len();
+    if doff.checked_add(n).is_none_or(|e| e > len) {
+        return Err(Trap::GcOutOfBounds);
+    }
+    let run: Vec<Value> = if instr.op == Op::ArrayInitData {
+        let dropped = *store
+            .data_dropped
+            .get(ctx.maps.data(seg))
+            .ok_or(Trap::UndefinedData)?;
+        let bytes: &[u8] = if dropped {
+            &[]
+        } else {
+            &ctx.module.data.get(seg as usize).ok_or(Trap::UndefinedData)?.bytes
+        };
+        let w = data_elem_width(f.storage).ok_or(Trap::UnsupportedInstruction)?;
+        let end = soff
+            .checked_add(n.checked_mul(w).ok_or(Trap::MemoryOutOfBounds)?)
+            .ok_or(Trap::MemoryOutOfBounds)?;
+        if end > bytes.len() {
+            return Err(Trap::MemoryOutOfBounds);
+        }
+        (0..n).map(|k| read_data_elem(f.storage, &bytes[soff + k * w..soff + (k + 1) * w])).collect()
+    } else {
+        let vals = elem_segment_values(ctx, store, seg)?;
+        let end = soff.checked_add(n).ok_or(Trap::TableOutOfBounds)?;
+        if end > vals.len() {
+            return Err(Trap::TableOutOfBounds);
+        }
+        vals[soff..end].to_vec()
+    };
+    for (k, v) in run.into_iter().enumerate() {
+        store.gc_heap[idx].fields[doff + k] = pack_field(f.storage, v);
+    }
     Ok(())
 }
 

@@ -218,6 +218,12 @@ define_ops! {
         ArrayNewFixed = 0xe8 => "array.new_fixed", ArrayGet = 0xe9 => "array.get",
         ArrayGetS = 0xea => "array.get_s", ArrayGetU = 0xeb => "array.get_u",
         ArraySet = 0xec => "array.set", ArrayLen = 0xed => "array.len",
+        // GC array bulk ops (`0xFB 0x09/0x0a/0x10..0x13`). Added 2026-08-19: they were absent
+        // from the table entirely, so `.wat` using them would not assemble and the binary form
+        // had no opcode to decode — a gap that produced only SKIPS, never failures.
+        ArrayNewData = 0xdd => "array.new_data", ArrayNewElem = 0xde => "array.new_elem",
+        ArrayFill = 0xdf => "array.fill", ArrayCopy = 0xcd => "array.copy",
+        ArrayInitData = 0xce => "array.init_data", ArrayInitElem = 0xcf => "array.init_elem",
         // GC casts (`0xFB` prefix).
         RefTest = 0xee => "ref.test", RefCastOp = 0xef => "ref.cast",
         // GC i31 / struct ops (`0xFB` prefix) + cast branches.
@@ -386,6 +392,15 @@ pub enum Imm {
     GcField { type_index: u32, field: u32 },
     /// A GC array type index + element count (`array.new_fixed`).
     GcTypeN { type_index: u32, n: u32 },
+    /// A GC array type index + a data/element **segment** index
+    /// (`array.new_data` / `array.new_elem` / `array.init_data` / `array.init_elem`).
+    ///
+    /// Deliberately its own variant rather than reusing [`Imm::GcTypeN`]: that one carries a
+    /// *count* and this one a *segment index*, and two fields of the same width meaning
+    /// different things is how a shared shape hides a distinction.
+    GcTypeSeg { type_index: u32, seg: u32 },
+    /// `array.copy` — destination and source array type indices.
+    GcArrayCopy { dst: u32, src: u32 },
     /// A GC cast target reference type (`ref.test` / `ref.cast`).
     RefCast(RefType),
     /// A GC cast-branch (`br_on_cast` / `br_on_cast_fail`): a label + source & dest types.
@@ -453,6 +468,8 @@ enum ImmKind {
     GcType,
     GcField,
     GcTypeN,
+    GcTypeSeg,
+    GcArrayCopy,
     RefCast,
     BrCast,
     Tag,
@@ -506,6 +523,12 @@ fn immediate_kind(b: u8) -> ImmKind {
         0xf5..=0xf8 => ImmKind::GcField,
         // array.new_fixed: type index + element count.
         0xe8 => ImmKind::GcTypeN,
+        // array.fill: a single array type index.
+        0xdf => ImmKind::GcType,
+        // array.new_data / new_elem / init_data / init_elem: type index + segment index.
+        0xdd | 0xde | 0xce | 0xcf => ImmKind::GcTypeSeg,
+        // array.copy: destination + source array type indices.
+        0xcd => ImmKind::GcArrayCopy,
         // ref.test / ref.cast: a target reference type.
         0xee | 0xef => ImmKind::RefCast,
         // br_on_cast / br_on_cast_fail: a label + source & destination ref types.
@@ -903,11 +926,37 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                     op: Op::ArrayNewFixed,
                     imm: Imm::GcTypeN { type_index: r.read_var_u32()?, n: r.read_var_u32()? },
                 },
+                0x09 => Instr {
+                    offset: 0,
+                    op: Op::ArrayNewData,
+                    imm: Imm::GcTypeSeg { type_index: r.read_var_u32()?, seg: r.read_var_u32()? },
+                },
+                0x0a => Instr {
+                    offset: 0,
+                    op: Op::ArrayNewElem,
+                    imm: Imm::GcTypeSeg { type_index: r.read_var_u32()?, seg: r.read_var_u32()? },
+                },
                 0x0b => Instr { offset: 0, op: Op::ArrayGet, imm: Imm::GcType(r.read_var_u32()?) },
                 0x0c => Instr { offset: 0, op: Op::ArrayGetS, imm: Imm::GcType(r.read_var_u32()?) },
                 0x0d => Instr { offset: 0, op: Op::ArrayGetU, imm: Imm::GcType(r.read_var_u32()?) },
                 0x0e => Instr { offset: 0, op: Op::ArraySet, imm: Imm::GcType(r.read_var_u32()?) },
                 0x0f => Instr { offset: 0, op: Op::ArrayLen, imm: Imm::None },
+                0x10 => Instr { offset: 0, op: Op::ArrayFill, imm: Imm::GcType(r.read_var_u32()?) },
+                0x11 => Instr {
+                    offset: 0,
+                    op: Op::ArrayCopy,
+                    imm: Imm::GcArrayCopy { dst: r.read_var_u32()?, src: r.read_var_u32()? },
+                },
+                0x12 => Instr {
+                    offset: 0,
+                    op: Op::ArrayInitData,
+                    imm: Imm::GcTypeSeg { type_index: r.read_var_u32()?, seg: r.read_var_u32()? },
+                },
+                0x13 => Instr {
+                    offset: 0,
+                    op: Op::ArrayInitElem,
+                    imm: Imm::GcTypeSeg { type_index: r.read_var_u32()?, seg: r.read_var_u32()? },
+                },
                 0x14 => Instr {
                     offset: 0,
                     op: Op::RefTest,
@@ -1010,10 +1059,19 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
             continue;
         }
 
-        // `0xd7..=0xfa` are internal tags whose real wire form is a `0xFB`/`0xFC`
-        // prefix + sub-opcode (handled above). A raw byte in that range is not a valid
-        // single-byte opcode. (`0xd0..=0xd6` are real ops; `0xfb..=0xfe` are prefixes.)
-        if (0xd7..=0xfa).contains(&b0) {
+        // `0xcd..=0xcf` and `0xd7..=0xfa` are internal tags whose real wire form is a
+        // `0xFB`/`0xFC` prefix + sub-opcode (handled above). A raw byte in either range is not a
+        // valid single-byte opcode. (`0xd0..=0xd6` are real ops; `0xfb..=0xfe` are prefixes.)
+        //
+        // ⚠️⚠️ **The `0xcd..=0xcf` half was added with the array bulk ops on 2026-08-19, and
+        // extending this guard is not optional.** Those three tags name `array.copy` /
+        // `array.init_data` / `array.init_elem` internally; without the guard a raw `0xcd` byte in
+        // a function body falls through to `immediate_kind` and **decodes as `array.copy`** — an
+        // accept-invalid, and precisely the "a synthetic internal tag placed in a real encoding
+        // space eventually means something else" defect recorded in `best-practices.md` §3A.2 the
+        // same morning. **Whenever an internal tag is added, this range moves with it**; the test
+        // `raw_internal_tag_bytes_are_refused` pins every one of them.
+        if (0xcd..=0xcf).contains(&b0) || (0xd7..=0xfa).contains(&b0) {
             return Err(DecodeError::UnsupportedOpcode);
         }
 
@@ -1073,6 +1131,8 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
             | ImmKind::GcType
             | ImmKind::GcField
             | ImmKind::GcTypeN
+            | ImmKind::GcTypeSeg
+            | ImmKind::GcArrayCopy
             | ImmKind::RefCast
             | ImmKind::BrCast
             | ImmKind::Unsupported => return Err(DecodeError::UnsupportedOpcode),

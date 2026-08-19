@@ -2606,6 +2606,12 @@ fn immediate_arity(op: crate::opcode::Op) -> usize {
         O::ElemDrop | O::DataDrop | O::RefNull => 1,
         O::MemorySize | O::MemoryGrow | O::MemoryFill => 1,
         O::TableInit | O::TableCopy | O::MemoryInit | O::MemoryCopy => 2,
+        // GC array bulk ops. ⚠️ Listed EXPLICITLY: `immediate_arity` ends in `_ => 0`, and
+        // T9a#8 was four instructions that fell into that arm and shipped as bare opcodes
+        // with their operand left in the token stream.
+        O::ArrayFill => 1,
+        O::ArrayNewData | O::ArrayNewElem | O::ArrayInitData | O::ArrayInitElem
+        | O::ArrayCopy => 2,
         // Loads/stores take optional `offset=`/`align=` atoms, consumed by their emitter.
         _ => 0,
     }
@@ -3039,6 +3045,12 @@ fn emit_op_with_immediates(
         | O::ArrayGetU
         | O::ArraySet
         | O::ArrayLen
+        | O::ArrayNewData
+        | O::ArrayNewElem
+        | O::ArrayFill
+        | O::ArrayCopy
+        | O::ArrayInitData
+        | O::ArrayInitElem
         | O::RefTest
         | O::RefCastOp
         | O::BrOnCast
@@ -3062,6 +3074,12 @@ fn emit_op_with_immediates(
                 O::ArrayGetU => 0x0d,
                 O::ArraySet => 0x0e,
                 O::ArrayLen => 0x0f,
+                O::ArrayNewData => 0x09,
+                O::ArrayNewElem => 0x0a,
+                O::ArrayFill => 0x10,
+                O::ArrayCopy => 0x11,
+                O::ArrayInitData => 0x12,
+                O::ArrayInitElem => 0x13,
                 O::RefTest => 0x14,
                 O::RefCastOp => 0x16,
                 O::BrOnCast => 0x18,
@@ -3190,6 +3208,29 @@ fn emit_op_with_immediates(
         | O::ArrayGetS | O::ArrayGetU | O::ArraySet => {
             let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
             uleb(&mut ctx.out, u64::from(ti));
+        }
+        O::ArrayFill => {
+            let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
+            uleb(&mut ctx.out, u64::from(ti));
+        }
+        O::ArrayNewData | O::ArrayInitData => {
+            let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
+            let d = resolve_by_name(ctx.data_names, imm(1)?)?;
+            uleb(&mut ctx.out, u64::from(ti));
+            uleb(&mut ctx.out, u64::from(d));
+        }
+        O::ArrayNewElem | O::ArrayInitElem => {
+            let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
+            let e = resolve_by_name(ctx.elem_names, imm(1)?)?;
+            uleb(&mut ctx.out, u64::from(ti));
+            uleb(&mut ctx.out, u64::from(e));
+        }
+        O::ArrayCopy => {
+            // `array.copy $dst $src` — destination type first, matching the binary order.
+            let dst = resolve_by_name(ctx.type_names, imm(0)?)?;
+            let src = resolve_by_name(ctx.type_names, imm(1)?)?;
+            uleb(&mut ctx.out, u64::from(dst));
+            uleb(&mut ctx.out, u64::from(src));
         }
         O::ArrayNewFixed => {
             let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
@@ -5126,6 +5167,77 @@ mod tests {
                 (i32.const 1))))"#;
         let r = run(src, "f", &[]);
         assert_eq!(crate::interp::as_i32(r[0]), 20);
+    }
+
+    /// The GC array **bulk** ops, end to end: assemble → decode → validate → run.
+    ///
+    /// All six were absent from `Op` entirely until 2026-08-19, and the gap produced only
+    /// SKIPS — never a failure — so no conformance number could show it (`testing.md`).
+    #[test]
+    fn runs_array_fill_copy_and_new_data() {
+        let src = r#"(module
+            (type $arr (array (mut i32)))
+            (data $d "\07\00\00\00\09\00\00\00")
+            (func (export "fill") (result i32)
+              (local $a (ref null $arr))
+              (local.set $a (array.new_default $arr (i32.const 4)))
+              (array.fill $arr (local.get $a) (i32.const 1) (i32.const 5) (i32.const 2))
+              (i32.add (array.get $arr (local.get $a) (i32.const 1))
+                       (array.get $arr (local.get $a) (i32.const 2))))
+            (func (export "copy") (result i32)
+              (local $a (ref null $arr)) (local $b (ref null $arr))
+              (local.set $a (array.new_fixed $arr 2 (i32.const 3) (i32.const 4)))
+              (local.set $b (array.new_default $arr (i32.const 2)))
+              (array.copy $arr $arr (local.get $b) (i32.const 0)
+                                    (local.get $a) (i32.const 0) (i32.const 2))
+              (i32.add (array.get $arr (local.get $b) (i32.const 0))
+                       (array.get $arr (local.get $b) (i32.const 1))))
+            (func (export "newdata") (result i32)
+              (array.get $arr (array.new_data $arr $d (i32.const 0) (i32.const 2))
+                              (i32.const 1))))"#;
+        assert_eq!(crate::interp::as_i32(run(src, "fill", &[])[0]), 10);
+        assert_eq!(crate::interp::as_i32(run(src, "copy", &[])[0]), 7);
+        assert_eq!(crate::interp::as_i32(run(src, "newdata", &[])[0]), 9);
+    }
+
+    /// 🔒 **The WRONG ANSWER, written down.** `array.copy` between an `i8` array and an `i16`
+    /// one must be REFUSED.
+    ///
+    /// ⚠️ This is the defect this pass introduced and `array_copy.wast` caught on the first run:
+    /// the arm compared `storage.unpacked()`, which maps **both** `i8` and `i16` onto `i32`, so
+    /// the check passed and an invalid module was accepted. *An encoding chosen to make
+    /// EXECUTION agree can erase the distinction VALIDATION runs on* — the projection is right
+    /// for the operand stack and wrong for a type-identity question.
+    #[test]
+    fn array_copy_between_differently_packed_arrays_is_refused() {
+        let mk = |dst: &str, src: &str| {
+            format!(
+                r#"(module
+                (type $d (array (mut {dst})))
+                (type $s (array (mut {src})))
+                (func (param $a (ref null $d)) (param $b (ref null $s))
+                  (array.copy $d $s (local.get $a) (i32.const 0)
+                                    (local.get $b) (i32.const 0) (i32.const 1))))"#
+            )
+        };
+        // The mismatch must be refused in BOTH directions...
+        for (d, s) in [("i8", "i16"), ("i16", "i8"), ("i8", "i32"), ("i32", "i8")] {
+            let m = crate::module::decode(&asm(&mk(d, s)).expect("assembles"))
+                .expect("decodes");
+            assert!(
+                crate::validate::validate(&m).is_err(),
+                "array.copy {d} <- {s} must be refused"
+            );
+        }
+        // ...and the matching cases must still be accepted, or the rule is just a blanket ban.
+        for (d, s) in [("i8", "i8"), ("i16", "i16"), ("i32", "i32")] {
+            let m = crate::module::decode(&asm(&mk(d, s)).expect("assembles"))
+                .expect("decodes");
+            assert!(
+                crate::validate::validate(&m).is_ok(),
+                "array.copy {d} <- {s} must be accepted"
+            );
+        }
     }
 
     #[test]

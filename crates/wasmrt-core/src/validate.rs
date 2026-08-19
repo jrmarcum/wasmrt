@@ -30,7 +30,7 @@ use core::fmt;
 use crate::features::{
     op_feature, simd_sub_feature, table_element_feature, val_type_feature, Feature, Features,
 };
-use crate::module::{Code, CompType, FuncType, Module};
+use crate::module::{Code, CompType, FuncType, Module, StorageType};
 use crate::opcode::{self, HeapType, Imm, Instr, Op, RefType};
 use crate::reader::Reader;
 use crate::types::{DecodeError, RefHeap, ValType};
@@ -1798,6 +1798,129 @@ impl<'a> FuncValidator<'a> {
             Op::ArrayLen => {
                 self.pop_expect(V::ARRAYREF)?;
                 self.push_val_t(V::I32);
+            }
+            // --- GC array bulk ops (added 2026-08-19; they had no `Op` at all) ---
+            //
+            // Operand order below is the SPEC's stack order read bottom-to-top, popped in
+            // reverse. Getting it backwards type-checks on same-typed operands and silently
+            // swaps them, so each pop is commented with what it is.
+            Op::ArrayNewData | Op::ArrayNewElem => {
+                let Imm::GcTypeSeg { type_index, seg } = instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let f = self
+                    .module
+                    .array_field(type_index)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if instr.op == Op::ArrayNewData {
+                    // A data segment carries bytes, so the element type must be numeric or
+                    // vector — never a reference.
+                    if f.storage.unpacked().is_ref() {
+                        return Err(ValidateError::TypeMismatch);
+                    }
+                    if seg as usize >= self.module.data.len() {
+                        return Err(ValidateError::UndefinedData);
+                    }
+                } else {
+                    if seg as usize >= self.module.elements.len() {
+                        return Err(ValidateError::UndefinedElem);
+                    }
+                    if !subtype_of(
+                        self.module,
+                        self.module.elements[seg as usize].elem_type,
+                        f.storage.unpacked(),
+                    ) {
+                        return Err(ValidateError::TypeMismatch);
+                    }
+                }
+                self.pop_expect(V::I32)?; // size
+                self.pop_expect(V::I32)?; // offset into the segment
+                self.push_val_t(V::concrete_ref(false, RefHeap::Array, type_index));
+            }
+            Op::ArrayFill => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let f = self
+                    .module
+                    .array_field(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if !f.mutable {
+                    return Err(ValidateError::ImmutableField);
+                }
+                self.pop_expect(V::I32)?; // size
+                self.pop_expect(f.storage.unpacked())?; // fill value
+                self.pop_expect(V::I32)?; // offset
+                self.pop_expect(V::concrete_ref(true, RefHeap::Array, ti))?; // array
+            }
+            Op::ArrayCopy => {
+                let Imm::GcArrayCopy { dst, src } = instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let df = self.module.array_field(dst).ok_or(ValidateError::UndefinedType)?;
+                let sf = self.module.array_field(src).ok_or(ValidateError::UndefinedType)?;
+                if !df.mutable {
+                    return Err(ValidateError::ImmutableField);
+                }
+                // §: the source element type must be a subtype of the destination's — as
+                // STORAGE types, not as their unpacked projections.
+                //
+                // ⚠️⚠️ `unpacked()` maps both `i8` and `i16` onto `i32`, so comparing the
+                // projections accepts `array.copy` between an `i8` array and an `i16` one.
+                // That is *an encoding chosen to make EXECUTION agree erasing the distinction
+                // VALIDATION runs on* (`best-practices.md` §3A.2) — and it was caught by
+                // `array_copy.wast`'s "array types do not match" case, which this arm accepted
+                // on its first run. **Packing is part of the field type; compare it.**
+                let compatible = match (sf.storage, df.storage) {
+                    (StorageType::I8, StorageType::I8) | (StorageType::I16, StorageType::I16) => {
+                        true
+                    }
+                    (StorageType::Val(s), StorageType::Val(d)) => subtype_of(self.module, s, d),
+                    // A packed field and an unpacked one are never compatible in either
+                    // direction, whatever their projections say.
+                    _ => false,
+                };
+                if !compatible {
+                    return Err(ValidateError::TypeMismatch);
+                }
+                self.pop_expect(V::I32)?; // size
+                self.pop_expect(V::I32)?; // src offset
+                self.pop_expect(V::concrete_ref(true, RefHeap::Array, src))?; // src array
+                self.pop_expect(V::I32)?; // dst offset
+                self.pop_expect(V::concrete_ref(true, RefHeap::Array, dst))?; // dst array
+            }
+            Op::ArrayInitData | Op::ArrayInitElem => {
+                let Imm::GcTypeSeg { type_index, seg } = instr.imm else {
+                    return Err(ValidateError::UnsupportedValidation);
+                };
+                let f = self
+                    .module
+                    .array_field(type_index)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if !f.mutable {
+                    return Err(ValidateError::ImmutableField);
+                }
+                if instr.op == Op::ArrayInitData {
+                    if f.storage.unpacked().is_ref() {
+                        return Err(ValidateError::TypeMismatch);
+                    }
+                    if seg as usize >= self.module.data.len() {
+                        return Err(ValidateError::UndefinedData);
+                    }
+                } else {
+                    if seg as usize >= self.module.elements.len() {
+                        return Err(ValidateError::UndefinedElem);
+                    }
+                    if !subtype_of(
+                        self.module,
+                        self.module.elements[seg as usize].elem_type,
+                        f.storage.unpacked(),
+                    ) {
+                        return Err(ValidateError::TypeMismatch);
+                    }
+                }
+                self.pop_expect(V::I32)?; // size
+                self.pop_expect(V::I32)?; // src offset into the segment
+                self.pop_expect(V::I32)?; // dst offset into the array
+                self.pop_expect(V::concrete_ref(true, RefHeap::Array, type_index))?; // array
             }
 
             // --- SIMD (the `0xFD` v128 family) ---

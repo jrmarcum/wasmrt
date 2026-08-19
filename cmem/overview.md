@@ -56,7 +56,7 @@ audit; it was stale for five days. §3A.2.)*
   (multi-memory + memory64) + indirect calls + GC + SIMD + atomics + EH** (control flow, recursion, locals,
   globals, all i32/i64/f32/f64 ops incl. NaN-correct min/max + ties-to-even nearest + trap/sat conversions;
   loads/stores + `memory.size`/`grow` + bulk memory + active data init; `call_indirect` + full `table.*` +
-  `ref.*` + element-segment init; **GC struct/array heap + `i31` + `ref.test`/`ref.cast`/`br_on_cast`** ⚠⚠ **— but NOT the array bulk ops or the extern bridge: `array.new_data`/`new_elem`/`init_data`/`init_elem`/`fill`/`copy` and `any.convert_extern` are MISSING (found 2026-08-19, `known-issues.md`). This bullet claimed GC as a unit; it was never checked against GC's instruction list.**;
+  `ref.*` + element-segment init; **GC struct/array heap + `i31` + `ref.test`/`ref.cast`/`br_on_cast`** ✅ **— and since 2026-08-19 the array bulk ops too: `array.new_data`/`new_elem`/`init_data`/`init_elem`/`fill`/`copy` are MISSING (`any.convert_extern` is a documented deliberate deferral) (found 2026-08-19, `known-issues.md`). This bullet claimed GC as a unit; it was never checked against GC's instruction list.**;
   **the full `v128` SIMD set incl. relaxed**; `NULL_REF = u64::MAX` checked before `I31_TAG = 1<<63` —
   slot-encoding invariant anchored). **The value slot is now 128-bit (`Value = u128`)** so a `v128` is one
   slot (idiomatic divergence from wazmrt's 2-`u64`-slots; scalars/refs in the low 64). **A memory carries
