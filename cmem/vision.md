@@ -74,7 +74,7 @@ Recorded because the axes above are the *destination* and are easy to read as a 
 
 | Axis | Standing | Gap |
 | --- | --- | --- |
-| **Canonical** | **99.4%** of the official spec testsuite (62,238 / 378 / 2,038 over 284 files); the 533-file `.wat` corpus is clean through assemble→decode→validate, and every CLI command that takes a module accepts `.wat` directly; **every proposal in the scope list now runs, tail calls included** | ✅ **T9f landed 2026-08-14, so there is no unimplemented scope item and 1.0 is not blocked on a feature.** ⚠️ It landed with a warning attached: `return_call_ref` had shipped for releases as a FAKE tail call — correct results, native stack growing per hop — while its conformance file read 40/7. **A high conformance score can coexist with an absent feature** (`best-practices.md` §3.10). What remains on this axis is not scope but the 378 residual failures, of which **77 are untargeted proposals** (custom-page-sizes, custom-descriptors) and the largest in-scope block is **table64 (60)**. |
+| **Canonical** | **99.4%** of the official spec testsuite (62,238 / 378 / 2,038 over 284 files); the `.wat` corpus figure is ⚠️ UNVERIFIED since its denominator moved (`testing.md`, 2026-08-19), and every CLI command that takes a module accepts `.wat` directly; **every proposal in the scope list now runs, tail calls included** | ✅ **T9f landed 2026-08-14, so there is no unimplemented scope item and 1.0 is not blocked on a feature.** ⚠️ It landed with a warning attached: `return_call_ref` had shipped for releases as a FAKE tail call — correct results, native stack growing per hop — while its conformance file read 40/7. **A high conformance score can coexist with an absent feature** (`best-practices.md` §3.10). What remains on this axis is not scope but the 378 residual failures, of which **77 are untargeted proposals** (custom-page-sizes, custom-descriptors) and the largest in-scope block is **table64 (60)**. |
 | **Fast** | ✅ **MEASURED 2026-08-07.** Cold start **4.48 ms** for a 48 KB module (3.5 µs for a toy); steady state **~237 Mops/s** on a tight `loop`/`br_if`. Bench: `cargo run --release -p wasmrt-core --example bench`. | ⚠️ **A ~5% steady-state regression from the ninth T9 pass is still unattributed** and handed to T11 — two hypotheses were tested and rejected. That was a footnote while the oracle defined success; **under a contest decided on speed it is a live liability.** No cross-runtime comparison has been run on this machine. |
 | **Small** | ✅ **MEASURED 2026-08-07.** CLI **621 KiB**, cdylib **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** after `wasm-opt -Oz`), engine + text toolchain **260.9 KiB**. Still **zero third-party dependencies**. | **The rlib-in-rsxtk figure has never been measured at all** — and that is the artifact the default consumer links. `wasm-opt -Oz` is worth ~13% and is **not wired into any build script**. No comparison against wasm3 / WAMR / wazmrt. |
 
@@ -92,6 +92,22 @@ and T11 is no longer a late-stage nicety.
 ⚠️ **The rule that motivated the table stands, and now matters more: never quote another runtime's
 numbers as wasmrt's.** Every figure above is wasmrt's own, measured here. A competitor's published
 numbers are not a baseline — run both binaries on the same machine or say nothing.
+
+### 📌 The competitor has published head-to-head numbers first (recorded 2026-08-19)
+
+wazmrt's repo records a first same-box head-to-head, both runtimes size-tuned (2026-08-14): C-ABI
+shared library **wazmrt 222 KB vs wasmrt 554 KB** (2.5× smaller — it calls the embed footprint *"the
+strongest card"*); CLI **wazmrt 890 KB vs wasmrt 684 KB** (wasmrt smaller); and its bake-off notes that
+**wasmrt ties wazmrt end to end**.
+
+⚠️ **This is a competitor measuring us. It does not close gap (3) above — it raises its priority**, and
+by the rule directly above, those figures are not adoptable: they are explicitly *not*
+feature-parity-verified, and **the 554 KB / 684 KB disagree with our own 493.5 KiB / 621 KiB** — build
+config, flags and date are part of a size number and we cannot see theirs (`roadmap.md`, T11 rule 3).
+**Run our own and publish that.** What is worth taking without re-deriving is the *shape*, because it
+survives any of those differences: **the cdylib is the artifact where wasmrt is behind**, and the cdylib
+is what wasmtk and every C consumer link. The CLI — where wasmrt leads — is the artifact the contest
+cares about least.
 
 ## Why replace wasmtime under the loaders
 

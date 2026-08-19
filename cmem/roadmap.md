@@ -2,9 +2,14 @@
 
 ## Status (2026-08-10) — PORT phase; gate OPEN, oracle **RE-BASELINED**. **T0–T8 DONE; T9 IN PROGRESS.**
 
-**Current tree (unreleased, ahead of the published v0.9.0):** suite **62,113 / 385 / 2,163 — 99.4%**
-of 62,498 adjudicated, **457 workspace tests** (419 core + 28 capi + 10 CLI), Miri **28/28**. The
-533-file `.wat` corpus is a **clean 533/533** through assemble→decode→validate. T9's first pass landed
+**Current tree (unreleased, ahead of the published v0.9.0; numbers re-audited 2026-08-19):** suite
+**62,238 / 378 / 2,038 — 99.4%** of 62,616 adjudicated, **458 workspace tests** (420 core + 28 capi +
+10 CLI), Miri **28/28**. ⚠️ **The `.wat` corpus figure needs a re-run before it is quoted** — the last
+recorded round trip read **534/534 assemble, 0 decode failures**, but the wasmtk tree holds **532**
+`.wat` files today (the two stale `39_JstyperMixed` duplicates are gone), so every figure on record —
+533/534, 534/534, 533/533 — is against a denominator that no longer exists. *(This block itself read
+62,113 / 385 / 2,163 and "457 tests" until the 2026-08-19 audit — five days stale, in the roadmap's own
+headline. `best-practices.md` §3A.2.)* T9's first pass landed
 T9a #1/#2/#3 plus three unlisted defects, and all of **T9b (size)**, **T9c (performance)** and
 **T9d (licensing/docs)**. **Fifteen further passes have landed**, closing T9a **#4 (both halves, via a
 funcref that carries its owning instance), #5, #6, #7, #8, #9, #11** and most of **#12**, plus defects
@@ -1399,6 +1404,34 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   suite/`.wat`-corpus counts do not regress. **Expect this to find more than three** — the mechanism has
   a 3-for-3 record and nothing has ever looked for it directly.
 
+  🚨🚨 **GATE AMENDED 2026-08-19 — a round trip proves agreement with YOURSELF, and that is a whole
+  defect class this gate cannot see.** *(Borrowed method — `best-practices.md` §3A.2.)* wazmrt emitted
+  its internal synthetic valtype tags raw, so `(ref i31)` assembled to one byte where the spec form is
+  two. Its decoder accepted both spellings, so **its own output round-tripped perfectly and everyone
+  else's input read fine** — every module it produced was invalid to every other runtime for nine
+  months, and its whole conformance corpus was blind by construction (the runs before and after the fix
+  are byte-identical). **The round-trip test above would have passed throughout.**
+
+  **So T10a's gate gains a third, EXTERNAL arm:** for a sample spanning every encoding shorthand in the
+  list above, **assert the emitted BYTES** (golden or hand-checked) **and hand them to wasmtime**, which
+  is the only party with no stake in our conventions. **When a bug is visible only to a third party, the
+  test has to BE a third party.** And the design half, which is a standing invariant rather than a test:
+  **an internal tag belongs OUTSIDE the format's encoding space, or gets converted at the boundary** —
+  wasmrt holds the decode half since T2 (internal tags `0xD7`–`0xFA`, raw ones rejected), and what is
+  unproven is the **emit** half. "Currently unused" is a statement about *today's* spec: the byte wazmrt
+  borrowed became the custom-descriptors `Exact` prefix by 2026.
+
+  ### T10b — Pin the three spellings of the proposal list *(added 2026-08-19)* `[ ]`
+
+  Logged in [known-issues.md](known-issues.md). `enum Feature` (core), the `u32` map `feature_of`
+  (`wasmrt-capi/src/lib.rs:332`) and `wasmrt_feature_t` (`wasmrt.h:151`) are three hand-written copies
+  of one list, and **nothing compares them**. `feature_of` matches on `u32` with a `_` arm, so Rust's
+  exhaustiveness check does not fire: a sixteenth proposal would compile, ship a header constant, and be
+  **unreachable from C with no test failing**. Core's `EVERY` array pins the Rust side only.
+  **Gate:** a test walking `EVERY` that round-trips every variant through `feature_of` in both
+  directions and pins the header's constants by **name and value**, not by count. *(wazmrt shipped this
+  exact defect — its header advertised `TAIL_CALL = 14` while its C-ABI bound stopped at 13.)*
+
 - **T11 — Optimization review (a DISCUSSION, not a blind pass).** *(Owner, 2026-08-06.)* `[ ]`
 
   **The deliverable is options presented to the owner with measurements and trade-offs — then a
@@ -1426,6 +1459,56 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     behavioural drift against the oracle, and the full suite + C + Miri gates green. **Reject anything
     that trades a recorded invariant for a number** unless the owner takes that decision explicitly.
 
+  ### T11 — HOW to measure, added 2026-08-19 (borrowed method, `best-practices.md` §3A.2)
+
+  T9f left T11 a first job — *"a benchmark that can resolve 5%"*, because build-to-build variance (~7%)
+  currently exceeds the ~5% regression being chased. Four rules make that job well-posed, each bought by
+  a defect in the other runtime:
+
+  1. ⚠️⚠️ **Measure the FLOOR before attributing a difference, and report it beside every number.**
+     wazmrt's end-to-end CLI harness showed 2.4× over wasmtime; excluding process spawn, the engines
+     differ **20–55×**. A ~30 ms spawn floor did not add noise to a sub-millisecond quantity — it hid the
+     entire effect and flattened a real module-size dependence into "nothing moves". Its `--version`
+     (no wasm work at all) cost 30 ms vs 76 ms, so **~46 ms of a ~50 ms "engine win" existed before
+     either engine started.** ⇒ **T11's benchmark must be in-process**, and must state its floor.
+  2. **Quote the DIFFERENCE, or the ratio with load conditions attached.** The same harness gave 5.3× on
+     a quiet box and 2.4× on a loaded one with the absolute gap unchanged (~29–48 ms): a fixed per-process
+     cost shared by both entrants inflates both sides and compresses the ratio.
+  3. ⚠️⚠️ **A size number must be reproducible in the CONFIGURATION it was recorded in — including
+     WHERE.** One unchanged wazmrt commit measured **four different static-archive sizes**, varying only
+     with the source-tree and cache paths, because an unpadded archive embeds object/source paths; its
+     `.exe`/`.dll` hid the same variance inside PE alignment and looked perfectly stable. **This lands
+     directly on T11's promoted footnote: the never-measured artifact is the RLIB, which is exactly that
+     kind of archive.** Measure it from a fixed path; re-measure the parent commit in the same
+     configuration before charging a sub-KB delta to a change.
+  4. **Attribute the ~5% regression by BISECTING against parent commits in a worktree**, not by
+     reasoning about likely causes — two hypotheses have already been tested and rejected that way.
+
+  🆕 **And a task-sorting rule: T11 holds two different KINDS of work.** The optimization review is a
+  **fix task** (it changes code, and it ends). The same-machine comparison against wasm3 / WAMR / wazmrt
+  is a **compare task** — it can never be "done", because rivals ship new versions and corpora grow, and
+  ⚠️ **it is the only kind of task that pulls external dependencies into a project whose stated invariant
+  is zero of them.** Schedule it when a NUMBER is wanted; do not let it sit in the fix queue making that
+  queue look permanently non-empty.
+
+  ### 📌 A competitor has already published head-to-head numbers — treat them as a PROMPT, not a result
+
+  wazmrt's repo records a first head-to-head on this box, both runtimes size-tuned (2026-08-14):
+
+  | artifact | wazmrt | wasmrt | note |
+  | --- | --- | --- | --- |
+  | C-ABI shared library | **222 KB** | **554 KB** | wazmrt 2.5× smaller — *"the embed footprint is wazmrt's strongest card"* |
+  | CLI | 890 KB | **684 KB** | wasmrt smaller |
+  | end-to-end run | — | — | its bake-off notes wasmrt **TIES** wazmrt end to end |
+
+  ⚠️ **These are a competitor's measurements of us, and they do NOT satisfy T11's third footnote** — they
+  raise its priority. Two reasons not to adopt either figure: they are explicitly *not*
+  feature-parity-verified, and **the 554 KB / 684 KB do not match our own record** (cdylib 493.5 KiB,
+  CLI 621 KiB) — which is rule 3 above restated, since a build config, flags and date we cannot see are
+  part of the number. **Run our own same-box comparison and publish that.** The one figure to take
+  seriously without re-deriving is the *shape*: the **cdylib is where wasmrt is behind**, and the cdylib
+  is the artifact wasmtk and every C consumer link.
+
 - **T12 — Security review: find the penetration surfaces, recommend the plugs.** *(Owner, 2026-08-06.)* `[ ]`
 
   **A review-and-recommend phase, like T11** — the deliverable is *findings + recommended mitigations
@@ -1452,6 +1535,17 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   | --- | --- | --- |
   | validate before executing | summarize, `wasi`, C ABI | **`wasmrt run`** (and 3 wazmrt sites) |
   | a value handle carries its issuing store | the C ABI (T8) | **core's `InstanceId`** (until T9a#3) |
+  | the feature GATE and the typing rules it constrains are **one call**, not two | wasmrt's C ABI calls `validate_with_features(&md, &e.features)` (`wasmrt-capi/src/lib.rs:693`, `:725`) | ⚠️ **a new row, added 2026-08-19** — enumerate the rest |
+
+  ⚠️ **That third row is borrowed from a shipped wazmrt defect** (`best-practices.md` §3A.2): its gate
+  sat *beside* `validate`, so its C ABI gated with the embedder's feature set and then validated with
+  **all** features — the set decided which proposals were ADMISSIBLE while the all-features rules decided
+  what they MEANT, and one instruction was typed by a relaxed proposal rule with that proposal switched
+  off. **No gating test could see it**, because the instruction exists either way and was never refused.
+  wasmrt's C ABI looks right at the two sites above; **the method is to enumerate every entry point, not
+  to spot-check one** — that is the whole point of T12z. Add to the candidate list: **every proposal has
+  a gate, and that gate is tested** — *a proposal that ships without one is not "enabled by default", it
+  is unrefusable*, and a per-proposal checklist cannot ask this question about itself.
 
   **The bug is "three of the four do X".** So the T12 method is not "audit file by file" but: name an
   invariant, enumerate **every** entry point in a table, and check the property at each. Candidates
@@ -1465,6 +1559,18 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   inherits it. `best-practices.md` §3.4 carries the generalization.
 
   ### T12x — DIFF THE TWO RUNTIMES' SECURITY TABLES AGAINST EACH OTHER *(added 2026-08-10)* `[ ]`
+
+  ⚠️ **RESHAPED 2026-08-19, because the oracle is retired.** The task survives — two implementations of
+  one spec are still a free differential oracle, and the arrangement already caught a real authority
+  breach in each direction — but its *form* changes: **not "diff against the oracle" (there isn't one),
+  but "require every implementation to AGREE, and record each disagreement as an OBSERVATION until it is
+  traced."** wazmrt built exactly that harness and it found a one-byte disagreement on its first run,
+  across five implementations including V8, against wasmtime 47.0.3 — **and deliberately recorded it
+  without a diagnosis, because the cause was not traced.** *A differential check with no privileged
+  oracle finds things a golden file cannot* (`best-practices.md` §3A.2). ⚠️ Note the corollary for
+  scoping this against T10/T11: **a refusal is not a hole.** A module wasmrt *rejects* cannot do harm, so
+  implementing the proposal behind a block of failing assertions **adds** attack surface. A conformance
+  total counts disagreements, not exposure.
 
   ⚠️ **Found the hard way, twice in one day.** Both defects were "the property holds in one
   implementation and not the other, and nothing compared them":

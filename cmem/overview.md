@@ -13,7 +13,7 @@ competing for inclusion in **wasmtk** and the **universalWasmLoader-\*** runtime
 smallest and fastest binary**. **`rsxtk` takes wasmrt by default** through the native Rust interface.
 wazmrt is running its own size program for the same contest, so its head is a *competitor's* design.
 
-**Correctness anchors externally**: the official spec testsuite (62,498 adjudicated assertions),
+**Correctness anchors externally**: the official spec testsuite (62,616 adjudicated assertions),
 **wasmtime's observable behaviour** (already matched byte-for-byte on invalid-module diagnostics), and
 the wasmtk WASI corpus. Those were always the harder tests — the oracle was the convenient one, and tail
 calls, the one feature it never covered, were always planned this way.
@@ -31,8 +31,10 @@ reference.*
 
 ## Status (2026-08-11) — **assemble → decode → validate → run → WASI → embed-from-C all working**
 
-Released stage-by-stage to crates.io (see [releasing.md](releasing.md)). **memory64 is in scope**; **tail
-calls are the one unimplemented scope item.**
+Released stage-by-stage to crates.io (see [releasing.md](releasing.md)). **memory64 is in scope.**
+✅ **Tail calls landed 2026-08-14 (T9f), so NO in-scope proposal is unimplemented** — 1.0 is not blocked
+on a feature. *(This line read "tail calls are the one unimplemented scope item" until the 2026-08-19
+audit; it was stale for five days. §3A.2.)*
 
 **Done — T0–T8, all PUBLISHED (v0.1.0 → v0.9.0; latest release commit `a7abd83`, tag `v0.9.0`):**
 - **T0 (v0.1.0)** — 3-crate workspace (`wasmrt-core` / `wasmrt-capi` / `wasmrt`) builds on all four
@@ -90,10 +92,13 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-- **T9 (0.10.0, IN PROGRESS)** — **seventeen passes landed 2026-08-07/14**, unreleased. Suite
-  **62,113 / 385 / 2,163 — 99.4%**, **458 tests** (420 core + 28 capi + 10 CLI), Miri 28/28, and **no file
-  lost a pass in any pass**. The `.wat` corpus is a clean **533/533** on a full assemble→decode→validate
-  round trip, and every CLI command that takes a module now accepts that `.wat` directly — `run`, `wasi`
+- **T9 (0.10.0, IN PROGRESS)** — **eighteen passes landed 2026-08-07/14**, unreleased. Suite
+  **62,238 / 378 / 2,038 — 99.4%** of 62,616, **458 tests** (420 core + 28 capi + 10 CLI), Miri 28/28,
+  and **no file lost a pass in any pass**. ⚠️ **The `.wat` corpus figure is UNVERIFIED as of 2026-08-19**
+  — the last recorded round trip read 534/534 assemble with 0 decode failures, but the wasmtk tree holds
+  **532** `.wat` files today (the two stale `39_JstyperMixed` duplicates T9a#9 adjudicated invalid are
+  gone), so every recorded pass count is against a denominator that no longer exists. **Re-run before
+  quoting it** (`testing.md`). Every CLI command that takes a module now accepts `.wat` directly — `run`, `wasi`
   and summarize assemble text before decoding, through one shared loader. The size and performance axes were **measured for the first time in the project's
   life**: cold start **4.48 ms** at 48 KB, **~237 Mops/s** steady; CLI **621 KiB**, cdylib
   **493.5 KiB**, freestanding `wasm32` engine **158.1 KiB** (**137.5 KiB** with `wasm-opt -Oz`).

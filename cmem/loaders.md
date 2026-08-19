@@ -41,7 +41,7 @@ The engine surface it actually touches is **narrow** — this is the whole of it
 | `wasmtime_wasi::WasiCtxBuilder`, `p1::{self, WasiP1Ctx}` | `wasi::WasiCtx`, `wasi::link` | ✅ present |
 | `preopened_dir(.., DirPerms::all(), FilePerms::all())` | `WasiCtx::preopen_dir(.., rights)` | ✅ present — and **stricter by default** (symlink *creation* denied unless opted in) |
 | `wasmtime_wasi::I32Exit` downcast | `shared.borrow().exit_code()` | ✅ present |
-| `wat::parse_bytes` (the `wat` crate) | `wasmrt_core::wat::assemble` | ✅ present — corpus 533/533 |
+| `wat::parse_bytes` (the `wat` crate) | `wasmrt_core::wat::assemble` | ✅ present — corpus figure UNVERIFIED, see `testing.md` (2026-08-19) |
 | `wasmprinter::print_bytes` (wasm → wat) | — | ❌ **wasmrt has no printer** |
 | `walrus::Module::from_buffer` (×2, module rewriting) | — | ❌ **wasmrt has no rewriter** |
 

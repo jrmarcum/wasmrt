@@ -17,7 +17,7 @@ size/self-ownership program for the same contest — so its head is a **competit
 
 What replaces it, and why this is a **stronger** anchor rather than a weaker one:
 
-- **Correctness** → the official spec testsuite (62,498 adjudicated assertions), **wasmtime's observable
+- **Correctness** → the official spec testsuite (62,616 adjudicated assertions), **wasmtime's observable
   behaviour** (already the reference for invalid-module diagnostics, matched byte-for-byte), and the
   wasmtk WASI corpus. The oracle was never the hardest of these; it was the most convenient.
 - **Completion** → `1.0.0` no longer means "parity with wazmrt". It means every in-scope proposal

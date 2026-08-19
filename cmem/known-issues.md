@@ -1,5 +1,36 @@
 # Known Issues
 
+## ⬜ OPEN (found 2026-08-19) — the proposal list is spelled THREE times and nothing compares them
+
+**Severity: latent, not live.** No proposal is mis-gated today. What is missing is the check that keeps
+that true, and the defect it would catch is the one wazmrt actually shipped: *a header advertising a
+switch that is not there.*
+
+The set of proposals exists in three hand-written forms:
+
+| # | spelling | file |
+| --- | --- | --- |
+| 1 | `enum Feature` + `Features`' struct fields + `all()` / `mvp()` / `name()` | `crates/wasmrt-core/src/features.rs` |
+| 2 | the `u32` → `Feature` map `feature_of` | `crates/wasmrt-capi/src/lib.rs:332` |
+| 3 | `wasmrt_feature_t`'s 15 constants | `crates/wasmrt-capi/include/wasmrt.h:151` |
+
+⚠️ **Rust's exhaustiveness cannot help at #2**: `feature_of` matches on `u32` with `_ => return None`,
+so **adding a sixteenth proposal compiles**. It would ship a header constant, and
+`wasmrt_config_set_feature` would return `false` for it — the proposal unreachable from C, with **no
+test failing**. Core's own `EVERY: [Feature; 15]` already pins #1 (three tests walk it); nothing walks
+#2 or #3, and `tests/c_smoke.c` touches only `SIMD` and `FUNCTION_REFERENCES`.
+
+⚠️ **T9f's tail-call flag is exactly the case that went wrong in the other runtime**, and it is the
+newest entry in all three lists — `WASMRT_FEATURE_TAIL_CALL = 14` / `14 => Feature::TailCall` /
+`Feature::TailCall`. Verified consistent by hand on 2026-08-19; the point is that "verified by hand"
+is the state this entry exists to end.
+
+**The fix (T10):** a test that walks `EVERY`, round-trips each variant through `feature_of` in **both**
+directions, and asserts the count matches the header's — comparing **names and values, not lengths**,
+since two lists of equal length can still disagree and a value mismatch gates a *different* proposal
+than the caller selected. Deriving beats pinning where the shape allows it: **a pin makes drift
+detectable, deriving makes it unrepresentable.** — borrowed method, `best-practices.md` §3A.2.
+
 ## ✅ Fixed 2026-08-14 (T9f) — `return_call_ref` was NOT A TAIL CALL, and conformance said 40/7
 
 **Three defects, one pass.** All pre-existing; all found while implementing `return_call` /

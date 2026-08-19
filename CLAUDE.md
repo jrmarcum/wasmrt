@@ -31,7 +31,8 @@ than the thing the consumer uses.
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite **99.4%** (62,238 / 378 / 2,038 of 62,616),
 **458 workspace tests** (420 core + 28 capi + 10 CLI), Miri 28/28, no file lost a pass in any pass. The `.wat`
-corpus is a clean **533/533** through assemble→decode→validate, and **every CLI command that takes a module
+corpus figure is ⚠️ **UNVERIFIED as of 2026-08-19** — its denominator moved (532 `.wat` files in the
+wasmtk tree today; see `cmem/testing.md`) — and **every CLI command that takes a module
 now accepts that `.wat` directly** — `run`, `wasi` and summarize assemble text before decoding, through one
 shared loader. ⚠️⚠️ **That gap had been open for the whole port and was found by an owner QUESTION, not a
 test — the second in two days.** It is structural: every gate here compares *answers* on inputs both
@@ -176,8 +177,9 @@ tests). 🔒 **Symlink CREATION is now denied by default** (owner): `--dir` gran
 all**, so `--ro-dir` never stripped it and a guest could plant links in a read-only preopen.
 🔒 **The oracle is no longer at its original freeze** — it moved four times on 2026-08-10, each
 owner-authorized and deliberately re-baselined; `check-wazmrt.sh` reports NO DRIFT.
-**T9a #1–#9 and #11 are now all closed. Still open in T9:** `func.wast` 8 (the withdrawn body-order
-rule + duplicate identifiers), `pin`, **tail calls**.
+**T9a #1–#9 and #11 are now all closed.** ✅ **Tail calls landed 2026-08-14 (T9f), so no in-scope
+proposal is missing**, and `func.wast` 8 (the withdrawn body-order rule + duplicate identifiers) moved
+to T10 with the other bugs (owner, 2026-08-14). **`T9e pin` is the ONLY T9 item left.**
 Then **T10** bug hunt, **T11** optimization review (**no longer blocked — its baselines now exist**),
 **T12** security review — the order **measure → find → optimize → attack** is deliberate.
 ⚠️ **T9a#1 taught that a cost logged beside a defect is a hypothesis about its cause**: the `ref.null`

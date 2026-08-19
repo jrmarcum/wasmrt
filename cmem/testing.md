@@ -395,11 +395,33 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-## Current test state (2026-08-14, T9f tail calls)
+## Current test state (2026-08-14, T9f tail calls; audited 2026-08-19)
 
 **458 workspace tests, all green** (420 core + 28 capi + 10 CLI integration), clippy clean on all four
-build surfaces; the `.wat` corpus is a clean **533/533** through assemble→decode→validate. Suite
-**62,238 / 378 / 2,038 — 99.4%** of 62,616.
+build surfaces. Suite **62,238 / 378 / 2,038 — 99.4%** of 62,616.
+
+### ⚠️ The `.wat` corpus figure is UNVERIFIED — its denominator moved (found 2026-08-19)
+
+**The corpus is not ours**: the `.wat` files live in the `wasmtk` tree, which is a live repo, and it has
+**532** `.wat` files today. Every number this memory records is against a different one:
+
+| recorded | where | what it was |
+| --- | --- | --- |
+| 533/534 | pre-T9a#8 | assemble **only** — and that gate was the §1.5a defect |
+| **534/534 assemble, 0 decode failures**, 2 validate failures | T9a#8, 2026-08-08 | the last honest full round trip |
+| 533/533 "clean" | this file, `overview.md`, `roadmap.md`, `INDEX.md`, `loaders.md`, `CLAUDE.md` | **denominator unexplained**; propagated unmeasured |
+
+The 2 validate failures were the `39_JstyperMixed` pair, which **T9a#9 adjudicated as an invalid stale
+fixture — wasmrt was right and the file was wrong**. Those files are now absent from wasmtk, which
+accounts for 534 → 532 exactly. So the likely truth is *532/532 through assemble→decode→validate* —
+**but that is an inference, not a measurement. Re-run the round trip and record the number with its
+denominator and its date before quoting it anywhere.**
+
+🎓 **Three rules of ours converge on this one entry**: a gate's number must be reproducible **in the
+configuration it was recorded in**, and a corpus you do not own is part of that configuration
+(`best-practices.md` §3A.2); when two files disagree, **measure** rather than picking the newer; and
+**quote all four numbers** — passed / failed / skipped **and the file-error count** — because a file
+that dies before it runs contributes to none of the first three.
 
 ### ⚠️⚠️ The kind of test the spec suite CANNOT replace
 
