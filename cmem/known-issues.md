@@ -105,6 +105,23 @@ position**: that would break the documented form and swap one silent failure for
 direction to err in is a property of the consequence** — an unsandboxed run is worse than a rejected
 command line.
 
+⚠⚠ **ESCALATED 2026-08-19 (coordinate, interop v10): TODAY IT FAILS CLOSED; T9e AND T9i MAKE IT FAIL
+OPEN.** wazmrt hit the mirror of this defect and fixed it (their H7), and their analysis carries the
+split mine did not: **which direction a donated flag fails in depends on what the flag DOES.**
+
+| flag | donated to the guest means | direction |
+| --- | --- | --- |
+| `--dir` / `--ro-dir` / `--allow-symlink` (today) | the preopen is never granted — the guest gets **less** access | fail-**closed**, survivable |
+| `--verify` / `--pins` (T9e) | the verification policy is never applied — **an unverified module runs** | ⚠⚠ fail-**OPEN** |
+| `--max-iterations` / `--max-memory` / `--max-table-elems` (T9i) | the ceiling is never applied — **the guest runs unbounded** | ⚠⚠ fail-**OPEN** |
+
+🔒 **So this is a PREREQUISITE for T9e and T9i, not an independent cleanup.** The moment a restriction
+flag exists, *“the user asked for a restriction, got no error, and ran without it”* becomes reachable —
+and a silent absence of a security control is exactly the class this project ranks worst. **Fix the
+parser before adding the flags that make it dangerous.** ⚠️ wazmrt chose to **warn, not refuse** (a guest
+may legitimately take `--dir` as its own argument) and to examine **nothing after an explicit `--`**;
+both choices are contract-relevant and should match.
+
 🎓 **The generalisable finding: a flag that is silently REINTERPRETED as data is worse than a flag that
 is rejected.** Sibling of the `--no-verify`/`--yes` flag-region hazard recorded for T9e, and of the
 `--dir` separator row — three defects in one small parser, all of the same shape: **an argument that

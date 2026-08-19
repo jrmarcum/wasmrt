@@ -1458,6 +1458,14 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
 
   ### T9i — The ITERATION BUDGET: bound non-termination. `1.0.1` ✅ **DECIDED 2026-08-19** `[ ]`
 
+  🔒⚠⚠ **BLOCKED ON THE FLAG-POSITION FIX (coordinate, 2026-08-19).** `--max-iterations` is a
+  RESTRICTION flag, and wasmrt’s CLI currently donates any flag written after the module path to the
+  **guest**, silently (`known-issues.md`). Today that fails **closed** — the only such flags are
+  preopens, so a misplaced one grants *less* access. **`--max-iterations` makes it fail OPEN**: the user
+  asks for a bound, gets no error, and the guest runs unbounded. Same for T9e’s `--verify` / `--pins`.
+  **Fix the parser before adding the flags that make it dangerous.**
+
+
   🔒 **Owner, 2026-08-19: *"3 has already been decided in the wazmrt project, just follow their lead."***
   It is a **contract row now** — [`interop.md`](interop.md) §3.7/§3.7a, CONTRACT VERSION 2 — so this is
   not a wasmrt design decision to re-open, and a divergence here breaks swappability under load.

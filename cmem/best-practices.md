@@ -676,6 +676,30 @@ because both repos already recorded "`D:` is exFAT" and two wrong causes shipped
 for want of a five-second grep. → For wasmrt this predicts the same shape for a cargo `target/` on `D:`;
 the fix is `CARGO_TARGET_DIR` on an NTFS path, and it belongs with the recorded hard-link warnings.
 
+#### Third borrow round (2026-08-19, `coordinate`) — one rule, and both projects had just proved it
+
+⚠⚠ **A CHANGE’S OWN NEW SURFACE IS THE ONE PLACE THE AUDIT THAT PRODUCED IT WILL NOT LOOK.** wazmrt
+found that a host flag written after a guest argument is **silently donated to the guest and never
+applied** — and demonstrated it with `--max-iterations`, **a flag its own track had added hours
+earlier**. The audit that introduced the surface did not re-audit it.
+
+🎓 **This project produced an independent instance the same day, which is why it is being written down
+rather than merely borrowed.** Implementing the six GC array bulk ops meant adding six new internal `Op`
+tags — and three of them (`0xcd..0xcf`) landed **outside** the decoder’s internal-tag guard, so a raw
+`0xcd` byte would have decoded as `array.copy`. **That is the tag-space hazard recorded in §3A.2 the
+same morning, re-created within hours, in the surface the change itself created.** Neither the existing
+tests nor the corpus would have caught it; the guard was extended only because the rule was fresh.
+
+**The habit that follows:** when a change adds a *kind of thing* — a flag, an opcode tag, an error
+variant, a config field — **re-run the audit that governs that kind of thing against the new members,
+before the change lands.** The check already exists; what is missing is applying it to what you just
+wrote. *(Both instances: wazmrt H7 / interop v10; wasmrt’s `0xcd..0xcf` guard, `known-issues.md`.)*
+
+🔻 **And the pen-holder’s duty this round taught, worth keeping:** *a refuted claim left in the table is
+what the next reader quotes.* An annex records a finding; **the table is what gets believed** — so
+folding a correction into the row it refutes is the job, not an optional tidy-up. wazmrt folded wasmrt’s
+F4 into `interop.md` §2.2 for exactly that reason.
+
 ---
 
 ## 4. Checks and gates
