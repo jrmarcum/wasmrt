@@ -183,12 +183,22 @@ impl Runner {
             // `(register "name" $id?)` publishes a module's exports under `name`, so later
             // modules can import from it: the $id-named module if given, else the current one.
             "register" => {
-                let target = list
+                let explicit = list
                     .get(2)
                     .and_then(Sexpr::as_atom)
                     .filter(|a| a.starts_with('$'))
-                    .and_then(|a| self.named.iter().find(|(n, _)| n == a).map(|(_, i)| *i))
-                    .or(self.current);
+                    .and_then(|a| self.named.iter().find(|(n, _)| n == a).map(|(_, i)| *i));
+                // ⚠️ With no `$id`, register the MOST RECENT module — which may be a named one.
+                // This used to be `.or(self.current)`, and `current` is deliberately `None`
+                // after a named module, so `(module $M …) (register "M")` registered **nothing**
+                // and every later import of `"M"` failed to link. `load1.wast` is exactly that
+                // shape: one failed build plus every assertion behind it.
+                //
+                // 🎓 `target()` next door has carried the same fallback all along — *a
+                // classification rule that one call site does not consult is a rule with an
+                // exception nobody wrote down*. Delegating keeps it one rule, including the
+                // `last_build_failed` guard, which register needs for the same reason actions do.
+                let target = explicit.or_else(|| self.target(None));
                 match (list.get(1).and_then(Sexpr::as_str), target) {
                     (Some(name), Some(id)) => {
                         let name = String::from_utf8_lossy(name).into_owned();
@@ -1130,6 +1140,32 @@ mod tests {
             (assert_return (invoke $B "bump") (i32.const 1))
             "#,
         );
+        assert_eq!((s.passed, s.failed, s.skipped), (3, 0, 0), "{:?}", s.failures);
+    }
+
+    /// `(register "name")` with no `$id` registers the **most recent** module — including a
+    /// NAMED one.
+    ///
+    /// ⚠️ It used to fall back to `current`, which is deliberately `None` after a named module,
+    /// so `(module $M …) (register "M")` registered **nothing** and every later import of `"M"`
+    /// failed to link — one failed build plus every assertion behind it. 🎓 `target()` next door
+    /// had carried the correct fallback all along: *a rule one call site does not consult is a
+    /// rule with an exception nobody wrote down.*
+    #[test]
+    fn register_with_no_id_takes_the_most_recent_module_even_if_named() {
+        let s = run(
+            r#"
+            (module $M (memory (export "mem") 1)
+              (func (export "read") (param i32) (result i32) (i32.load8_u (local.get 0))))
+            (register "M")
+            (module
+              (memory $m (import "M" "mem") 1)
+              (func (export "write") (i32.store8 (i32.const 0) (i32.const 7))))
+            (invoke "write")
+            (assert_return (invoke $M "read" (i32.const 0)) (i32.const 7))
+            "#,
+        );
+        // The import must LINK and the two modules must share the memory.
         assert_eq!((s.passed, s.failed, s.skipped), (3, 0, 0), "{:?}", s.failures);
     }
 
