@@ -395,7 +395,27 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
-### ⚠️⚠️ THE PER-FILE GATE WAS KEYED ON A NON-UNIQUE NAME (found + fixed 2026-08-19)
+### 🔎 ACCEPT-INVALID is now the largest remaining class (scanned 2026-08-19)
+
+A corpus-wide scan for *“module was accepted (should be rejected …)”* found **70 of them** — roughly a
+third of every remaining failure, and **the most dangerous class**: wasmrt admitting input the spec
+calls malformed or invalid. Everything else on the list is wasmrt refusing something valid, which
+costs an assertion and never a wrong answer.
+
+| file | count | |
+| --- | --- | --- |
+| `custom-page-sizes-invalid` | 18 | untargeted proposal — expected, Track P |
+| `annotations` | 8 | |
+| `simd_lane` | 7 | ✅ **fixed 2026-08-19** — a lane index admits no sign |
+| `type-rec` | 5 | |
+| `memory`, `func` | 4 each | `func`’s is the duplicate-identifier item |
+| `try_table`, `simd_const`, `rethrow`, `imports` | 2 each | |
+
+🎓 **Rank by DIRECTION, not by count.** A refusing bug costs a failing assertion; an accepting bug
+ships a runtime that runs input it should have turned away — and cannot be noticed from the outside.
+The scan is one `grep` over the `-v` output and had never been run.
+
+## ⚠️⚠️ THE PER-FILE GATE WAS KEYED ON A NON-UNIQUE NAME (found + fixed 2026-08-19)
 
 **Seven basenames occur TWICE in the spec corpus** — `binary`, `br_on_cast`, `br_on_cast_fail`,
 `exports`, `imports`, `memory`, `throw` — once at the top level and once under `proposals/`. The

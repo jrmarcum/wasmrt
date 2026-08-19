@@ -3925,7 +3925,20 @@ fn lookup_atomic(name: &str) -> Option<u32> {
 /// clean `BadImmediate`, not a wrapping cast — the decoder range-checks the lane against
 /// the op's lane count, but only if the byte it sees is the one the source wrote.
 fn simd_lane_byte(s: &Sexpr) -> Result<u8> {
-    let v = parse_i64_str(want_atom(s)?)?;
+    let a = want_atom(s)?;
+    // §6.3.1: a lane index is an **unsigned** integer literal, and `uN` admits no sign — so
+    // `+1` and `-1` are both malformed, whatever their value.
+    //
+    // ⚠️ `-1` was already refused, but only because `u8::try_from(-1 as u32)` overflows — a
+    // RANGE check doing a SIGN check's job by accident. `+1` is in range, so it sailed through
+    // and seven `assert_malformed`s in `simd_lane.wast` accepted a malformed module.
+    // 🎓 **A check that happens to cover a rule for some inputs makes the rule look
+    // implemented** — the negative cases passing is exactly why nobody looked at the positive
+    // ones.
+    if a.starts_with('+') || a.starts_with('-') {
+        return Err(Error::BadImmediate);
+    }
+    let v = parse_i64_str(a)?;
     u8::try_from(v as u32).map_err(|_| Error::BadImmediate)
 }
 
@@ -5717,6 +5730,35 @@ mod tests {
             crate::interp::as_i32(run(src, "g", &[crate::interp::Value::from(42u32)])[0]),
             7
         );
+    }
+
+    /// A SIMD lane index is an **unsigned** literal (§6.3.1), and `uN` admits no sign — so
+    /// `+1` is malformed even though its value is in range.
+    ///
+    /// ⚠️ `-1` was already refused, but only because `u8::try_from(-1 as u32)` overflows: a
+    /// RANGE check doing a SIGN check's job by accident. `+1` is in range and sailed through,
+    /// so seven `assert_malformed`s in `simd_lane.wast` accepted a malformed module.
+    /// 🎓 **A check that happens to cover a rule for some inputs makes the rule look
+    /// implemented** — the negative cases passing is precisely why nobody examined the positive
+    /// ones.
+    #[test]
+    fn a_simd_lane_index_admits_no_sign() {
+        let m = |lane: &str| {
+            format!(
+                r#"(module (func (result i32) (i8x16.extract_lane_s {lane}
+                     (v128.const i8x16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))))"#
+            )
+        };
+        // Signed spellings are malformed whatever the value.
+        for lane in ["+1", "+0x0f", "+03", "-1", "-0"] {
+            assert_eq!(asm(&m(lane)), Err(Error::BadImmediate), "lane `{lane}` must be refused");
+        }
+        // Unsigned spellings in range still work — the rule is about the SIGN, not the digits.
+        for lane in ["0", "15", "0x0f"] {
+            assert!(asm(&m(lane)).is_ok(), "lane `{lane}` must be accepted");
+        }
+        // …and the range check still bites on its own.
+        assert_eq!(asm(&m("999")), Err(Error::BadImmediate));
     }
 
     #[test]
