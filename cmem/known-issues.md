@@ -1,5 +1,47 @@
 # Known Issues
 
+## ⚠️⚠️ OPEN (proven 2026-08-19, fix ATTEMPTED AND REVERTED) — try_table catch labels resolve one frame too deep
+
+**The defect is proven; the fix is not.** `try_table`’s catch-clause labels resolve **with the
+try_table’s own frame on the label stack**, when the spec resolves them in the context OUTSIDE it — a
+handler runs once the try_table has been exited, so its label cannot name it.
+
+🎯 **The evidence is a clean INVERSION**, which is what makes it certain rather than suspected:
+
+| module | spec says | wasmrt |
+| --- | --- | --- |
+| `(func (result exnref) (try_table (catch_all 0)) (unreachable))` | **invalid** | ❌ accepted |
+| `(func (result exnref) (try_table (catch_all_ref 0)) (unreachable))` | **valid** | ❌ rejected |
+
+Both directions wrong at once, which is exactly what an off-by-one label produces — and why the net
+conformance movement is small enough to hide.
+
+⚠️⚠️ **THREE consumers share the mistake**: the assembler pushes the label before resolving the
+clauses (its comment even says *“label 0 = the try_table itself”*), the validator does the same, and the
+interpreter branches to `d + c.label`. **Every text round trip therefore agrees with itself and the
+corpus stays green on the valid cases** — only the spec’s own `assert_invalid` cases can see it.
+🎓 *Two consumers agreeing is not corroboration when they share the mistake — and there can be THREE.*
+wazmrt hit the identical defect (their R4).
+
+🔻 **A fourth party pins the wrong convention: our own test.** `eh_try_table_catches_throw` is
+hand-written binary with the comment *“label 1 = the enclosing block”*. **A test can encode a misreading
+of the spec and pass forever if nothing exercises it** — and this one made the convention look
+deliberate.
+
+### Why the fix was reverted
+
+Correcting the assembler, the validator **and** the interpreter together still regressed three
+previously-clean files — `instance.wast`, `throw.wast`, `throw_ref.wast` — so the model is incomplete:
+there is at least a fourth site (the legacy `try`/`catch` unwind path shares `throw_exception`, and
+`branch()` may count frames differently again). **Reverted rather than shipped**: regressing three files
+to fix two assertions is a bad trade, and guessing at the remaining site is how the day’s other confident
+wrong claims happened.
+
+**For the focused pass:** work from the spec text for §3.3.8.10, fix all sites in one change, rewrite
+`eh_try_table_catches_throw`’s comment and bytes, and use `scripts/conformance-diff.sh` — which now
+catches the newly-failing direction that hid these three.
+
+
 ## ✅ FIXED 2026-08-19 (same day) — the SIX missing WasmGC array instructions now ship
 
 **`array.new_data` / `array.new_elem` / `array.init_data` / `array.init_elem` / `array.fill` /
