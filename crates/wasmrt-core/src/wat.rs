@@ -1857,6 +1857,14 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
                 }
             })
             .collect();
+        // Whether every entry is expressible as a bare function INDEX, which is all the
+        // funcidx shorthand can encode. An entry written as an atom always is; a list is only
+        // if it is exactly `(ref.func …)`.
+        let all_plain_ref_func = want_list(&items[j + pos])?[1..].iter().all(|s| {
+            s.as_atom().is_some()
+                || s.as_list()
+                    .is_some_and(|l| matches!(l.first().and_then(Sexpr::as_atom), Some("ref.func")))
+        });
         let n = entries.len() as u32;
         b.tables.push(TableDef {
             min: u64::from(n),
@@ -1876,7 +1884,14 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             // ENCODING. The funcidx shorthand (forms 0–3) denotes `funcref` and nothing
             // else, so a table of `(ref null $t)` — or of any non-`funcref` element type —
             // must use the expression family or `emit_elem_segment` refuses it outright.
-            use_exprs: elem_type != V::FUNCREF,
+            //
+            // ⚠️ **…and so must a `funcref` table whose entries are not all `ref.func`.** The
+            // shorthand can only encode function INDICES, so `(elem (ref.func $f)
+            // (ref.null func) (ref.func $g))` — valid, and in `elem.wast` — died with
+            // `BadNumber` trying to read `func` as an index. The element TYPE was the wrong
+            // question: what decides the encoding is whether every entry is expressible as an
+            // index, and `ref.null` never is.
+            use_exprs: elem_type != V::FUNCREF || !all_plain_ref_func,
         });
         b.elem_names.push(None);
         return Ok(());
@@ -5558,6 +5573,58 @@ mod tests {
             (func (param $r i32) (block $l (result i32)
               (br_on_non_null $l (local.get $r)) (unreachable))))"#)
         .is_err());
+    }
+
+    /// The funcidx **shorthand** element forms have type `(ref func)` — NON-NULL — because every
+    /// element is `(ref.func y)`, which cannot be null.
+    ///
+    /// ⚠️ The decoder defaulted them to the nullable `funcref`, which under-approximates the type
+    /// and so **refused valid modules**: such a segment could not initialise a table declared
+    /// `(ref func)`. `elem.wast` ships that module five times. 🎓 *A nullable default is the
+    /// safe-looking choice and the wrong one here* — safety in a type default is directional, and
+    /// this direction rejects rather than admits.
+    #[test]
+    fn a_funcidx_shorthand_elem_segment_is_non_null() {
+        let ok = |src: &str| {
+            let m = crate::module::decode(&asm(src).expect("assembles")).expect("decodes");
+            crate::validate::validate(&m)
+        };
+        // A non-nullable table initialised by the shorthand — valid, and was refused.
+        assert!(ok(r#"(module
+            (func)
+            (table 1 (ref func) (ref.func 0))
+            (elem (i32.const 0) func 0))"#)
+        .is_ok());
+        // The nullable table still accepts it, so this did not just swap one refusal for another.
+        assert!(ok(r#"(module
+            (func)
+            (table 1 funcref)
+            (elem (i32.const 0) func 0))"#)
+        .is_ok());
+    }
+
+    /// An inline `(table … (elem …))` picks its ENCODING from whether every entry is expressible
+    /// as a function index — not from the element type.
+    ///
+    /// ⚠️ It keyed on the type alone, so a `funcref` table whose entries include `(ref.null func)`
+    /// chose the funcidx shorthand and died with `BadNumber` trying to read `func` as an index.
+    /// **The element type was the wrong question**: `ref.null` is never an index, whatever the
+    /// table holds.
+    #[test]
+    fn an_inline_elem_uses_expressions_when_an_entry_is_not_a_function_index() {
+        // Mixed entries — must use the expression encoding.
+        assert!(asm(r#"(module (func $f) (func $g)
+            (table $t funcref (elem (ref.func $f) (ref.null func) (ref.func $g))))"#)
+        .is_ok());
+        // All-index entries still take the shorthand, which is the smaller encoding.
+        let short = asm(r#"(module (func $f) (table $t funcref (elem $f)))"#).expect("assembles");
+        let exprs = asm(r#"(module (func $f)
+            (table $t funcref (elem (ref.null func))))"#)
+        .expect("assembles");
+        assert!(
+            short.len() < exprs.len(),
+            "the funcidx shorthand must still be chosen when it can be — it is smaller"
+        );
     }
 
     #[test]

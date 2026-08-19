@@ -1520,6 +1520,15 @@ fn decode_element_section(d: &Decoder, r: &mut Reader) -> DecodeResult<Vec<Eleme
                 r.read_byte()?; // elemkind (0x00 = funcref)
             }
             funcs = read_func_vec(r)?;
+            // ⚠️ §5.5.12 with function-references: the funcidx **shorthand** forms have type
+            // `(ref func)` — NON-NULL — because every element is `(ref.func y)`, which can never
+            // be null. The default above is the nullable `funcref`, and that difference is not
+            // cosmetic: it decides whether such a segment may initialise a table declared
+            // `(ref func)`. It could not, so `(table 1 (ref func) …) (elem (i32.const 0) func 0)`
+            // — a **valid** module the spec ships five times in `elem.wast` — was refused as a
+            // TypeMismatch. *A nullable default is the safe-looking choice and the wrong one:
+            // here it under-approximates the type and rejects valid input.*
+            elem_type = ValType::FUNCREF_NN;
         } else {
             // Const-expr form. Non-flag-4 variants carry a leading reftype byte.
             if flags != 4 {
