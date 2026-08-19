@@ -140,8 +140,22 @@ against each other. **Counts are from T9g and are hypotheses about causes, not m
 | **T13-L** | legacy `delegate` | — | removes wasmrt's **last deliberate spec deviation**. ⚠️ **Enumerate what the blanket refusal is currently catching before deleting it** — over there the same `return error` was also the only thing rejecting a bare `(func (delegate 0))`, which the assembler happily emits and the spec calls malformed; removing it without adding the enclosing-frame rule converts a malformation into an accept-invalid. The three tests asserting the refusal are **tests of a DECISION and expire with it — rewrite them in place**, one of them has a security half that must survive verbatim. |
 | **T13-S** | `sqrt` is `std`-gated | 1 | the single no_std float gap (platform libm). Only if the freestanding target needs it. |
 
-**Do not fix this order now.** T13-0 exists precisely because the numbers above are estimates read off
-error messages, and every previous estimate in this project made from that source was low.
+⚠⚠ **RE-RANKED 2026-08-19 by T13-0 — the order above was WRONG, and predicting that is why T13-0 runs
+first.** *(The line here read “do not fix this order now — these are estimates read off error messages,
+and every previous estimate from that source was low.” It held.)* **Measured: 1,635 of 2,038 skips (80%)
+are `NoTarget` CASCADES** behind **216 modules that fail to build** — ~7.6 assertions per module, so the
+work-list is **216 items, not 2,038**. And the largest build-failure cause, **`BadNumber` (63 modules),
+is TABLE64**: 62 of the 63 are `table_copy64` / `memory64-imports` / `table64` / `table_*64`, the
+assembler refusing an `i64` table index type. **One feature wearing a parser error's name.**
+🎓 *A cost logged beside a defect is a hypothesis about its CAUSE* — wrong for the fifth time: the T9
+triage grouped failures by message, read “`BadNumber` 63”, and filed a **text-assembler** cluster.
+
+**Order now:** **(1) Track T — table64**, 63 build failures + ~326 direct skips, the biggest single lever
+and one coherent feature rather than six; **(2) the assembler scoring split**, ~300 assertions with **no
+feature work**, independent of every track; **(3) attribute `BadForm` (46 modules) BEFORE scheduling
+it**; then D, W, P, M, A, L. ⚠ **`BadForm` / `BadValType` / `BadModuleField` — 80 modules between them —
+remain UNATTRIBUTED, and the correct entry for that is “unknown”, not a guess.** Full breakdown in
+[testing.md](testing.md).
 
 #### 🧾 The baseline, and what "done" means
 

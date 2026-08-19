@@ -395,6 +395,79 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
+### 🔬 T13-0 COMPLETE (2026-08-19) — all 2,038 skips attributed, and the track order was WRONG
+
+**Method:** every one of the 13 skip sites in `wast.rs` rewritten to a `skip_at(line!())` probe, plus a
+probe on the module-build failure arm; corpus run; **probe reverted from a file copy taken beforehand**,
+verified byte-identical to `HEAD`, rebuilt, and the suite re-run to confirm **62,238 / 378 / 2,038** is
+unchanged. *(A backup copy, not `git checkout` — §8.1.)*
+
+#### Where the 2,038 skips actually come from
+
+| site | count | what it is |
+| --- | --- | --- |
+| `assert_return` → `NoTarget` | **1,157** | the module never built — **cascade** |
+| `assert_trap` → `NoTarget` | **427** | **cascade** |
+| `assert_invalid`/`_malformed` → `is_unsupported` | 303 | **300 are `UnknownInstr`** — mostly correct rejections banked as skips |
+| `invoke`/`get` → `NoTarget` | 51 | **cascade** |
+| unhandled command kind | 44 | |
+| module build → `is_unsupported` | 34 | the modules themselves |
+| `assert_return` sub-form | 15 | |
+| `assert_unlinkable` → `is_unsupported` | 7 | |
+
+⚠️⚠️ **1,635 of 2,038 — 80% — are `NoTarget` CASCADES.** They are not 1,635 pieces of work; they are
+the shadow of **216 modules that fail to build**. *A skip total is dominated by cascades — ask how many
+MODULES are behind it before ranking the work.* The exchange rate here is **~7.6 assertions unblocked
+per module fixed**.
+
+#### The 216 failing modules, by cause — this is the actual work-list
+
+| cause | modules |
+| --- | --- |
+| `assemble: BadNumber` | **63** |
+| `assemble: BadForm` | **46** |
+| `assemble: UnknownInstr` | 28 |
+| `assemble: BadValType` | 18 |
+| `assemble: BadModuleField` | 16 |
+| `validate: TypeMismatch` | 14 |
+| `link: unknown import` (13 distinct) | 13 |
+| `cannot link an imported Tag yet` | 5 |
+| `decode:` (3 kinds) | 8 |
+| other | 5 |
+
+#### ⚠️⚠️ The finding that re-ranks T13: `BadNumber` is **table64**, not a number bug
+
+The provisional track order in T13 was written from T9g's file-name groupings and put
+**custom-descriptors (D) first**. That is wrong. Attributing `BadNumber` by file:
+
+`table_copy64` 22 · `memory64-imports` 20 · `table64` 11 · `table_init64` 3 · `table_size64`,
+`table_set64`, `table_grow64`, `table_get64`, `table_fill64`, `table_copy_mixed`, `elem` 1 each.
+
+**62 of the 63 are the 64-bit table family.** The assembler is refusing an `i64` table index type —
+which is **Track T (table64)**, the "tables stay 32-bit" invariant T13 reverses. It is **one feature
+wearing a parser error's name.**
+
+🎓 **This is §1.1 exactly — *a cost logged beside a defect is a hypothesis about its CAUSE*, and it has
+now been wrong five times.** The T9 triage grouped failures by message, saw `BadNumber 63`, and filed it
+as a **text-assembler** cluster; the same 63 measured from the module-build side are **table64**. **The
+message named the symptom; only the module-build attribution named the cause.**
+
+#### The re-ranked order
+
+1. **Track T — table64.** 63 build failures + ~326 direct skips in the `table_*64` / `float_memory64`
+   files. **The single largest lever on the board**, and it is one coherent feature rather than six.
+2. **The assembler scoring split** — ~300 assertions, **no feature work**, independent of every track.
+   Cheapest thing on the list per unit of effort.
+3. **`BadForm` 46 modules** — not yet attributed to a feature. ⚠️ **Attribute it before scheduling it**,
+   because that is the mistake this section just caught.
+4. **Track D — custom-descriptors/`exact`** (~420 direct skips), **Track W — wide-arithmetic** (108),
+   then P / M / A / L.
+
+⚠️ **`BadForm`, `BadValType` and `BadModuleField` (80 modules between them) are still unattributed.**
+They may collapse into the same tracks the way `BadNumber` did, or they may be genuine text-format
+gaps. **Nobody knows yet, and the correct entry for that is "unknown", not a guess** — the
+last guess cost a whole track's ordering.
+
 ## 🔬 T13-0, first measurement (2026-08-19) — 300 skips are CORRECT REJECTIONS
 
 **Baseline re-measured rather than quoted**, by running the corpus: **62,238 passed / 378 failed /
