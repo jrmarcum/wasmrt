@@ -870,6 +870,24 @@ fn value_matches(got: Value, exp: &Sexpr) -> Result<bool, String> {
     let kw = l.first().and_then(Sexpr::as_atom).unwrap_or("");
     let lit = l.get(1).and_then(Sexpr::as_atom);
     match kw {
+        // `(either e1 e2 …)` — the RELAXED-SIMD expectation form. Those instructions have
+        // **implementation-defined results** (FMA fusion, NaN propagation, which operand a
+        // min/max returns for ±0 or NaN), so the suite lists every answer the spec permits and
+        // any one of them is a pass.
+        //
+        // ⚠️ This is not leniency: outside `either` the comparison stays exact, and an engine
+        // that returned something on *neither* list would still fail. Missing it cost **38
+        // assertions across five files** — `relaxed_min_max`, `relaxed_madd_nmadd`,
+        // `relaxed_laneselect`, `simd_f32x4_rounding`, `simd_f64x2_rounding` — all reported as
+        // `unsupported value literal 'either'`, which named the harness, not the engine.
+        "either" => {
+            for alt in &l[1..] {
+                if value_matches(got, alt)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
         "ref.null" => return Ok(got == NULL_REF),
         // A bare `(ref.func)` / `(ref.extern)` asserts merely non-null; with a payload it
         // is exact. The abstract GC matchers assert non-null of that kind, which the

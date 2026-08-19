@@ -5648,6 +5648,34 @@ mod tests {
         );
     }
 
+    /// NaN propagation through the rounding ops must produce an **arithmetic** NaN — quiet bit
+    /// set — so a SIGNALLING input is quieted, not passed through.
+    ///
+    /// ⚠️ `nearest` did this and `trunc`/`floor`/`ceil` did not, and since the latter two
+    /// delegate to `trunc`, **three of the four** returned the input unchanged. 28 assertions
+    /// across `f32.wast`, `f64.wast` and both `simd_*_rounding.wast`. 🎓 *The rule was written
+    /// once and applied at one of four sites* — and the one site that had it is why the code
+    /// read as if the rule were handled.
+    #[test]
+    fn the_rounding_ops_quiet_a_signalling_nan() {
+        // 0x7fa00000 is a NaN with payload 0x200000: exponent all-ones, mantissa non-zero, and
+        // the quiet bit (0x400000) CLEAR — signalling.
+        for op in ["ceil", "floor", "trunc", "nearest"] {
+            let src = format!(
+                r#"(module (func (export "f") (result i32)
+                     (i32.reinterpret_f32 (f32.{op} (f32.reinterpret_i32 (i32.const 0x7fa00000))))))"#
+            );
+            let got = crate::interp::as_i32(run(&src, "f", &[])[0]) as u32;
+            assert_eq!(
+                got & 0x0040_0000,
+                0x0040_0000,
+                "f32.{op} must quiet the NaN; got {got:#010x}"
+            );
+            // …and the payload and sign are preserved, so "quiet" did not become "canonicalise".
+            assert_eq!(got, 0x7fe0_0000, "f32.{op} must keep sign and payload");
+        }
+    }
+
     #[test]
     fn runs_i31_and_ref_test() {
         let src = r#"(module

@@ -4311,6 +4311,15 @@ fn fmax_f64(a: f64, b: f64) -> f64 {
 }
 
 fn trunc_f32(x: f32) -> f32 {
+    // ⚠⚠ NaN propagation must produce an **arithmetic** NaN — the quiet bit set — so a
+    // SIGNALLING input is quieted rather than passed through. `nearest_f32` already did this;
+    // `trunc` did not, and `floor`/`ceil` delegate here, so **three of the four rounding ops**
+    // returned the input NaN unchanged. Worth 28 assertions across `f32.wast`, `f64.wast` and
+    // both `simd_*_rounding.wast` files. *The rule was written once and applied at one of four
+    // sites* — fixing it HERE is what makes floor and ceil inherit it.
+    if x.is_nan() {
+        return f32::from_bits(x.to_bits() | 0x0040_0000);
+    }
     let bits = x.to_bits();
     let exp = ((bits >> 23) & 0xff) as i32 - 127;
     if exp < 0 {
@@ -4323,6 +4332,10 @@ fn trunc_f32(x: f32) -> f32 {
     f32::from_bits(bits & !mask)
 }
 fn trunc_f64(x: f64) -> f64 {
+    // See `trunc_f32`: a signalling NaN is quieted, and `floor_f64`/`ceil_f64` inherit it.
+    if x.is_nan() {
+        return f64::from_bits(x.to_bits() | 0x0008_0000_0000_0000);
+    }
     let bits = x.to_bits();
     let exp = ((bits >> 52) & 0x7ff) as i64 - 1023;
     if exp < 0 {
