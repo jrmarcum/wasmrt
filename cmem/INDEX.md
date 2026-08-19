@@ -674,6 +674,52 @@ When the owner says **"update the project memory"** (or a synonym — "update me
 4. **Commit and push** — the repo is synced to `origin` (github.com/jrmarcum/wasmrt); keep the portable
    memory current on GitHub.
 
+### 🤝 The "**coordinate**" trigger (binding on every agent) — *added by the owner 2026-08-19*
+
+When the owner says **"coordinate"** — the one-word order — synchronise this project with the sibling
+runtime (`wazmrt`) through [`interop.md`](interop.md), the swappability contract. Do all of the
+following, **in this order**:
+
+1. **Read `interop.md` first.** It is the **only** document either project may treat as binding on the
+   other, and its CONTRACT VERSION is the thing being coordinated.
+2. **Byte-compare the two copies** — `wasmrt/cmem/interop.md` against `wazmrt/cmem/interop.md`.
+   ⚠️ **Any difference means the contract is UNKNOWN, not "close enough."** Reconcile it before acting
+   on a single row; a contract that exists twice and disagrees is worse than no contract, because both
+   sides believe they are compliant.
+3. **Verify the rows you are about to act on — by RUNNING both, not by reading either.** *When a claim
+   will leave this repo, verify it against the artifact, not against something that talks about the
+   artifact* (`best-practices.md` §3A.2 — three read-not-verify errors in one session over there, one of
+   which arrived here as advice naming a field that does not exist). A row marked ⬜ UNVERIFIED **may
+   not be quoted** as if it were agreed.
+4. 🔒 **Respect the scope, both halves of it.** Coordination covers only `interop.md` §0's IN-scope
+   surfaces — **the CLI options and the security checks**. It does **not** reopen the oracle: reading
+   the other project to *verify a contract row* is allowed and expected; reading it to **adopt a
+   design** is not, and **performance and size are explicitly out** — those are what the two are
+   competing on, so a contract row must never be justified by "the other one is faster."
+5. **Record what you found, in the contract, with its date and its evidence.** Change a row's status
+   only with the check that earned it. **Bump the CONTRACT VERSION for any row change**, add a
+   `## 6. Change log` entry, and **land the identical file in BOTH repos in the same change** — the
+   version is the pin that makes drift detectable, and it is worthless if one side moves alone.
+6. **A disagreement is an OBSERVATION until its cause is traced.** Neither runtime is the oracle, so
+   *"the other one does X"* is not a diagnosis. Record it, then trace it.
+7. **Commit and push** this repo's copy (per the "update the project memory" trigger). Place the
+   sibling's copy for its own session and **say plainly that it is unlanded** — do not commit into
+   the other repo's history without the owner asking.
+
+⚠️ **THE INVERSE IS ALSO BINDING, AND IT IS THE HALF THAT GETS SKIPPED.** *Neither project edits the
+contract unilaterally* — so **coordinate BEFORE shipping a change to a contract surface, not after**.
+The surfaces that trigger it without the owner having to say the word:
+
+- **any CLI option** — a new flag, a renamed one, a changed argument shape, a changed default;
+- **any security check** — the pin/verification mechanism, the pin DB path or format, the WASI rights
+  masks, `--dir`/`--ro-dir` semantics;
+- **any resource ceiling** — its value, its default, or the addition of a new one;
+- **exit codes** for any failure kind.
+
+A change shipped to one of those without coordinating is **how the two stop being swappable**, and it
+will not announce itself: the `--dir` separator has been divergent since both were written, does not
+error, and quietly preopens the wrong directory.
+
 ### The "evaluate a reference project" trigger (binding on every agent)
 
 Before incorporating or adapting code from any reference runtime (see [reference-projects.md](reference-projects.md)),

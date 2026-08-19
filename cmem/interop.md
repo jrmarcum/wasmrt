@@ -1,6 +1,6 @@
 # interop.md — the **wasmrt ⇄ wazmrt swappability contract**
 
-**CONTRACT VERSION: 2** · opened 2026-08-19 (owner) · last change 2026-08-19 · **this file is IDENTICAL
+**CONTRACT VERSION: 4** · opened 2026-08-19 (owner) · last change 2026-08-19 · **this file is IDENTICAL
 in both repos** (`wasmrt/cmem/interop.md` and `wazmrt/cmem/interop.md`).
 
 > *"I think this may require a common memory md file in both projects to confer with each other on from
@@ -39,6 +39,22 @@ security checks are the same they are also swappable."*
 
 ## 1. The change protocol — read this before editing
 
+🤝 **The one-word order is "coordinate" (owner, 2026-08-19), and it is a BINDING TRIGGER in both
+projects' `INDEX.md`.** Saying it means: run the procedure below and in that trigger — read this file
+first, byte-compare the two copies, verify rows by **running** both rather than reading either, record
+status + date + evidence, bump the CONTRACT VERSION, and land the identical file in **both** repos in
+the same change. ⚠️ **It also binds in the inverse direction, which is the half that gets skipped:
+coordinate BEFORE shipping a change to a contract surface** — any CLI option, any security check, any
+resource ceiling, any exit code — **not after**.
+
+🔒 **THE EDITING BOUNDARY.** **This file is the ONLY thing either project may write into the other's
+tree.** The sibling's own `cmem/`, source and tests stay theirs. And within that one permission:
+⚠️⚠️ **READ THE OTHER COPY BEFORE OVERWRITING IT — it may hold in-flight work that is not in git**, and
+in both repos this file starts life **untracked**, so a blind copy is unrecoverable. **Reconcile, then
+write; never `cp` over a copy you have not just read.** *(Both halves were paid for on 2026-08-19 — see
+change-log row 3b. The rule itself is wazmrt's, from the §0.5 the collision destroyed.)*
+
+
 1. **Neither project edits this file unilaterally.** A change is *proposed* in one repo and lands in
    **both**, in the same **CONTRACT VERSION** bump, before either ships behaviour that depends on it.
 2. **Every row carries a status and a date.** ✅ AGREED (with the evidence that verified it) ·
@@ -59,6 +75,19 @@ a version mismatch between the copies as **the contract being unknown**, not as 
 ---
 
 ## 2. The CLI contract
+
+🔒 **SETTLED 2026-08-19 (owner) — RESTORED 2026-08-19 after a concurrent-edit collision dropped it.**
+**The two executables keep their own names — `wasmrt` and `wazmrt` — and that is the ONLY permitted
+difference. Everything after the program name must be in sync.**
+
+> *"The program will each be named separately wasmrt/wazmrt. That does not change. It is the CLI options
+> that need to be in sync."*
+
+**So there is nothing to decide about who adopts whose spelling — both adopt both.** The working test of
+this whole section: **take any invocation, change only the program name, and it must do the same thing
+under the other runtime.** That is what makes the tables below a specification rather than a survey, and
+it is why §2.1's run modes are in scope alongside §2.2's flags — a command line is not portable if only
+its flags are.
 
 ### 2.1 Run modes
 
@@ -229,9 +258,9 @@ come from root.
 | max linear memory | **`1 << 30`** (1 GiB) | ✅ **AGREED** — verified in both, 2026-08-19 |
 | max table elements | **`1 << 27`** (128 M) | ✅ **AGREED** — verified in both, 2026-08-19 |
 | max call depth | **512** | ✅ **AGREED** — verified in both, 2026-08-19 |
-| an execution bound (non-termination) | **`1 << 30` iterations** per top-level call | ⚠️⚠️ **DIVERGENT AND LIVE — wazmrt shipped it 2026-08-19, wasmrt has nothing. See §3.7.1.** |
+| an execution bound (non-termination) | **`1 << 30` iterations** per top-level call | ⚠️⚠️ **DIVERGENT AND LIVE — wazmrt shipped it 2026-08-19, wasmrt has nothing. See §3.7a.** |
 
-### 3.7.1 The execution bound — ⚠️ **DIVERGENT AND LIVE, and the UNIT matters more than the number**
+### 3.7a The execution bound — ⚠️ **DIVERGENT AND LIVE, and the UNIT matters more than the number**
 
 🔒 **Owner decision, 2026-08-19** (this resolves §5 decision #3): *"We do not want an infinite loop on
 purpose or by accident by the user. We need an internal check mechanism if this occurs and an error
@@ -295,6 +324,25 @@ and default, and the differential table above is re-run with both trapping. **Un
 that swaps wasmrt in loses the protection silently** — there is no error, the workload simply never
 returns. *(Same failure shape as the pin-DB path risk in §3.3: a swap that disarms without saying so.)*
 
+#### Where each side tracks the work
+
+| project | item | state |
+| --- | --- | --- |
+| **wazmrt** | Track **H3** (hardening, ships as `1.0.1`) | ✅ **built 2026-08-19** — `--max-iterations`, `IterationLimitExceeded`, 4 tests covering both shapes + the no-false-positive and refill directions; corpus descent measured; cost exe +1,024 B / lib +512 B / **dll +0** |
+| **wasmrt** | **T9i** (ships as `1.0.1`) | ✅ decided, `[ ]` not yet built — owner: *"3 has already been decided in the wazmrt project, just follow their lead"* |
+
+✅ **The two designs were written independently and agree** — `u64::MAX` filled at refill for
+"unlimited", the two `0` conventions, the trap excluded from the `.wast` runner's spec-trap predicate,
+the refill/re-entry rule, and the message wording. That agreement is *evidence the contract is
+specific enough to build from*, which is the only thing this file is for.
+
+⚠️ **One thing wasmrt's plan adds that wazmrt did not do, and it is a real gap on wazmrt's side:**
+T9i requires **A/B/A throughput benchmarking** around the change, because wasmrt has a recorded case
+(T9a#7) of threading state through the same interpreter loop costing **3.6%**. wazmrt measured only
+SIZE (+1,024 B exe, +512 B lib, +0 dll) and did **not** measure steady-state throughput. 🚦 **wazmrt
+owes that measurement** — it belongs to Track O's baselines either way, and until it exists neither
+project can say the bound is free, only that it is small.
+
 ---
 
 ## 4. The differential checks that keep this honest
@@ -310,8 +358,8 @@ decays exactly like any other claim.
 | 3 | **run the same pin DB + the same module under both**, across all nine `decide()` rows | a policy that is honoured *differently*, which is worse than not being honoured |
 | 4 | **row-by-row diff of the WASI rights tables** (§3.6) | the original finding that opened this file: a right present in one and absent in the other, where the read-only test passes trivially because the right is not in the mask |
 | 5 | **the same CLI invocation under both**, for every row of §2 | the `--dir` separator class — a flag that does not error and does the wrong thing |
-| 6 | **run a non-terminating module under both, under a timeout** — one `.wasm` containing `(loop (br 0))` **and** `(func $f (return_call $f))`, both shapes, both runtimes, low `--max-iterations` | §3.7.1. ⚠️ **Must be run under a timeout and must assert the EXIT, not the output**: the failing side produces no output at all, so a check that greps stdout passes vacuously against a hung process. The two shapes are separate cases on purpose — a back-edge-only implementation passes the first and hangs on the second |
-| 7 | **the same module at a budget just under and just over its true cost**, both runtimes | that both count the SAME UNIT (§3.7.1). Equal defaults with different units disagree only near the ceiling, which is exactly where nobody looks |
+| 6 | **run a non-terminating module under both, under a timeout** — one `.wasm` containing `(loop (br 0))` **and** `(func $f (return_call $f))`, both shapes, both runtimes, low `--max-iterations` | §3.7a. ⚠️ **Must be run under a timeout and must assert the EXIT, not the output**: the failing side produces no output at all, so a check that greps stdout passes vacuously against a hung process. The two shapes are separate cases on purpose — a back-edge-only implementation passes the first and hangs on the second |
+| 7 | **the same module at a budget just under and just over its true cost**, both runtimes | that both count the SAME UNIT (§3.7a). Equal defaults with different units disagree only near the ceiling, which is exactly where nobody looks |
 
 ⚠️ **A disagreement found by any of these is recorded as an OBSERVATION until its cause is traced.**
 Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
@@ -324,8 +372,8 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 | --- | --- | --- |
 | 1 | **The shared pin DB path** (§3.3) | until it is decided, a swap can silently disarm verification |
 | 2 | **Who accepts whose CLI spelling, and by when** (§2.1) | the additive plan needs both halves; `wasmrt wat` and `wazmrt pin` each exist on one side only |
-| ~~3~~ | ~~**Fuel / execution bound** (§3.7)~~ | ✅ **DECIDED by the owner 2026-08-19** — a bound is wanted, with an error message and a break. Design agreed in **§3.7.1**. ⚠️ **The decision is closed; the DIVERGENCE is open**: wazmrt ships it, wasmrt does not, and the predicted failure ("a workload that completes under one hangs under the other") is **verified live**, not hypothetical |
-| 5 | **When does wasmrt land the execution bound** (§3.7.1) | until it does, swapping wasmrt in **silently removes** the protection — no error, the workload just never returns |
+| ~~3~~ | ~~**Fuel / execution bound** (§3.7)~~ | ✅ **DECIDED by the owner 2026-08-19** — a bound is wanted, with an error message and a break. Design agreed in **§3.7a**. ⚠️ **The decision is closed; the DIVERGENCE is open**: wazmrt ships it, wasmrt does not, and the predicted failure ("a workload that completes under one hangs under the other") is **verified live**, not hypothetical |
+| 5 | **When does wasmrt land the execution bound** (§3.7a) | until it does, swapping wasmrt in **silently removes** the protection — no error, the workload just never returns |
 | 4 | **Exit-code table** (§2.3) | only needed if scripts are expected to branch on specific codes |
 
 ---
@@ -335,4 +383,7 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 | version | date | change |
 | --- | --- | --- |
 | **1** | 2026-08-19 | Opened. Scope set by the owner (CLI options + security checks; C ABI explicitly out). Recorded: the `--dir` separator break and the bare-path-executes consequence, both live today; the pin DB path risk; the nine-row `decide()` matrix; the ceiling defaults, verified equal in both; the WASI rights rows already agreed. |
-| **2** | 2026-08-19 | **The execution bound (§3.7.1).** Owner decided a bound is wanted; §5 decision #3 closes. wazmrt shipped `--max-iterations` + `IterationLimitExceeded` (default `1<<30`) in its Track H3 — ⚠️ **before this file carried it, which §1 rule 1 forbids; recorded as a process breach rather than tidied away.** New rows: the flag in §2.2; the agreed design in §3.7.1, whose load-bearing clause is **the UNIT** (one loop back-edge **or** one tail-call hop) — equal defaults with different units are not swappable; differential checks 6 and 7. **Verified by running both on the same wasmrt-assembled bytes: wazmrt traps on both shapes, wasmrt hangs on both.** Status ⚠️ DIVERGENT AND LIVE until wasmrt lands it. |
+| **4** | 2026-08-19 | 🔒 **The EDITING BOUNDARY added to §1** (reconstructed from row 3’s description, since the §0.5 it named was destroyed): this file is the only thing either project may write into the other’s tree, and ⚠⚠ **read the other copy before overwriting it** — it starts untracked in both repos, so a blind copy is unrecoverable. §2’s owner ruling restored. The duplicate row-3 entries reconciled into 3 + 3b. |
+| **3b** | 2026-08-19 | ⚠️⚠️ **A CONCURRENT-EDIT COLLISION, recorded rather than tidied away — the drift hazard §1 predicts, arriving on day one.** Both projects edited this file at once. wazmrt's §3.7a rewrite (better than what it replaced: it had *built* the feature and found that **the UNIT matters more than the number**) landed in wasmrt's tree mid-session and was committed there without being noticed; in the other direction, wasmrt `cp`-ed its copy over wazmrt's **untracked** working copy without checking it first, destroying wazmrt's in-flight **§0.5** — which row 3 below still references and which is **NOT PRESENT in either copy**. 🚩 **wazmrt must restore §0.5 from its own context; nobody else has it.** Restored here: the §2 owner ruling, dropped in the same collision. **Two lessons, both already in the rulebooks:** *a version is a pin, not a lock — it makes drift detectable, it does not prevent a simultaneous write*, and **check before you overwrite**, which is exactly the editing boundary row 3 was adding. |
+| **3** | 2026-08-19 | 🔑 **`coordinate` — the one-word binding order (§0.5), owner.** One word from the owner now obliges the full cross-project protocol: byte-compare both copies, read the sibling's **uncommitted** in-flight work, diff shipped behaviour against every in-scope row, **verify by RUNNING both on the same bytes**, land changes in both copies with a version bump, and report divergences with reopen conditions. Carries **the editing boundary** — this file is the only thing either project may write into the other's tree, and the sibling's own `cmem/` stays theirs. |
+| **2** | 2026-08-19 | **The execution bound (§3.7a).** Owner decided a bound is wanted; §5 decision #3 closes. wazmrt shipped `--max-iterations` + `IterationLimitExceeded` (default `1<<30`) in its Track H3 — ⚠️ **before this file carried it, which §1 rule 1 forbids; recorded as a process breach rather than tidied away.** New rows: the flag in §2.2; the agreed design in §3.7a, whose load-bearing clause is **the UNIT** (one loop back-edge **or** one tail-call hop) — equal defaults with different units are not swappable; differential checks 6 and 7. **Verified by running both on the same wasmrt-assembled bytes: wazmrt traps on both shapes, wasmrt hangs on both.** Status ⚠️ DIVERGENT AND LIVE until wasmrt lands it. |

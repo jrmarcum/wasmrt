@@ -220,6 +220,23 @@ Detailed engineering reference (the wazmrt deep-read maps) is in [`docs/port/`](
 ⚠️ **`docs/port/wasmrt.h.draft` is HISTORICAL** — four of its shapes never matched the code. The
 finalized C ABI is [`crates/wasmrt-capi/include/wasmrt.h`](crates/wasmrt-capi/include/wasmrt.h).
 
+## 🤝 "**coordinate**" = sync with `wazmrt` through the contract (owner, 2026-08-19)
+
+**One word, binding.** When the owner says **"coordinate"**, synchronise this project with the sibling
+runtime through [`cmem/interop.md`](cmem/interop.md) — the swappability contract, identical in both
+repos. Read it first; **byte-compare the two copies** (a difference means the contract is *unknown*, not
+"close enough"); **verify rows by RUNNING both, never by reading either**; record status + date +
+evidence; **bump the CONTRACT VERSION and land the identical file in BOTH repos in the same change**;
+and treat a disagreement as an **observation until its cause is traced** — neither runtime is the
+oracle. 🔒 Scope is **the CLI options and the security checks only**; this does *not* reopen the oracle
+for design, and **performance/size are explicitly out** — that is the contest.
+
+⚠️ **The inverse binds too, and it is the half that gets skipped: coordinate BEFORE shipping a change
+to a contract surface, not after** — any CLI option, any security check (pin, WASI rights,
+`--dir`/`--ro-dir`), any resource ceiling, any exit code. A change shipped without coordinating is how
+the two stop being swappable, and it will not announce itself. The full procedure is the binding trigger
+in [`cmem/INDEX.md`](cmem/INDEX.md).
+
 ## "Update the project memory" = update `cmem/`
 
 When asked to record/remember anything for the project, fold it into the matching `cmem/` file(s) and
