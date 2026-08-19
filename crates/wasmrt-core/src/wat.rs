@@ -817,9 +817,28 @@ struct Sig {
 
 /// Intern a signature, returning its type index. An identical existing entry is reused, so
 /// inline `(param …)(result …)` annotations don't bloat the type section.
-fn intern_sig(types: &mut Vec<TypeDef>, sig: Sig) -> u32 {
+/// Reuse an existing type with this signature, or append one — the implicit type use of
+/// `(func …)` / `(call_indirect (param …))` and friends.
+///
+/// ⚠⚠ **A type inside an explicit `(rec …)` group is NEVER reused.** Rec-group membership is
+/// part of a type’s IDENTITY, so a standalone `(func)` and the `(func)` inside
+/// `(rec (type $ft (func)) (type (func)))` are **different types** even though they spell the
+/// same shape. Reusing `$ft` for an implicit use silently gave a function the rec-group type,
+/// which made `(global (ref $ft) (ref.func $f))` — an `assert_invalid` — VALID.
+///
+/// 🎓 The assembler was changing what the module MEANS, not just how it was spelled: the text
+/// says “`$f` has its own implicit type” and the encoder said “reuse `$ft`”. Same mechanism as
+/// T10a’s emitter defects, one level up — and the reason `is_subtype` could not catch it is that
+/// by the time it ran, the two really were one type.
+fn intern_sig_outside_rec(types: &mut Vec<TypeDef>, rec_groups: &[(u32, u32)], sig: Sig) -> u32 {
     let want = TypeDef::Func(sig);
-    if let Some(i) = types.iter().position(|t| *t == want) {
+    let in_group =
+        |i: u32| rec_groups.iter().any(|&(s, n)| i >= s && i < s.saturating_add(n));
+    if let Some(i) = types
+        .iter()
+        .position(|t| *t == want)
+        .filter(|&i| !in_group(i as u32))
+    {
         return i as u32;
     }
     types.push(want);
@@ -1146,7 +1165,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
             Some(ti) => ti,
             None => {
                 let sig = b.funcs[i].sig.clone();
-                intern_sig(&mut b.types, sig)
+                intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig)
             }
         };
         func_sigs.push(ti);
@@ -1656,7 +1675,7 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     }
 
     if let Some(r) = import {
-        let ti = type_ref.unwrap_or_else(|| intern_sig(&mut b.types, sig));
+        let ti = type_ref.unwrap_or_else(|| intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig));
         b.func_imports.push(ImportedFunc { r, type_index: ti });
         b.import_order.push(ImportKind::Func);
     } else {
@@ -1996,7 +2015,7 @@ fn parse_tag_type(items: &[Sexpr], b: &mut ModuleBuild) -> Result<u32> {
             _ => {}
         }
     }
-    Ok(type_ref.unwrap_or_else(|| intern_sig(&mut b.types, sig)))
+    Ok(type_ref.unwrap_or_else(|| intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig)))
 }
 
 fn parse_tag_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
@@ -2545,6 +2564,9 @@ const MAX_CTRL_DEPTH: usize = 1024;
 struct Ctx<'a> {
     out: Vec<u8>,
     types: &'a mut Vec<TypeDef>,
+    /// The explicit `(rec …)` groups, as (start, len) — needed because an implicit type use
+    /// may never reuse a type that lives inside one (see `intern_sig_outside_rec`).
+    rec_groups: &'a [(u32, u32)],
     type_names: &'a [Option<String>],
     /// Per-type struct field names, so `struct.get $T $field` resolves by name.
     field_names: &'a [Vec<Option<String>>],
@@ -2592,6 +2614,7 @@ macro_rules! ctx_for {
         Ctx {
             out: $out,
             types: &mut $b.types,
+            rec_groups: &$b.rec_groups,
             type_names: &$b.type_names,
             field_names: &$b.field_names,
             func_names: &$b.func_names,
@@ -2891,7 +2914,7 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool, op
     let (type_ref, sig) = parse_type_use(ctx, l, &mut j)?;
     // An inline signature interns into the shared type table — bodies are encoded before
     // any section is written, so appending here is safe.
-    let ti = type_ref.unwrap_or_else(|| intern_sig(ctx.types, sig));
+    let ti = type_ref.unwrap_or_else(|| intern_sig_outside_rec(ctx.types, ctx.rec_groups, sig));
     if folded {
         for k in j..l.len() {
             emit_one(ctx, l, k)?;
@@ -4328,7 +4351,7 @@ fn parse_block_type(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<Blo
     }
     // Anything richer (params, or multiple results) needs a real type index. Interning is
     // safe because bodies are encoded before the type section is written.
-    Ok(BlockTy::TypeIndex(intern_sig(ctx.types, sig)))
+    Ok(BlockTy::TypeIndex(intern_sig_outside_rec(ctx.types, ctx.rec_groups, sig)))
 }
 
 fn emit_block_type(ctx: &mut Ctx, bt: BlockTy) -> Result<()> {
@@ -5824,6 +5847,37 @@ mod tests {
         assert!(asm(r#"(module (global $g i32 (i32.const 0))
             (func (param $g i32) (drop (local.get $g))))"#)
         .is_ok());
+    }
+
+    /// An **implicit** type use may never reuse a type that lives inside an explicit
+    /// `(rec …)` group — rec-group membership is part of a type's IDENTITY.
+    ///
+    /// ⚠️ It did until 2026-08-19, so `(func $f)` beside `(rec (type $ft (func)) (type (func)))`
+    /// silently got type `$ft`, and `(global (ref $ft) (ref.func $f))` — an `assert_invalid` —
+    /// became VALID. 🎓 **The assembler was changing what the module MEANS**: the text says "$f
+    /// has its own implicit type", the encoder said "reuse $ft". `is_subtype` could not catch it
+    /// because by the time it ran the two really were one type.
+    #[test]
+    fn an_implicit_type_use_never_reuses_a_rec_group_member() {
+        // `$ft` is inside a rec group, so `$f`'s implicit `(func)` must be a NEW type — leaving
+        // the module invalid, which is what the suite asserts.
+        let src = r#"(module
+            (rec (type $ft (func)) (type (func)))
+            (func $f)
+            (global (ref $ft) (ref.func $f)))"#;
+        let m = crate::module::decode(&asm(src).expect("assembles")).expect("decodes");
+        assert!(
+            crate::validate::validate(&m).is_err(),
+            "$f's implicit type must not be $ft — rec-group membership is identity"
+        );
+        // ⚠️ The mirror: OUTSIDE a rec group, reuse is still correct and still happens, or every
+        // implicit use would append a duplicate type and the encoding would grow.
+        let plain = r#"(module (type $ft (func)) (func $f) (global (ref $ft) (ref.func $f)))"#;
+        let m = crate::module::decode(&asm(plain).expect("assembles")).expect("decodes");
+        assert!(
+            crate::validate::validate(&m).is_ok(),
+            "a standalone type must still be reused by an implicit use"
+        );
     }
 
     #[test]
