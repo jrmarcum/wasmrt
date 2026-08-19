@@ -1033,16 +1033,20 @@ pub fn assemble(src: &[u8]) -> Result<Vec<u8>> {
 /// # Errors
 /// Returns an [`Error`] describing the first problem found.
 pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
-    // `(module binary "…" …)` — the strings ARE the module, verbatim.
-    if module.len() >= 2 && eq_atom(&module[1], "binary") {
+    // Skip the optional module `$name`. ⚠️ Computed BEFORE the `binary` check, because
+    // `(module $M binary "…")` is legal and the name sits between the two — checking
+    // `module[1]` for `binary` missed the named form and fell through to the field parser,
+    // which reported `BadModuleField` about the word `binary`.
+    let start = usize::from(module.len() > 1 && is_id(&module[1])) + 1;
+
+    // `(module $name? binary "…" …)` — the strings ARE the module, verbatim.
+    if module.get(start).is_some_and(|s| eq_atom(s, "binary")) {
         let mut out = Vec::new();
-        for s in &module[2..] {
+        for s in &module[start + 1..] {
             out.extend_from_slice(want_str(s)?);
         }
         return Ok(out);
     }
-    // Skip the optional module `$name`.
-    let start = usize::from(module.len() > 1 && is_id(&module[1])) + 1;
     let fields = module.get(start..).unwrap_or(&[]);
 
     let mut b = ModuleBuild::default();
@@ -5624,6 +5628,23 @@ mod tests {
         assert!(
             short.len() < exprs.len(),
             "the funcidx shorthand must still be chosen when it can be — it is smaller"
+        );
+    }
+
+    /// `(module $name binary "…")` — a **named** binary module.
+    ///
+    /// ⚠️ The `binary` keyword was looked for at `module[1]`, which is where the optional `$name`
+    /// sits, so the named form fell through to the field parser and reported `BadModuleField`
+    /// about the word `binary`. The name is now skipped first, exactly as the text form does.
+    #[test]
+    fn a_binary_module_may_carry_a_name() {
+        let bare = asm(r#"(module binary "\00asm\01\00\00\00")"#).expect("bare binary module");
+        let named = asm(r#"(module $M binary "\00asm\01\00\00\00")"#).expect("named binary module");
+        assert_eq!(bare, named, "the name is not part of the module bytes");
+        // The multi-string spelling too, which is how the suite usually writes it.
+        assert_eq!(
+            asm(r#"(module $M binary "\00asm" "\01\00\00\00")"#).expect("split strings"),
+            bare
         );
     }
 

@@ -1533,6 +1533,16 @@ fn decode_element_section(d: &Decoder, r: &mut Reader) -> DecodeResult<Vec<Eleme
             // Const-expr form. Non-flag-4 variants carry a leading reftype byte.
             if flags != 4 {
                 elem_type = read_val_type(r, &d.type_kinds)?;
+                // ⚠️ §5.5.12 spells this field **reftype**, not valtype — so `\7f` (i32) here is
+                // MALFORMED, and the suite says so ("malformed reference type"). Reading it as a
+                // valtype accepted the module and left the complaint to the validator, which
+                // reported a `TypeMismatch` at a completely different stage. **Rejection STAGE is
+                // part of correctness** (§3.6): `assert_malformed` is not satisfied by an
+                // `assert_invalid`-shaped answer, and a caller told "invalid" reasonably concludes
+                // the bytes were well-formed.
+                if !elem_type.is_ref() {
+                    return Err(DecodeError::BadValType);
+                }
             }
             exprs = read_expr_vec(r)?;
         }
@@ -1663,6 +1673,23 @@ mod tests {
         let mut v = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
         v.extend_from_slice(rest);
         v
+    }
+
+    /// §5.5.12 spells an element segment's explicit type field **reftype**, not valtype — so a
+    /// numeric type byte there is MALFORMED, and must be refused at DECODE.
+    ///
+    /// ⚠️ It was read as a valtype, so the module decoded and the complaint fell to the
+    /// validator as a `TypeMismatch` — a different stage, and one that tells a caller the bytes
+    /// were well-formed when they were not. **Rejection stage is part of correctness.**
+    #[test]
+    fn an_element_segments_type_field_must_be_a_reference_type() {
+        // Element section, flags 5 (passive, const-expr form with an explicit type), then the
+        // type byte, then one `ref.func 0` expression.
+        let elem = |ty: u8| m(&[0x09, 0x07, 0x01, 0x05, ty, 0x01, 0xd2, 0x00, 0x0b]);
+        // `0x7f` is i32 — not a reference type.
+        assert_eq!(decode(&elem(0x7f)), Err(crate::types::DecodeError::BadValType));
+        // `0x70` is funcref, and must still decode — so this did not just start refusing the field.
+        assert!(decode(&elem(0x70)).is_ok());
     }
 
     // --- §5.5.2 section structure: order, uniqueness, declared size (2026-08-08) ---
