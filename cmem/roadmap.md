@@ -55,7 +55,23 @@ completeness, and completeness is the stated goal — but it means **every track
 checkpoint, not just an assertion count**, and every proposal ships **with a feature gate on the same
 day** (see T13-F).
 
-#### 🔬 T13-0 — SCORE AND INSTRUMENT FIRST. Nothing else starts until this lands. `[ ]`
+#### 🔬 T13-0 — SCORE AND INSTRUMENT FIRST. Nothing else starts until this lands. `[◐]`
+
+  ✅ **FIRST RUN DONE 2026-08-19 — and it found ~300 assertions of pure scoring, exactly as predicted.**
+  Full write-up in [testing.md](testing.md). Baseline **re-measured, not quoted**: 62,238 / 378 / 2,038
+  of 62,616, 284 files, **0 unparseable**. Instrumented the `assert_invalid`/`assert_malformed` skip
+  site, ran all 284 files, reverted the probe **by hand** (§8.1 — not `git checkout`). Result: **303
+  skips at that site, 300 of them `UnknownInstr`.** 🎯 `load.wast` alone is 13 of them, asserting that
+  `f32.load32` / `i32.load32` / `i32.load64` are malformed — ⚠️ **none of those is an instruction in any
+  proposal**, so being unknown IS the malformation, wasmrt answers correctly, and scores a **skip**.
+  ⚠⚠ **The fix is in the ASSEMBLER, never in the scoring table** — deleting `UnknownInstr` from
+  `is_unsupported()` would bank real assembler gaps as passes, and a false pass is **the one direction
+  that cannot be noticed afterwards**. ✅ wasmrt only became eligible for the split on **2026-08-14**,
+  because “exists in no proposal” is undecidable until every in-scope proposal is implemented (T9f).
+  ⚠ **303 of 2,038 — ONE site of SEVENTEEN.** `br_on_cast.wast` (27 skips) and `try_table.wast` (47)
+  produced **zero** here and are files for features wasmrt fully implements, so the rest is a different
+  population. **Do not extrapolate; instrument the remaining sites before ranking the tracks.**
+
 
 **This is the single highest-value item and it implements nothing.** In the other runtime this phase
 alone converted **292 skips into passes** and reclassified **14 of 104 "failures"** — before a line of
@@ -1750,6 +1766,26 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   ⚠️ **it is the only kind of task that pulls external dependencies into a project whose stated invariant
   is zero of them.** Schedule it when a NUMBER is wanted; do not let it sit in the fix queue making that
   queue look permanently non-empty.
+
+  ### 🏁 NOTATION: T11 holds an ISSUE and a BAKE-OFF, and they do not share a queue
+
+  🔒 **Owner, 2026-08-19 — make the distinction visible** (`best-practices.md` §8.3). **An ISSUE changes
+  the code and CLOSES; a BAKE-OFF measures against something else and NEVER closes**, because rivals
+  ship and corpora grow, so its residuals regenerate by construction.
+
+  | T11 item | kind | notation |
+  | --- | --- | --- |
+  | the optimization review itself (dispatch shape, allocation churn, LTO/`opt-level`, C-ABI marshalling) | **ISSUE** — a fix task | `[ ]` → `[x]`, closes |
+  | the ~5% steady-state regression | **ISSUE** — bisect it and close it | `[ ]` → `[x]`, closes |
+  | measuring the **rlib** `rsxtk` links | **ISSUE** once (it has never been measured) then a 🏁 row | first run closes; the number thereafter is dated |
+  | **same-machine comparison vs wasm3 / WAMR / wazmrt** | 🏁 **BAKE-OFF** | **never a checkbox** — *“measured `<date>`: X, config Y”* |
+
+  ⚠⚠ **Never mark a bake-off ✅ DONE**, and never let it sit in the fix queue — parked there it reads as
+  permanent unfinished work and devalues every real `[ ]` beside it. ⚠ It is also **the only T11 item
+  that may reach outside this repo** (rival binaries, foreign harnesses, other trees), which matters in a
+  project whose invariant is zero third-party dependencies: **nothing it needs may leak into a shipped
+  artifact.** 🎓 **A comparison is evidence, never a target** — no invariant or design choice may be
+  justified by *“the other one is faster”*.
 
   ### 📌 A competitor has already published head-to-head numbers — treat them as a PROMPT, not a result
 

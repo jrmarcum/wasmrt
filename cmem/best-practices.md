@@ -869,3 +869,46 @@ preserved the rest of the pass.
 When a measurement moves the wrong way, say so and say by how much. When a number is inside the noise,
 say "unchanged", not "improved". When an earlier note is superseded by a better measurement — the
 "residual: 1 assertion" that turned out to be ~40 — record the correction where the old number lived.
+
+
+### 8.3 🏁 "BAKE OFF" vs. "ISSUE" — a NOTATION rule, because the two are different kinds of work
+
+🔒 **Owner, 2026-08-19: make the distinction visible in the notation.** The two look alike in a task
+list and behave nothing alike, and mixing them makes the fix queue look permanently non-empty.
+
+| | **ISSUE** — a fix task | **BAKE-OFF** — a compare task |
+| --- | --- | --- |
+| what it does | **changes the code** | **measures it against something else** |
+| notation | `[ ]` → `[x]`, an entry in `known-issues.md` | 🏁 **never a checkbox**; a dated row in a measurements table |
+| when it is scheduled | when a **gap** is found | when a **number** is wanted |
+| what "done" means | ✅ **closed** — the defect is gone | ⚠️ **there is no done.** It is *measured on a date*, and the measurement decays |
+| how it is reported | fixed / open / won't-fix, with a reason | **value + date + configuration**, never a checkmark |
+| external dependencies | must not need any | ⚠️ **the only kind that legitimately pulls rivals, other trees and foreign harnesses in** |
+
+**The rules that follow from it:**
+
+1. ⚠️ **NEVER put a compare task in the fix queue.** *A compare task can never be finished* — rivals
+   ship new versions, corpora grow, and the machine changes underneath, so its residuals regenerate by
+   construction. Parked in a fix list it reads as permanent unfinished work and quietly devalues every
+   real `[ ]` beside it.
+2. **Never mark one ✅ DONE.** Write *"measured 2026-08-19: X"*. A bake-off row without a **date and a
+   configuration** is worse than no row, because a stale number reads as current — and this project has
+   already been bitten by a size figure that matched a ceiling to the byte because it was reading
+   yesterday's artifact.
+3. ⚠️⚠️ **A bake-off is the ONLY task type that may reach outside the repo**, which makes it the one to
+   watch in a project whose invariant is **zero third-party dependencies**. Its harness, its rivals and
+   its corpora all live *outside* the shipped artifact, and nothing it needs may leak into one.
+4. **Sort work by what it CHANGES before sorting it by priority.** That is the whole rule in one line.
+5. **A comparison is evidence, never a target.** ⚠️ A contract row, an invariant or a design choice must
+   never be justified by *"the other one is faster/smaller"* — that is what `interop.md` §0 puts
+   performance and size out of scope for. **A bake-off tells you where you stand; it does not tell you
+   what to build.**
+
+**Applied here:** **T11** holds both kinds and they are now labelled as such — the optimization review
+is an ISSUE-shaped fix task that ends, while the **same-machine comparison against wasm3 / WAMR /
+wazmrt is a 🏁 BAKE-OFF** that is scheduled when a number is wanted and never closes. The competitor's
+published head-to-head figures (`vision.md`) are a 🏁 row too: dated, configuration-bound, **and not
+adoptable as ours**.
+
+*(Borrowed method — wazmrt reclassified its own bake-off out of its work queue on 2026-08-18 for exactly
+this reason, and the reclassification is what made its remaining fix list read honestly.)*

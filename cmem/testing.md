@@ -395,6 +395,72 @@ Windows file locking and invents phantom failures — it did so again on 2026-08
 assemble failures where there was 1, which is exactly long enough to start diagnosing the wrong thing.
 **A re-run that disagrees with the first is the tell; the numbers above are from clean runs.**
 
+## 🔬 T13-0, first measurement (2026-08-19) — 300 skips are CORRECT REJECTIONS
+
+**Baseline re-measured rather than quoted**, by running the corpus: **62,238 passed / 378 failed /
+2,038 skipped of 62,616 adjudicated, 284 files, `0 unparseable`.** Identical to what the memory
+recorded on 2026-08-14, so the numbers were sound — ✅ and the runner **already prints the fourth
+number**, which is the thing a pass/fail/skip triple cannot tell you (`best-practices.md` §3A.2).
+
+### The probe
+
+Instrumented the `assert_invalid` / `assert_malformed` skip site in `wast.rs`
+(`if e.is_unsupported() { skipped += 1 }`), ran all 284 files, **reverted the edit by hand** — not with
+`git checkout`, which would have taken the uncommitted work in that file with it (§8.1).
+
+| cause at that site | count |
+| --- | --- |
+| **`assemble: wat error: UnknownInstr`** | **300** |
+| `unsupported text construct: legacy delegate` | 2 |
+| `cannot link an imported Tag yet` | 1 |
+| **total at this site** | **303** |
+
+### ⚠️⚠️ The finding: `UnknownInstr` conflates two different answers
+
+`is_unsupported()` lists `wat::Error::UnknownInstr`, and that error means **both** *"this mnemonic
+exists in no wasm proposal"* — a **malformation wasmrt is entitled to diagnose** — and *"our assembler
+has a gap"*, which must never score as a pass. Because the two are indistinguishable at the scoring
+site, **every one of them is banked as a skip, including the right answers.**
+
+🎯 **The decisive case, `load.wast` — 13 of the 300.** The file asserts that `f32.load32`,
+`i32.load32`, `i32.load64`, `i32.load32_s`, `f64.load64` … are **malformed**. ⚠️ **None of those is a
+WebAssembly instruction in any proposal** — being unknown *is* the malformation under test. wasmrt
+answers `UnknownInstr`, which is exactly right, and **scores a skip instead of a pass.**
+
+### ⚠️ DO NOT "fix" this by deleting `UnknownInstr` from `is_unsupported()`
+
+The conservatism is **load-bearing**, and the asymmetry decides the direction: an omission from the
+"we-are-incomplete" side is a **FALSE PASS**, and a false pass is the one direction that **cannot be
+noticed afterwards**. Deleting the entry would bank real assembler gaps as conformance.
+
+**The principled fix is to make the ASSEMBLER draw the distinction, at the point where it is known** —
+a mnemonic that exists in no proposal → a real malformed verdict; a mnemonic that exists but is
+unimplemented → our gap. *An error name that conflates "your input is bad" with "we are incomplete"
+cannot be scored correctly by any caller*, and the fix belongs upstream of the scoring table, never in
+it.
+
+✅ **wasmrt only became eligible for this on 2026-08-14.** The distinction is only drawable once
+**every in-scope proposal is implemented** — otherwise "exists in no proposal" cannot be decided. T9f
+(tail calls) closed that, which is the same precondition the sibling runtime needed.
+
+### ⚠️ What this measurement does NOT say — 303 of 2,038, one site of seventeen
+
+`wast.rs` has **17 skip sites** and only one was instrumented. **The other ~1,735 skips are
+unattributed**, and they are demonstrably a different population: `br_on_cast.wast` (27 skips) and
+`try_table.wast` (47) produced **zero** at this site, and both are files for features wasmrt fully
+implements. **Do not extrapolate this result to the whole skip total** — instrument the remaining
+sites before ranking the rest of the work.
+
+**The file-level shape of the rest** (skips per file, top of the list) is dominated by the untargeted
+proposals T13 brings into scope: `exact-casts` 108 · `wide-arithmetic` 108 ·
+`br_on_cast_desc_eq`/`_fail` 98 each · `ref_cast_desc_eq` 94 — with **table64** spread across
+`table_init64` 93, `float_memory64` 84, `table_fill64` 70, `table_size64` 36, `table_copy64` 22,
+`table_grow64` 21.
+
+🎓 **Ranked by assertions unblocked, the scoring fix leads** — ~300 assertions, **no feature work**,
+independent of every track, and cheaper than any of them. That ordering is the whole reason T13-0 runs
+before T13's tracks rather than after.
+
 ## Current test state (2026-08-14, T9f tail calls; audited 2026-08-19)
 
 **458 workspace tests, all green** (420 core + 28 capi + 10 CLI integration), clippy clean on all four
