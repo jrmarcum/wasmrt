@@ -382,6 +382,27 @@ the mutation"* is the sentence that stops the next person trusting the percentag
 silent-wrong-output inverted — there the answer was wrong and nothing said so; here the answer is
 right and the feature is missing anyway.
 
+
+### 3.11 WIDENING A FIELD DOES NOT SURFACE ITS CALL SITES — an identity conversion still compiles
+
+**table64 (T13) widened `TableDef.min` from `u32` to `u64`.** Two of the three emit sites were found by
+the compiler; **the third was not**, because it read `emit_limits(…, u64::from(t.min), …, false)`. While
+the field was `u32` that was a **widening**; the moment it became `u64` it turned into `u64::from(u64)`
+— an **identity conversion that type-checks perfectly** — so the site kept compiling with its hardcoded
+`is64: false` beside it. The result assembled `(table i64 …)` as a **32-bit table**: a wrong module, not
+a rejected one.
+
+⚠️ **The habit: after widening a type, grep for the conversions that used to DO the widening**
+(`u64::from`, `try_into`, `as`). They are exactly the sites the type checker can no longer see, and they
+are disproportionately the sites doing something *else* wrong too — a conversion wrapper is where a
+hardcoded neighbour hides.
+
+🎓 **It cost a second mistake worth naming: a replace-first on a pattern that occurred twice.** The
+patch script asserted “patched 2 sites” and was satisfied — but it **counted patches, not occurrences**,
+and two of the three lines were byte-identical, so one replacement consumed both checks. *Count what you
+expect to FIND before replacing, and assert none remain after* — §4.2a wearing different clothes:
+confirming a change applied is not confirming it applied **everywhere**.
+
 ## 3A. Borrowed lessons — from wazmrt's `best-practices.md` (owner-authorized read, 2026-08-14)
 
 🔒 **Scope of this exception.** The oracle is retired for *correctness answers and design* (§

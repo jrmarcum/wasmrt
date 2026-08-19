@@ -1022,6 +1022,24 @@ impl<'a> FuncValidator<'a> {
         }
         Ok(())
     }
+    /// A table’s INDEX type: `i64` on a 64-bit table (table64), `i32` otherwise.
+    ///
+    /// The exact analogue of [`Self::mem_addr_ty`]. ⚠️ Every table instruction’s index, length and
+    /// count operand is this type — hardcoding `i32` is what made every `table_*64.wast` file
+    /// unrunnable, and it is why `table.copy` between a 32- and a 64-bit table types its
+    /// operands from the DESTINATION and SOURCE separately rather than assuming they agree.
+    fn table_addr_ty(&self, index: u32) -> V {
+        if self
+            .module
+            .tables
+            .get(index as usize)
+            .is_some_and(|t| t.limits.is64)
+        {
+            V::I64
+        } else {
+            V::I32
+        }
+    }
     fn mem_addr_ty(&self, index: u32) -> V {
         if self.module.memories[index as usize].limits.is64 {
             V::I64
@@ -1448,7 +1466,7 @@ impl<'a> FuncValidator<'a> {
                     .module
                     .func_sig(ci.type_index)
                     .ok_or(ValidateError::UndefinedType)?;
-                self.pop_expect(V::I32)?;
+                self.pop_expect(self.table_addr_ty(ci.table))?;
                 self.pop_vals(&ft.params)?;
                 self.push_vals(&ft.results);
             }
@@ -1537,30 +1555,37 @@ impl<'a> FuncValidator<'a> {
             }
 
             Op::TableGet => {
-                let et = self.table_elem_type(expect_table(&instr.imm)?)?;
-                self.pop_expect(V::I32)?;
+                let ti = expect_table(&instr.imm)?;
+                let et = self.table_elem_type(ti)?;
+                self.pop_expect(self.table_addr_ty(ti))?;
                 self.push_val_t(et);
             }
             Op::TableSet => {
-                let et = self.table_elem_type(expect_table(&instr.imm)?)?;
+                let ti = expect_table(&instr.imm)?;
+                let et = self.table_elem_type(ti)?;
                 self.pop_expect(et)?;
-                self.pop_expect(V::I32)?;
+                self.pop_expect(self.table_addr_ty(ti))?;
             }
             Op::TableSize => {
-                self.table_elem_type(expect_table(&instr.imm)?)?;
-                self.push_val_t(V::I32);
+                let ti = expect_table(&instr.imm)?;
+                self.table_elem_type(ti)?;
+                self.push_val_t(self.table_addr_ty(ti));
             }
             Op::TableGrow => {
-                let et = self.table_elem_type(expect_table(&instr.imm)?)?;
-                self.pop_expect(V::I32)?;
+                let ti = expect_table(&instr.imm)?;
+                let et = self.table_elem_type(ti)?;
+                let at = self.table_addr_ty(ti);
+                self.pop_expect(at)?;
                 self.pop_expect(et)?;
-                self.push_val_t(V::I32);
+                self.push_val_t(at);
             }
             Op::TableFill => {
-                let et = self.table_elem_type(expect_table(&instr.imm)?)?;
-                self.pop_expect(V::I32)?;
+                let ti = expect_table(&instr.imm)?;
+                let et = self.table_elem_type(ti)?;
+                let at = self.table_addr_ty(ti);
+                self.pop_expect(at)?;
                 self.pop_expect(et)?;
-                self.pop_expect(V::I32)?;
+                self.pop_expect(at)?;
             }
             Op::TableInit => {
                 let Imm::TableInit { elem, table } = instr.imm else {
@@ -1573,9 +1598,11 @@ impl<'a> FuncValidator<'a> {
                 if !subtype_of(self.module, self.module.elements[elem as usize].elem_type, tet) {
                     return Err(ValidateError::TypeMismatch);
                 }
-                self.pop_expect(V::I32)?;
-                self.pop_expect(V::I32)?;
-                self.pop_expect(V::I32)?;
+                // n and the segment offset are always i32 — a segment is not addressed by the
+                // table’s index type. Only the DESTINATION is a table address.
+                self.pop_expect(V::I32)?; // n
+                self.pop_expect(V::I32)?; // src offset into the element segment
+                self.pop_expect(self.table_addr_ty(table))?; // dst
             }
             Op::TableCopy => {
                 let Imm::TableCopy { dst, src } = instr.imm else {
@@ -1586,9 +1613,14 @@ impl<'a> FuncValidator<'a> {
                 if !subtype_of(self.module, st, dt) {
                     return Err(ValidateError::TypeMismatch);
                 }
-                self.pop_expect(V::I32)?;
-                self.pop_expect(V::I32)?;
-                self.pop_expect(V::I32)?;
+                // ⚠️ Each operand takes its OWN table’s index type, and `n` takes the NARROWER of
+                // the two — copying between a 32- and a 64-bit table is legal, and assuming the
+                // two agree is how a mixed copy would be mistyped.
+                let (dt_ty, st_ty) = (self.table_addr_ty(dst), self.table_addr_ty(src));
+                let n_ty = if dt_ty == V::I64 && st_ty == V::I64 { V::I64 } else { V::I32 };
+                self.pop_expect(n_ty)?; // n
+                self.pop_expect(st_ty)?; // src offset
+                self.pop_expect(dt_ty)?; // dst offset
             }
             Op::ElemDrop => {
                 if expect_elem(&instr.imm)? as usize >= self.module.elements.len() {
@@ -3130,11 +3162,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_64bit_table() {
-        // Tables are 32-bit-indexed in the frozen oracle: an i64 table type is malformed.
-        // table section: 1 table, funcref (0x70), limits flag 0x04 (i64), min 1.
-        let bytes = m(&[0x04, 0x04, 0x01, 0x70, 0x04, 0x01]);
-        assert_eq!(decode(&bytes), Err(crate::types::DecodeError::MalformedFlag));
+    fn accepts_64bit_table_but_still_refuses_a_shared_one() {
+        // 🔻 **REWRITTEN, NOT DELETED (T13, 2026-08-19).** This test used to assert the
+        // opposite — *"tables are 32-bit-indexed; an i64 table type is malformed"* — which was
+        // true while table64 was out of scope. **A test that asserts a REFUSAL is a test of a
+        // DECISION, and it expires with the decision**; the owner brought table64 into scope,
+        // so the assertion inverts. It is rewritten in place because the *reasoning* in a
+        // refusal test is the best summary of what the replacement rule has to cover — here,
+        // that exactly one of the two flag bits changed meaning.
+        //
+        // table section: 1 table, funcref (0x70), limits flag, min 1.
+        let table = |flag: u8| m(&[0x04, 0x04, 0x01, 0x70, flag, 0x01]);
+        // 0x04 = i64 index — now VALID.
+        assert!(decode(&table(0x04)).is_ok(), "a 64-bit table is in scope since T13");
+        // 0x02 = shared — still malformed; no proposal wasmrt targets has a shared table,
+        // and keeping this beside the change is what stops "we un-refused the flag byte".
+        assert_eq!(
+            decode(&table(0x02)),
+            Err(crate::types::DecodeError::MalformedFlag),
+            "a shared table is still malformed"
+        );
+        // 0x06 = shared + i64 — the shared half still decides it.
+        assert_eq!(decode(&table(0x06)), Err(crate::types::DecodeError::MalformedFlag));
     }
 
     // --- the previously deferred typing arms: SIMD / atomics / GC / EH ---

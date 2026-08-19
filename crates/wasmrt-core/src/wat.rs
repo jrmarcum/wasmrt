@@ -845,8 +845,10 @@ struct MemoryDef {
 
 #[derive(Debug, Clone)]
 struct TableDef {
-    min: u32,
-    max: Option<u32>,
+    min: u64,
+    max: Option<u64>,
+    /// A 64-bit table (table64). Its limits and every index operand are `i64`.
+    is64: bool,
     elem: V,
     /// `(table 3 funcref (ref.func $f))` — the function-references initializer expression
     /// every entry starts as. `None` is the plain form, which starts as null.
@@ -1705,18 +1707,31 @@ fn parse_global_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 }
 
 /// Parse `min [max]` table limits starting at `j`.
-fn parse_table_limits(items: &[Sexpr], j: &mut usize) -> Result<(u32, Option<u32>)> {
-    let min = u32::try_from(parse_u64_str(want_atom(nth(items, *j)?)?)?)
-        .map_err(|_| Error::BadNumber)?;
+/// `[i32|i64] <min> [<max>]` — a table type’s index type and limits.
+///
+/// ⚠️ **The limits are `u64` and the index type is read here, both since table64 landed
+/// (T13, 2026-08-19).** They were `u32` with no index keyword, so `(table i64 0 0x1_0000_0000
+/// funcref)` failed with `BadNumber` — **63 modules across the corpus, and the single largest
+/// cause of the whole skip total.** The error named the symptom (“a number that does not fit”);
+/// the cause was one missing feature.
+fn parse_table_limits(items: &[Sexpr], j: &mut usize) -> Result<(u64, Option<u64>, bool)> {
+    let mut is64 = false;
+    if items.get(*j).is_some_and(|s| eq_atom(s, "i64")) {
+        is64 = true;
+        *j += 1;
+    } else if items.get(*j).is_some_and(|s| eq_atom(s, "i32")) {
+        *j += 1;
+    }
+    let min = parse_u64_str(want_atom(nth(items, *j)?)?)?;
     *j += 1;
     let mut max = None;
     if let Some(a) = items.get(*j).and_then(Sexpr::as_atom) {
         if a.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            max = Some(u32::try_from(parse_u64_str(a)?).map_err(|_| Error::BadNumber)?);
+            max = Some(parse_u64_str(a)?);
             *j += 1;
         }
     }
-    Ok((min, max))
+    Ok((min, max, is64))
 }
 
 fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
@@ -1751,8 +1766,9 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             .collect();
         let n = entries.len() as u32;
         b.tables.push(TableDef {
-            min: n,
-            max: Some(n),
+            min: u64::from(n),
+            max: Some(u64::from(n)),
+            is64: false,
             elem: elem_type,
             init: None, // the inline `(elem …)` fills it instead
         });
@@ -1773,7 +1789,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         return Ok(());
     }
 
-    let (min, max) = parse_table_limits(items, &mut j)?;
+    let (min, max, is64) = parse_table_limits(items, &mut j)?;
     let elem = parse_val_type(nth(items, j)?, &b.type_names)?;
     // Anything after the element type is the initializer expression (function-references).
     // Reading it is what stops the assembler emitting a table of nulls for
@@ -1787,6 +1803,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let t = TableDef {
         min,
         max,
+        is64,
         elem,
         init,
     };
@@ -1911,13 +1928,14 @@ fn parse_import_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             b.global_names.push(name);
         }
         "table" => {
-            let (min, max) = parse_table_limits(desc, &mut j)?;
+            let (min, max, is64) = parse_table_limits(desc, &mut j)?;
             let elem = parse_val_type(nth(desc, j)?, &b.type_names)?;
             b.table_imports.push(ImportedTable {
                 r,
                 t: TableDef {
                     min,
                     max,
+                    is64,
                     elem,
                     init: None,
                 },
@@ -2180,7 +2198,7 @@ fn emit_imports(out: &mut Vec<u8>, b: &ModuleBuild) -> Result<()> {
                 name_bytes(&mut c, &i.r.name);
                 c.push(0x01);
                 emit_val_type(&mut c, i.t.elem)?;
-                emit_limits(&mut c, u64::from(i.t.min), i.t.max.map(u64::from), false, false);
+                emit_limits(&mut c, i.t.min, i.t.max, false, i.t.is64);
             }
             ImportKind::Mem => {
                 let i = &b.mem_imports[m];
@@ -2239,11 +2257,11 @@ fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, e: &Encoded) -> Result<()> {
                 c.push(0x40);
                 c.push(0x00);
                 emit_val_type(&mut c, t.elem)?;
-                emit_limits(&mut c, u64::from(t.min), t.max.map(u64::from), false, false);
+                emit_limits(&mut c, t.min, t.max, false, t.is64);
                 c.extend_from_slice(init);
             } else {
                 emit_val_type(&mut c, t.elem)?;
-                emit_limits(&mut c, u64::from(t.min), t.max.map(u64::from), false, false);
+                emit_limits(&mut c, t.min, t.max, false, t.is64);
             }
         }
         push_section(out, 4, &c);

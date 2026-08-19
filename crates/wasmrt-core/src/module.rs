@@ -837,8 +837,10 @@ fn read_limits(r: &mut Reader) -> DecodeResult<Limits> {
 fn read_table_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<TableType> {
     let element = read_val_type(r, kinds)?;
     let limits = read_limits(r)?;
-    if limits.shared || limits.is64 {
-        return Err(DecodeError::MalformedFlag); // tables are 32-bit, unshared
+    // A table may be 64-bit (the table64 half of memory64, in scope since T13) but never
+    // shared — there is no `shared` table type in any proposal wasmrt targets.
+    if limits.shared {
+        return Err(DecodeError::MalformedFlag);
     }
     Ok(TableType {
         element,
