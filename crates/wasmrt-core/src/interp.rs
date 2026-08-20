@@ -295,7 +295,14 @@ const _: () = assert!(core::mem::size_of::<HeapObject>() == core::mem::size_of::
 /// per exception) rather than arena-allocated — it frees when the last holder drops.
 #[derive(Clone, PartialEq, Eq)]
 struct Exception {
-    tag: u32,
+    /// The **store-wide tag slot**, not a module-local tag index.
+    ///
+    /// ⚠️⚠️ This was the module-local index, so tag 0 of one module matched tag 0 of another and a
+    /// `catch $e0` caught an exception thrown by a *different* tag across a link. Same class as
+    /// the funcref and GC-object defects: an index only means something inside the module that
+    /// wrote it. `try_table.wast`'s `imported-mismatch` and `legacy/try_catch.wast` each caught
+    /// what they must not, and both returned a plausible number rather than trapping.
+    tag: usize,
     values: Vec<Value>,
 }
 
@@ -364,6 +371,10 @@ struct IndexMaps {
     data: Vec<usize>,
     /// Store slots holding this instance's element segments.
     elems: Vec<usize>,
+    /// Store slots identifying this instance's **tags**. A tag has no contents — the slot itself is
+    /// the identity, which is exactly what a `catch` clause has to compare. Imported tags are
+    /// refused at link today (S3), so their entries are `usize::MAX` and unreachable.
+    tags: Vec<usize>,
 }
 
 impl IndexMaps {
@@ -394,6 +405,10 @@ impl IndexMaps {
     fn elem(&self, i: u32) -> usize {
         Self::get(&self.elems, i as usize)
     }
+    #[inline]
+    fn tag(&self, i: u32) -> usize {
+        Self::get(&self.tags, i as usize)
+    }
 }
 
 /// The resource pools shared by every instance in a linking group.
@@ -413,6 +428,11 @@ struct Pools {
     elem_values: Vec<Vec<Value>>,
     /// `elem_dropped[i]` marks a segment consumed (active/declarative at init, or `elem.drop`).
     elem_dropped: Vec<bool>,
+    /// One entry per **tag instance**, holding the instance that defined it. A tag has no runtime
+    /// contents; what matters is that each definition gets its own slot, so an exception's tag is
+    /// comparable across a link. (The owner is recorded for diagnostics and for the import-type
+    /// check an imported tag will need — S3.)
+    tags: Vec<u32>,
     /// GC heap: one entry per allocated struct/array; a GC reference value is its index here.
     /// No collector — objects live for the instance's lifetime, bounded by `MAX_GC_OBJECTS`.
     ///
@@ -619,6 +639,19 @@ struct FuncBody {
     ty: FuncType,
     /// params + declared locals (one `u64` slot each — no v128 in this slice).
     num_locals: usize,
+    /// Indices of declared locals whose default value is `ref.null`, not zero (§4.4.5: a local's
+    /// default is `t.default`, and a reference type's is null).
+    ///
+    /// ⚠️⚠️ **Locals were zero-filled, so an uninitialized `(ref null $t)` local read as GC heap
+    /// object 0** — not as null. `struct.get` on it then returned a field of whatever object the
+    /// script had allocated first, and `struct.wast`'s `struct.get-null` got a *result* where the
+    /// spec demands a trap. Silent wrong output, and it needed a shared store to show at all: with
+    /// an empty heap the same bug traps `GcOutOfBounds` and looks like a slightly mislabelled pass.
+    ///
+    /// A list of indices rather than a vector of defaults, because it is almost always EMPTY: the
+    /// hot path keeps its `vec![0; n]` and pays one length check. Non-null reference locals are not
+    /// defaultable at all, so the validator has already refused those.
+    null_locals: Vec<u32>,
     ir: Vec<Instr>,
     /// For each `block`/`loop`/`if`/`else` index: the matching `end` index.
     end_of: Vec<usize>,
@@ -903,6 +936,59 @@ fn cross_module_val_types_match(a_ids: &[u32], a: crate::types::ValType, b_ids: 
     }
 }
 
+/// §4.5.9 value-type matching **across modules**: is `got` (numbered in `got_ids`' module) a
+/// subtype of `want` (numbered in `want_ids`' module)?
+///
+/// The cross-module twin of the validator's `subtype_of`. Concrete types go through the store-wide
+/// registry — the only place the question has an exact answer — and everything else is the
+/// nullability rule plus the abstract hierarchy.
+fn cross_module_val_subtype(
+    reg: &TypeRegistry,
+    got_ids: &[u32],
+    got: crate::types::ValType,
+    want_ids: &[u32],
+    want: crate::types::ValType,
+    invariant: bool,
+) -> bool {
+    if !got.is_ref() || !want.is_ref() {
+        return got == want; // a numeric type matches only itself
+    }
+    if invariant {
+        if got.is_non_null_ref() != want.is_non_null_ref() {
+            return false;
+        }
+    } else if !got.is_non_null_ref() && want.is_non_null_ref() {
+        // A non-null reference satisfies a nullable declaration; never the other way round.
+        return false;
+    }
+    let known = |x: Option<u32>| x.filter(|&i| i != TypeRegistry::UNKNOWN_TYPE);
+    match (got.is_concrete(), want.is_concrete()) {
+        (true, true) => match (
+            known(got_ids.get(got.concrete_index() as usize).copied()),
+            known(want_ids.get(want.concrete_index() as usize).copied()),
+        ) {
+            // Refuse when either side has no store-wide id: a hand-built `Module` never joined the
+            // registry, and the ACCEPT side is the dangerous one. Two unknowns must NOT read as
+            // "the same type", which is why the sentinel is filtered out before comparing.
+            (Some(a), Some(b)) => {
+                if invariant { a == b } else { reg.is_subtype(a, b) }
+            }
+            _ => false,
+        },
+        // A concrete reference is a subtype of its family head, never of another concrete type it
+        // was not declared under.
+        (true, false) => !invariant && got.ref_heap().is_subtype_of(want.ref_heap()),
+        (false, true) => false,
+        (false, false) => {
+            if invariant {
+                got.ref_heap() == want.ref_heap()
+            } else {
+                got.ref_heap().is_subtype_of(want.ref_heap())
+            }
+        }
+    }
+}
+
 /// Does an existing memory satisfy a declared import type? §4.5.9 matching, which compares
 /// **types**: the actual minimum must be at least the declared one, and a declared maximum
 /// requires the actual to have one no larger (an unbounded memory never satisfies a bounded
@@ -1093,6 +1179,44 @@ impl TypeRegistry {
         }
         ids
     }
+
+    /// The store-wide ids of `module`'s types **without interning anything**, using
+    /// [`Self::UNKNOWN_TYPE`] for a rec group this store has never seen.
+    ///
+    /// An un-interned group is not a failed lookup - it is the ANSWER. A concrete type whose shape
+    /// has never entered this store cannot be the type of anything the store exports, so a link
+    /// asking about it must be refused. That is what lets a link-time check run against `&Store`
+    /// rather than forcing every caller to `&mut`.
+    fn ids_readonly(&self, module: &Module) -> Vec<u32> {
+        let singletons: Vec<(u32, u32)> = (0..module.comp_types.len() as u32)
+            .map(|i| (i, 1))
+            .collect();
+        let groups = if module.rec_groups.is_empty() {
+            &singletons
+        } else {
+            &module.rec_groups
+        };
+        let mut ids: Vec<u32> = Vec::with_capacity(module.comp_types.len());
+        for &(start, len) in groups {
+            let key = crate::module::rec_group_key_with(
+                &module.comp_types,
+                &module.supertypes,
+                &module.type_finals,
+                &ids,
+                start,
+                len,
+            );
+            match self.groups.get(&key).copied() {
+                Some(base) => ids.extend(base..base + len),
+                None => ids.extend(core::iter::repeat_n(Self::UNKNOWN_TYPE, len as usize)),
+            }
+        }
+        ids
+    }
+
+    /// Sentinel for "this store has never seen this type". Never a real id: ids only ever grow by a
+    /// group's length, and a store holding 2^32 types has other problems.
+    const UNKNOWN_TYPE: u32 = u32::MAX;
 }
 
 /// Monotonic source of store identities. Only ever compared for equality, and starts at 1 so a
@@ -1314,6 +1438,54 @@ impl Store {
             (e.name == name && e.ty.kind() == crate::types::ExternKind::Global).then_some(e.index)
         })?;
         data.module.globals.get(index as usize).copied()
+    }
+
+    /// Does the global `exporter` exports as `name` satisfy the type `importer` declares for it
+    /// (§4.5.9)?
+    ///
+    /// ⚠️ **Immutable is SUBTYPING; mutable is equality.** The link check was `actual != declared`
+    /// — plain equality on the whole `GlobalType` — which refuses
+    /// `(global (import …) (ref null func))` bound to an exported `(ref func)`. `linking.wast`'s
+    /// `Mref_im` imports the same five globals at nine different types on purpose, and one
+    /// rejection there costs the module and every assertion behind it. A *mutable* global really
+    /// is invariant: the importer can write to it, so a wider declared type would let it store
+    /// something the exporter's readers cannot handle.
+    ///
+    /// ⚠️ Concrete types are resolved through the store's registry, exactly as function imports
+    /// are. Comparing a concrete index from one module against another's is the defect this port
+    /// has now fixed four times; equality on the raw `ValType` bits was doing it here too, and
+    /// only ever agreed by coincidence when both modules happened to number `$t` the same.
+    #[must_use]
+    pub fn global_import_matches(
+        &self,
+        exporter: InstanceId,
+        name: &str,
+        importer: &Module,
+        declared: crate::module::GlobalType,
+    ) -> bool {
+        let Some(actual) = self.export_global_type(exporter, name) else {
+            return false;
+        };
+        if actual.mutable != declared.mutable {
+            return false;
+        }
+        // Read-only: the importing module has not joined the store yet, and it does not need to.
+        // A concrete type whose shape this store never interned cannot be what the exporter holds,
+        // so "unknown" is a refusal rather than a missing lookup.
+        let want_ids = self.pools.types.ids_readonly(importer);
+        let Some(slot) = self.slot(exporter) else {
+            return false;
+        };
+        cross_module_val_subtype(
+            &self.pools.types,
+            &self.code[slot].type_ids,
+            actual.content,
+            &want_ids,
+            declared.content,
+            // A MUTABLE global is invariant: the importer can write to it, so a wider declared type
+            // would let it store something the exporter's readers cannot handle.
+            actual.mutable,
+        )
     }
 
     /// How many instances this store holds. An [`InstanceId`] is valid here iff its index
@@ -1548,34 +1720,6 @@ impl Store {
             });
         }
 
-        // Apply active data segments, then mark them (and only them) dropped (§4.5.4).
-        //
-        // A segment may target an imported memory, which already lives in the pools, or a
-        // defined one, which is still local until this instantiation commits. Splitting on the
-        // index keeps the *defined* resources out of the store until every step has succeeded —
-        // so a later failure leaves no orphaned slots. An imported memory is inherently shared,
-        // so a write to it is visible whatever happens next; that is the exporter's memory, and
-        // the spec's instantiation is not transactional over it either.
-        for seg in &module.data {
-            if !seg.active {
-                continue;
-            }
-            let mi = seg.mem_index as usize;
-            let mem: &mut Memory = if mi < n_mems {
-                let slot = *imported_mems.get(mi).ok_or(Trap::NoMemory)?;
-                self.pools.memories.get_mut(slot).ok_or(Trap::NoMemory)?
-            } else {
-                memories.get_mut(mi - n_mems).ok_or(Trap::NoMemory)?
-            };
-            let offset = eval_const_offset(&seg.offset_expr, &globals, mem.is64)?;
-            let start = usize::try_from(offset).map_err(|_| Trap::MemoryOutOfBounds)?;
-            let end = start
-                .checked_add(seg.bytes.len())
-                .filter(|&e| e <= mem.bytes.len())
-                .ok_or(Trap::MemoryOutOfBounds)?;
-            mem.bytes[start..end].copy_from_slice(&seg.bytes);
-        }
-        let data_dropped: Vec<bool> = module.data.iter().map(|s| s.active).collect();
 
         // Imported tables occupy the LOW table indices — resolved, like memories, to the exporting
         // instance's existing store slot. Correct only because a `funcref` now carries its owning
@@ -1626,6 +1770,9 @@ impl Store {
         // (then drop them and the declarative ones; passive stay for `table.init`).
         let mut elem_values: Vec<Vec<Value>> = Vec::with_capacity(module.elements.len());
         let mut elem_dropped: Vec<bool> = Vec::with_capacity(module.elements.len());
+        // `(segment index, table index, offset)` for each ACTIVE element segment, applied once the
+        // instance exists — see the note at the application site.
+        let mut active_elems: Vec<(usize, u32, u64)> = Vec::new();
         for elem in &module.elements {
             let mut vals: Vec<Value> = Vec::with_capacity(elem.funcs.len() + elem.exprs.len());
             // The funcidx shorthand (elem forms 0-3) denotes `ref.func` of THIS instance, so the
@@ -1640,33 +1787,46 @@ impl Store {
                 )?);
             }
             if elem.mode == crate::module::ElementMode::Active {
-                // Forks on the index exactly as data segments do: an *imported* table already lives
-                // in the pools, a *defined* one is still local until this instantiation commits, so
-                // defined resources stay out of the store until every step has succeeded.
+                // The offset's constant expression is evaluated HERE, while `globals` is in scope;
+                // the write itself happens after the instance is allocated (see below).
+                // ⚠️ The offset takes the TABLE's index type — this read `false` unconditionally,
+                // which is `(elem (table $t64) (i64.const 0) …)` rejected as a type mismatch.
                 let ti = elem.table_index as usize;
-                let tbl: &mut Table = if ti < n_tables {
-                    let slot = *imported_tables.get(ti).ok_or(Trap::NoTable)?;
-                    self.pools.tables.get_mut(slot).ok_or(Trap::NoTable)?
-                } else {
-                    tables.get_mut(ti - n_tables).ok_or(Trap::NoTable)?
-                };
-                let offset = eval_const_offset(&elem.offset_expr, &globals, false)?; // tables are 32-bit
-                let start = usize::try_from(offset).map_err(|_| Trap::TableOutOfBounds)?;
-                let end = start
-                    .checked_add(vals.len())
-                    .filter(|&e| e <= tbl.entries.len())
-                    .ok_or(Trap::TableOutOfBounds)?;
-                tbl.entries[start..end].copy_from_slice(&vals);
+                let is64 = module.tables.get(ti).is_some_and(|t| t.limits.is64);
+                let offset = eval_const_offset(&elem.offset_expr, &globals, is64)?;
+                active_elems.push((elem_values.len(), elem.table_index, offset));
             }
             elem_dropped.push(elem.mode != crate::module::ElementMode::Passive);
             elem_values.push(vals);
         }
+
+        // Active data segments: offsets evaluated now, applied after the instance exists (§4.5.4).
+        let mut active_data: Vec<(usize, u32, u64)> = Vec::new();
+        for (k, seg) in module.data.iter().enumerate() {
+            if !seg.active {
+                continue;
+            }
+            let mi = seg.mem_index as usize;
+            let is64 = module.memories.get(mi).is_some_and(|m| m.limits.is64);
+            let offset = eval_const_offset(&seg.offset_expr, &globals, is64)?;
+            active_data.push((k, seg.mem_index, offset));
+        }
+        let data_dropped: Vec<bool> = module.data.iter().map(|s| s.active).collect();
 
         // Prepare each defined function: decode its body + precompute control flow.
         let mut func_bodies = Vec::with_capacity(module.functions.len());
         for (&type_index, code) in module.functions.iter().zip(&module.code) {
             let ty = module.func_sig(type_index).ok_or(Trap::UndefinedFunc)?;
             let num_locals = ty.params.len() + code.local_count() as usize;
+            // Declared locals follow the parameters in the index space.
+            let mut null_locals = Vec::new();
+            let mut li = ty.params.len() as u32;
+            for l in &code.locals {
+                if l.ty.is_ref() {
+                    null_locals.extend(li..li + l.count);
+                }
+                li += l.count;
+            }
             // Cloned, not re-decoded: the module carries the decoded body already (a clone of the
             // instruction vector is cheaper than walking the bytes again, and this ran once per
             // instantiation).
@@ -1675,6 +1835,7 @@ impl Store {
             func_bodies.push(FuncBody {
                 ty,
                 num_locals,
+                null_locals,
                 ir,
                 end_of: cf.end_of,
                 else_of: cf.else_of,
@@ -1710,6 +1871,18 @@ impl Store {
             globals: base(self.pools.globals.len(), globals.len()),
             data: base(self.pools.data_dropped.len(), data_dropped.len()),
             elems: base(self.pools.elem_values.len(), elem_values.len()),
+            // Imported tags occupy the low indices and cannot link yet, so they map to no slot.
+            tags: {
+                let imported = module
+                    .imports
+                    .iter()
+                    .filter(|i| matches!(i.ty, crate::module::Extern::Tag(_)))
+                    .count();
+                let tag_base = self.pools.tags.len();
+                core::iter::repeat_n(usize::MAX, imported)
+                    .chain(tag_base..tag_base + module.tags.len())
+                    .collect()
+            },
         };
         self.pools.memories.extend(memories);
         self.pools.tables.extend(tables);
@@ -1717,6 +1890,9 @@ impl Store {
         self.pools.data_dropped.extend(data_dropped);
         self.pools.elem_values.extend(elem_values);
         self.pools.elem_dropped.extend(elem_dropped);
+        self.pools
+            .tags
+            .extend(core::iter::repeat_n(self_inst as u32, module.tags.len()));
 
         // Walk the backings IN DECLARATION ORDER so each import binds to its own slot;
         // host callbacks join the store-wide pool as they are seen.
@@ -1751,7 +1927,55 @@ impl Store {
             imports: targets,
         });
 
-        // §4.5.5 step 11: the start function runs as the LAST step of instantiation, after every
+        // §4.5.5 steps 12–15: **element segments first, then data segments** — and only now, with
+        // the instance allocated and in `self.code`.
+        //
+        // ⚠️⚠️ Both were applied earlier, to the still-local vectors, and both orderings were wrong
+        // in a way only a FAILED instantiation can show. `linking0.wast` instantiates a module that
+        // writes an element into an *imported* table and then traps on an out-of-bounds data
+        // segment, and asserts the element write SURVIVED and is callable:
+        //
+        // * data ran before elem, so the trap happened before the element was ever written; and
+        // * the instance was pushed only on success, so the `funcref` the element carries named an
+        //   instance that did not exist — `function index out of range` on the next call.
+        //
+        // §4.5.5 allocates the module instance BEFORE segment initialisation, so a segment trap
+        // leaves an allocated instance whose references are live. What the caller loses is the
+        // `InstanceId`, not the allocation — the same reasoning the start-function note below
+        // already applied one step later.
+        {
+            // Two disjoint fields of `self`, and two disjoint fields of `Pools`.
+            let data = &self.code[self_inst];
+            let pools = &mut self.pools;
+            for (k, table_index, offset) in active_elems {
+                let vals = &pools.elem_values[IndexMaps::get(&data.maps.elems, k)];
+                let tbl = pools
+                    .tables
+                    .get_mut(data.maps.table(table_index))
+                    .ok_or(Trap::NoTable)?;
+                let start = usize::try_from(offset).map_err(|_| Trap::TableOutOfBounds)?;
+                let end = start
+                    .checked_add(vals.len())
+                    .filter(|&e| e <= tbl.entries.len())
+                    .ok_or(Trap::TableOutOfBounds)?;
+                tbl.entries[start..end].copy_from_slice(vals);
+            }
+            for (k, mem_index, offset) in active_data {
+                let bytes = &data.module.data[k].bytes;
+                let mem = pools
+                    .memories
+                    .get_mut(data.maps.mem(mem_index))
+                    .ok_or(Trap::NoMemory)?;
+                let start = usize::try_from(offset).map_err(|_| Trap::MemoryOutOfBounds)?;
+                let end = start
+                    .checked_add(bytes.len())
+                    .filter(|&e| e <= mem.bytes.len())
+                    .ok_or(Trap::MemoryOutOfBounds)?;
+                mem.bytes[start..end].copy_from_slice(bytes);
+            }
+        }
+
+        // §4.5.5 step 16: the start function runs as the LAST step of instantiation, after every
         // element and data segment is in place — it is allowed to observe and modify them.
         //
         // A trap here fails the instantiation, and the half-built instance stays in `self.code`.
@@ -2062,8 +2286,19 @@ impl Frame<'_> {
     /// - a `try_table` clause branches **out of** the try_table to the clause's label;
     /// - a legacy `catch` runs **inside** the try, whose label stays on the stack so
     ///   `rethrow` can still name it.
-    fn throw_exception(&mut self, store: &mut Pools, exn: &Exception) -> Result<Option<usize>> {
+    ///
+    /// `tags` is the CATCHING instance's tag map: a clause names a tag by the index its own module
+    /// gave it, and the exception carries a store slot, so the two are only comparable once this
+    /// frame's index is resolved. Comparing the raw indices matched tag 0 against tag 0 across a
+    /// link.
+    fn throw_exception(
+        &mut self,
+        store: &mut Pools,
+        tags: &[usize],
+        exn: &Exception,
+    ) -> Result<Option<usize>> {
         let body = self.body;
+        let resolve = |t: u32| IndexMaps::get(tags, t as usize);
         for d in 0..self.labels.len() {
             let idx = self.labels.len() - 1 - d;
 
@@ -2075,7 +2310,7 @@ impl Frame<'_> {
                 };
                 for c in catches {
                     let matches = match c.kind {
-                        CatchKind::Catch | CatchKind::CatchRef => c.tag == exn.tag,
+                        CatchKind::Catch | CatchKind::CatchRef => resolve(c.tag) == exn.tag,
                         CatchKind::CatchAll | CatchKind::CatchAllRef => true,
                     };
                     if !matches {
@@ -2145,7 +2380,7 @@ impl Frame<'_> {
                 continue;
             }
             for h in &lt.handlers {
-                if h.tag.is_some_and(|t| t != exn.tag) {
+                if h.tag.is_some_and(|t| resolve(t) != exn.tag) {
                     continue;
                 }
                 let base = self.labels[idx].stack_base;
@@ -2168,8 +2403,8 @@ impl Frame<'_> {
 
     /// Raise `exn` from this frame: resume at the catching handler, or park it as the
     /// instance's pending exception and unwind to the caller.
-    fn raise(&mut self, store: &mut Pools, exn: Exception) -> Result<usize> {
-        match self.throw_exception(store, &exn)? {
+    fn raise(&mut self, store: &mut Pools, tags: &[usize], exn: Exception) -> Result<usize> {
+        match self.throw_exception(store, tags, &exn)? {
             Some(target) => Ok(target),
             None => {
                 store.pending_exn = Some(exn);
@@ -2181,7 +2416,7 @@ impl Frame<'_> {
     /// Handle an error propagating out of a `call`. If it is an unwinding exception this frame
     /// catches, return the resumption pc; otherwise re-raise, so a real trap — or an exception
     /// no handler here matches — keeps unwinding.
-    fn on_call_error(&mut self, store: &mut Pools, e: Trap) -> Result<usize> {
+    fn on_call_error(&mut self, store: &mut Pools, tags: &[usize], e: Trap) -> Result<usize> {
         if e != Trap::UncaughtException {
             return Err(e);
         }
@@ -2190,7 +2425,7 @@ impl Frame<'_> {
         let Some(exn) = store.pending_exn.take() else {
             return Err(e);
         };
-        match self.throw_exception(store, &exn)? {
+        match self.throw_exception(store, tags, &exn)? {
             Some(target) => {
                 // Caught here, so the frames this unwind recorded describe a failure that did not
                 // ultimately happen. Leaving them would make the NEXT trap's backtrace open with
@@ -2286,6 +2521,13 @@ fn call_function(
     let mut locals = vec![0 as Value; body.num_locals];
     let n_args = args.len().min(locals.len());
     locals[..n_args].copy_from_slice(&args[..n_args]);
+    // A reference local defaults to `ref.null`, not zero — zero is GC heap object 0.
+    for &i in &body.null_locals {
+        if let Some(slot) = locals.get_mut(i as usize) {
+            *slot = NULL_REF;
+        }
+    }
+
 
     let mut frame = Frame {
         body,
@@ -2524,7 +2766,8 @@ fn run(
                     let base = frame.stack_base(ft.params.len())?;
                     let values = frame.vstack[base..].to_vec();
                     frame.vstack.truncate(base);
-                    pc = frame.raise(store, Exception { tag, values })?;
+                    let tag = ctx.maps.tag(tag);
+                    pc = frame.raise(store, &ctx.maps.tags, Exception { tag, values })?;
                 }
                 Op::ThrowRef => {
                     let r = frame.pop();
@@ -2538,7 +2781,7 @@ fn run(
                         .get(ei)
                         .ok_or(Trap::NullReference)?
                         .clone();
-                    pc = frame.raise(store, exn)?;
+                    pc = frame.raise(store, &ctx.maps.tags, exn)?;
                 }
 
                 // --- Exception handling: the legacy try/catch encoding ---
@@ -2567,8 +2810,18 @@ fn run(
                     pc += 1;
                 }
                 Op::Rethrow => {
-                    // Re-raise the exception caught by the try `n` levels out, propagating from
-                    // OUTSIDE that try — it already had its turn at this exception.
+                    // Re-raise the exception the try `n` levels out caught — **from HERE**, not
+                    // from outside that try.
+                    //
+                    // ⚠️ This truncated the label stack down to the named try before re-raising,
+                    // on the reasoning that the try "already had its turn at this exception". True
+                    // of that try, and it is already handled: `throw_exception` skips a legacy try
+                    // whose `caught` is set, which is the same guard that stops the
+                    // `catch (e) { throw e; }` idiom looping. Truncating additionally threw away
+                    // every try nested INSIDE the handler — and a `rethrow` inside one of those is
+                    // exactly what `legacy/rethrow.wast`'s `rethrow-recatch` does, so the
+                    // re-raised exception sailed past a handler that should have caught it and
+                    // left the function as `uncaught exception`.
                     let n = label_imm(instr)? as usize;
                     if n >= frame.labels.len() {
                         return Err(Trap::UndefinedLabel);
@@ -2578,13 +2831,7 @@ fn run(
                         .caught
                         .clone()
                         .ok_or(Trap::UncaughtException)?;
-                    let base = frame.labels[idx].stack_base;
-                    frame.labels.truncate(idx);
-                    if base > frame.vstack.len() {
-                        return Err(Trap::StackUnderflow);
-                    }
-                    frame.vstack.truncate(base);
-                    pc = frame.raise(store, exn)?;
+                    pc = frame.raise(store, &ctx.maps.tags, exn)?;
                 }
                 Op::Br => pc = frame.branch(label_imm(instr)?)?,
                 Op::BrIf => {
@@ -2635,7 +2882,7 @@ fn run(
                         Ok(r) => r,
                         Err(e) => {
                             // An exception unwinding out of the callee may be caught here.
-                            pc = frame.on_call_error(store, e)?;
+                            pc = frame.on_call_error(store, &ctx.maps.tags, e)?;
                             continue;
                         }
                     };
@@ -2775,7 +3022,7 @@ fn run(
                     let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
                         Ok(r) => r,
                         Err(e) => {
-                            pc = frame.on_call_error(store, e)?;
+                            pc = frame.on_call_error(store, &ctx.maps.tags, e)?;
                             continue;
                         }
                     };
@@ -2867,7 +3114,7 @@ fn run(
                     let results = match call_function(ctx.code, ctx.host_funcs, store, owner, f, &args, depth + 1) {
                         Ok(r) => r,
                         Err(e) => {
-                            pc = frame.on_call_error(store, e)?;
+                            pc = frame.on_call_error(store, &ctx.maps.tags, e)?;
                             continue;
                         }
                     };

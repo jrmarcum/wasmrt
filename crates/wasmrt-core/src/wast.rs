@@ -539,7 +539,7 @@ impl Runner {
                 return;
             }
             Err(ActionErr::Trap(t)) => {
-                self.fail(format!("assert_return: unexpected trap {t}"));
+                self.fail(format!("assert_return {}: unexpected trap {t}", render(action)));
                 return;
             }
             Err(ActionErr::Bad(m)) => {
@@ -553,7 +553,8 @@ impl Runner {
         // adjustment because it stores a v128 as two `u64`s.
         if results.len() != expected.len() {
             self.fail(format!(
-                "assert_return: arity {} != expected {}",
+                "assert_return {}: arity {} != expected {}",
+                render(action),
                 results.len(),
                 expected.len()
             ));
@@ -564,7 +565,9 @@ impl Runner {
                 Ok(true) => {}
                 Ok(false) => {
                     self.fail(format!(
-                        "assert_return: result mismatch (got 0x{got:x}, expected {exp:?})"
+                        "assert_return {}: result mismatch (got 0x{got:x}, expected {})",
+                        render(action),
+                        render(exp)
                     ));
                     return;
                 }
@@ -596,7 +599,10 @@ impl Runner {
             return;
         }
         match self.run_action(operand) {
-            Ok(_) => self.fail("assert_trap: expected a trap, got a result".to_string()),
+            Ok(_) => self.fail(format!(
+                "assert_trap {}: expected a trap, got a result",
+                render(operand)
+            )),
             Err(ActionErr::Trap(_)) => self.summary.passed += 1,
             Err(ActionErr::NoTarget) => {
                 self.skip(String::from("assert_trap: no target instance"));
@@ -785,6 +791,23 @@ impl fmt::Display for BuildErr {
 }
 
 // --- Value literals and matching ----------------------------------------------
+
+/// Render an action or expectation form back to compact text, for a failure message.
+///
+/// ⚠️ **A failure a reader cannot attribute to an assertion is barely a measurement.** Every
+/// `assert_return` failure read `result mismatch (got 0x2, expected …)` with no way to tell WHICH
+/// invocation produced it — in a file with 60 assertions that is a bisect, and it is the same
+/// lesson the skip census paid for on 2026-08-19 (`best-practices.md` §5.6). One line each.
+fn render(form: &Sexpr) -> String {
+    match form {
+        Sexpr::Atom(a) => a.clone(),
+        Sexpr::Str(b) => format!("\"{}\"", String::from_utf8_lossy(b)),
+        Sexpr::List(l) => {
+            let inner: Vec<String> = l.iter().map(render).collect();
+            format!("({})", inner.join(" "))
+        }
+    }
+}
 
 /// Parse a concrete argument literal: `(TYPE.const …)` or a reference literal.
 fn parse_const(form: &Sexpr) -> Result<Value, String> {

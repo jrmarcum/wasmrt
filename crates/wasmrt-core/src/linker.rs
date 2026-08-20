@@ -300,14 +300,11 @@ impl Linker {
                             // consequence of that: `Imports` carries a bare `Value`, which
                             // cannot say `i32` from `f32`, let alone mutable from not.
                             Some(Def::Instance(id)) => {
-                                let actual = store
-                                    .export_global_type(*id, &imp.name)
-                                    .ok_or_else(unknown)?;
                                 let declared = match &imp.ty {
                                     crate::module::Extern::Global(gt) => *gt,
                                     _ => return Err(mismatch()),
                                 };
-                                if actual != declared {
+                                if !store.global_import_matches(*id, &imp.name, md, declared) {
                                     return Err(LinkError::IncompatibleType {
                                         module: imp.module.clone(),
                                         name: imp.name.clone(),
