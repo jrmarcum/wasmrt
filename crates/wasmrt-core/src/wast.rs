@@ -105,10 +105,55 @@ const MAX_RECORDED_SKIPS: usize = 512;
 pub fn run_script(src: &[u8]) -> Result<Summary, Error> {
     let forms = sexpr::parse_all(src)?;
     let mut r = Runner::default();
-    for cmd in &forms {
-        r.command(cmd);
+    let mut i = 0;
+    while i < forms.len() {
+        // §7's **inline module** abbreviation: a run of bare MODULE FIELDS at the top level of a
+        // script is one module, with the `(module …)` wrapper left off. `inline-module.wast` is a
+        // single line — `(func) (memory 0) (func (export "f"))` — and is a whole module.
+        //
+        // ⚠️ Handled here, not in `command`: the abbreviation is about a RUN of forms, and a
+        // dispatcher that sees one command at a time can only report each as an unhandled one,
+        // which is what it did. Three assertions, and the reason they read as three unrelated
+        // "unhandled command `func`" skips rather than one missing feature.
+        if is_module_field(&forms[i]) {
+            let start = i;
+            while i < forms.len() && is_module_field(&forms[i]) {
+                i += 1;
+            }
+            let mut inline = alloc::vec![Sexpr::Atom(String::from("module"))];
+            inline.extend_from_slice(&forms[start..i]);
+            r.command(&Sexpr::List(inline));
+            continue;
+        }
+        r.command(&forms[i]);
+        i += 1;
     }
     Ok(r.summary)
+}
+
+/// Is this top-level form a **module field** rather than a script command (§6.6.13)?
+///
+/// The closed list of what may appear inside `(module …)`. Deliberately not "anything that is not
+/// a known command": an unknown command must stay an unknown command, so the report keeps saying
+/// so instead of quietly assembling it into a module and failing somewhere else.
+fn is_module_field(form: &Sexpr) -> bool {
+    matches!(
+        form.keyword(),
+        Some(
+            "type"
+                | "rec"
+                | "import"
+                | "func"
+                | "table"
+                | "memory"
+                | "global"
+                | "tag"
+                | "export"
+                | "start"
+                | "elem"
+                | "data"
+        )
+    )
 }
 
 #[derive(Default)]

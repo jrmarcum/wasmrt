@@ -1460,14 +1460,24 @@ impl<'a> FuncValidator<'a> {
                 };
                 self.push_ctrl(FrameKind::CatchLegacy, start, frame.end)?;
             }
+            // `delegate l` TERMINATES its `try` — it stands where an `end` would — and re-raises
+            // anything the body throws at label `l`, skipping the handlers of every try in
+            // between.
+            //
+            // ⚠️ Refused outright until 2026-08-20, "matching the frozen oracle". The oracle
+            // retired on 2026-08-11 and the rationale went with it: a construct refused because
+            // some other engine refused it is a deliberate deviation, and T13 has none. The label
+            // resolves in the scope OUTSIDE the try, which is why it is read after `pop_ctrl` —
+            // `delegate` closes the block, so its own label is not in scope for it.
             Op::Delegate => {
-                // `delegate l` re-raises "at label l", which can SKIP the handlers of trys
-                // between this one and the target. The frozen oracle does not implement that
-                // routing (its interpreter traps on it) and rejects `delegate` here rather
-                // than accept a construct it cannot correctly execute. wasmrt matches, so
-                // the validator and the interpreter agree. Every other legacy construct —
-                // `try`/`catch`/`catch_all`/`rethrow` — is fully supported.
-                return Err(ValidateError::UnsupportedValidation);
+                let l = expect_label(&instr.imm)?;
+                let frame = self.pop_ctrl()?;
+                if frame.kind != FrameKind::TryLegacy {
+                    return Err(ValidateError::MismatchedCatch);
+                }
+                self.label_types_at(l)?;
+                self.local_init.copy_from_slice(&frame.init_snapshot);
+                self.push_vals(&frame.end);
             }
             Op::Rethrow => {
                 // Re-raise the exception caught `l` levels out: `l` must resolve **to a `catch`
@@ -3588,16 +3598,36 @@ mod tests {
         );
     }
 
+    /// `delegate l` terminates its `try` and names a label OUTSIDE it.
+    ///
+    /// ⚠️ This asserted `UnsupportedValidation` — refused outright "matching the frozen oracle",
+    /// which retired on 2026-08-11. A construct refused because another engine refused it is a
+    /// deliberate deviation, and T13 has none.
     #[test]
-    fn eh_delegate_is_rejected() {
-        // `delegate` is refused outright — the interpreter cannot route it, and the frozen
-        // oracle's validator rejects it, so text and binary paths agree.
+    fn eh_delegate_validates_and_names_an_outer_label() {
+        // (block (try (i32.const 4) (throw $e) (delegate 0)))
         let body = [
             0x00, 0x02, 0x40, 0x06, 0x40, 0x41, 0x04, 0x08, 0x00, 0x18, 0x00, 0x0b, 0x0b,
         ];
+        assert_eq!(check(&eh_mod(&body, &[])), Ok(()));
+
+        // …and the label must resolve. `delegate` has already closed its own try, so with only
+        // the block and the function label left, 2 names nothing.
+        let bad = [
+            0x00, 0x02, 0x40, 0x06, 0x40, 0x41, 0x04, 0x08, 0x00, 0x18, 0x09, 0x0b, 0x0b,
+        ];
         assert_eq!(
-            check(&eh_mod(&body, &[])),
-            Err(ValidateError::UnsupportedValidation)
+            check(&eh_mod(&bad, &[])),
+            Err(ValidateError::UnknownLabel)
+        );
+
+        // `delegate` only closes a `try`; standing where a `block`'s `end` belongs is malformed.
+        // One `end` only: `delegate` closes the block in place of it, so the function's own
+        // `end` is the last byte.
+        let not_a_try = [0x00, 0x02, 0x40, 0x18, 0x00, 0x0b];
+        assert_eq!(
+            check(&eh_mod(&not_a_try, &[])),
+            Err(ValidateError::MismatchedCatch)
         );
     }
 

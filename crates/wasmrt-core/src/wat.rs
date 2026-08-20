@@ -3146,13 +3146,16 @@ fn emit_folded_try(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     emit_seq(ctx, &do_form[1..])?;
 
     // `(delegate $l)` forwards an exception to an enclosing try instead of running local
-    // handlers. The interpreter does not implement that routing and the validator rejects
-    // it, so assembling one would produce a module that validates yet silently mis-routes
-    // at run time — exactly the "bytes don't match the source" failure this assembler
-    // refuses everywhere else. Reject it here too, so all three agree.
+    // handlers, and TERMINATES the try in place of its `end`. ⚠️ Its label resolves in the scope
+    // OUTSIDE the try, so the try's own label comes off before it is read — the same rule
+    // `try_table`'s catch labels follow, and for the same reason: the form closes the block.
     if let Some(d) = l.get(j).and_then(Sexpr::as_list) {
         if d.first().map(|s| eq_atom(s, "delegate")) == Some(true) {
-            return Err(Error::Unsupported("legacy `delegate` (rejected, matching the oracle)"));
+            ctx.labels.pop();
+            ctx.out.push(0x18);
+            let target = ctx.resolve_label(nth(d, 1)?)?;
+            uleb(&mut ctx.out, u64::from(target));
+            return Ok(());
         }
     }
 
@@ -3254,11 +3257,15 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             ctx.out.push(0x19);
             Ok(i + 1)
         }
-        // Rejected in the assembler, the validator and the interpreter alike — see
-        // `emit_folded_try`.
-        O::Delegate => Err(Error::Unsupported(
-            "legacy `delegate` (rejected, matching the oracle)",
-        )),
+        // `delegate l` terminates its `try`, so its label resolves OUTSIDE it — the try's own
+        // label comes off first. See `emit_folded_try`.
+        O::Delegate => {
+            ctx.labels.pop();
+            ctx.out.push(0x18);
+            let target = ctx.resolve_label(nth(items, i + 1)?)?;
+            uleb(&mut ctx.out, u64::from(target));
+            Ok(i + 2)
+        }
         O::TryTable => {
             // Flat: `try_table $l? blocktype? catch* … end`. The catch labels resolve in the
             // ENCLOSING scope, so the try_table's own label goes on only after them — see the
@@ -5533,18 +5540,19 @@ mod tests {
         assert_eq!(crate::interp::as_i32(r[0]), 55);
     }
 
+    /// `delegate` assembles in both forms and its label resolves OUTSIDE the try it closes.
+    ///
+    /// ⚠️ This asserted `Error::Unsupported` for both — the assembler refused the construct
+    /// "matching the oracle". ⚠️ The two spellings must emit the SAME bytes, which is the
+    /// property that catches a scope handled in one path and not the other: the try's label has to
+    /// come off before the operand is resolved, in each emitter separately.
     #[test]
-    fn rejects_legacy_delegate_in_both_forms() {
-        // The assembler refuses `delegate` for the same reason the validator and the
-        // interpreter do — assembling it would yield a module that validates yet
-        // silently mis-routes at run time.
+    fn delegate_assembles_identically_in_both_forms() {
         let folded = r#"(module
             (tag $e (param i32))
             (func (export "f")
               (block
                 (try (do (i32.const 4) (throw $e)) (delegate 0)))))"#;
-        assert!(matches!(asm(folded), Err(Error::Unsupported(_))));
-
         let flat = r#"(module
             (tag $e (param i32))
             (func (export "f")
@@ -5554,7 +5562,15 @@ mod tests {
                   throw $e
                 delegate 0
               end))"#;
-        assert!(matches!(asm(flat), Err(Error::Unsupported(_))));
+        let a = asm_valid(folded);
+        assert_eq!(a, asm_valid(flat), "the folded and flat forms must agree");
+        // … 0x18 <labelidx>. `delegate 0` names the enclosing BLOCK, so the byte is 0 — if the
+        // try's own label were still in scope it would have had to be 1.
+        let at = a
+            .windows(2)
+            .position(|w| w == [0x08, 0x00])
+            .expect("throw is in the body");
+        assert_eq!(&a[at + 2..at + 4], &[0x18, 0x00]);
     }
 
     #[test]

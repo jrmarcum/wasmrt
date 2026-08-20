@@ -2418,7 +2418,14 @@ impl Frame<'_> {
     ) -> Result<Option<usize>> {
         let body = self.body;
         let resolve = |t: u32| IndexMaps::get(tags, t as usize);
+        // Depths a `delegate` has skipped past. Kept as a floor rather than by advancing the loop
+        // variable, so every `continue` in the body below still steps outward by one on its own —
+        // a `while` here would have needed each of them to remember to.
+        let mut skip_below = 0usize;
         for d in 0..self.labels.len() {
+            if d < skip_below {
+                continue;
+            }
             let idx = self.labels.len() - 1 - d;
 
             // --- try_table (exnref encoding) ---
@@ -2482,13 +2489,23 @@ impl Frame<'_> {
             let Some(lt) = body.try_info.get(lpc).and_then(Option::as_ref) else {
                 continue;
             };
-            // `delegate l` re-raises "at label l", which can skip handlers this ordinary
-            // outward unwind would run. The frozen oracle does not implement that routing and
-            // its validator rejects `delegate` outright; we match it, and trap loudly here so
-            // a hand-crafted binary that reaches a delegating try while unwinding fails
-            // visibly instead of silently mis-routing.
-            if lt.delegate.is_some() {
-                return Err(Trap::UnsupportedInstruction);
+            // `delegate l` re-raises **at label `l`**, skipping the handlers of every try
+            // between this one and the target. The unwind therefore JUMPS: `l` counts from the
+            // scope outside this try, whose own label sits at depth `d`, so the search resumes at
+            // `d + 1 + l`. A target that is not a try (a plain `block`, or past the function's own
+            // label) catches nothing and the walk simply continues outward from there — which is
+            // what `try_delegate.wast`'s `delegate-to-block` asserts.
+            //
+            // ⚠️ This trapped `UnsupportedInstruction` "matching the frozen oracle". The oracle
+            // retired on 2026-08-11; a construct refused because another engine refused it is a
+            // deliberate deviation, and T13 has none.
+            if let Some(l) = lt.delegate {
+                let target = d as u64 + 1 + u64::from(l);
+                let Ok(target) = usize::try_from(target) else {
+                    return Err(Trap::UndefinedLabel);
+                };
+                skip_below = target;
+                continue;
             }
             // A throw from WITHIN this try's own handler must propagate OUTWARD rather than
             // re-match the same handler: once a handler is entered (`caught` set) we are past
@@ -7373,24 +7390,50 @@ mod tests {
         assert_eq!(run1(&m, "e", &[]), Err(Trap::UncaughtException));
     }
 
+    /// `delegate l` re-raises at label `l` and SKIPS the handlers in between.
+    ///
+    /// ⚠️ This used to assert `Trap::UnsupportedInstruction` — the construct was refused "matching
+    /// the frozen oracle", which retired on 2026-08-11. Delegating to a plain `block` catches
+    /// nothing, so the exception keeps going and leaves the function uncaught.
     #[test]
-    fn eh_legacy_delegate_traps_while_unwinding() {
-        // `delegate` re-raises "at label l", routing the frozen oracle does not implement
-        // (and its validator rejects). Reaching one while unwinding must trap loudly rather
-        // than silently mis-route.
+    fn eh_legacy_delegate_to_a_block_catches_nothing() {
         let entry = [
             0x00, //
             0x02, 0x40, // block
             0x06, 0x40, // try
             0x41, 0x04, // i32.const 4
             0x08, 0x00, // throw tag 0
-            0x18, 0x00, // delegate 0  (terminates the try)
+            0x18, 0x00, // delegate 0  (the block — terminates the try)
             0x0b, // end block
             0x41, 0x00, //
             0x0b,
         ];
         let m = eh_func(&entry, &[0x7f]);
-        assert_eq!(run1(&m, "e", &[]), Err(Trap::UnsupportedInstruction));
+        assert_eq!(run1(&m, "e", &[]), Err(Trap::UncaughtException));
+    }
+
+    /// …and the half that makes it a feature rather than a no-op: an OUTER try named by the
+    /// delegate catches, while the try the exception passed through does not.
+    #[test]
+    fn eh_legacy_delegate_skips_the_handler_in_between() {
+        let entry = [
+            0x00, //
+            0x06, 0x7f, // try $outer (result i32)
+            0x06, 0x7f, //   try $middle (result i32)
+            0x06, 0x7f, //     try (result i32)
+            0x41, 0x01, //       i32.const 1
+            0x08, 0x00, //       throw tag 0
+            0x18, 0x01, //     delegate 1  -> $outer, skipping $middle
+            0x07, 0x00, //   catch tag 0 (of $middle)
+            0x41, 0x02, //     i32.const 2   (must NOT run)
+            0x0b, //         end $middle
+            0x07, 0x00, // catch tag 0 (of $outer)
+            0x41, 0x03, //   i32.const 3
+            0x0b, //       end $outer
+            0x0b,
+        ];
+        let m = eh_func(&entry, &[0x7f]);
+        assert_eq!(as_i32(run1(&m, "e", &[]).unwrap()[0]), 3);
     }
 
     #[test]
