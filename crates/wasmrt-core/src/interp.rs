@@ -99,6 +99,76 @@ pub const NULL_REF: Value = u64::MAX as Value;
 const I31_TAG: Value = 1 << 63;
 const _: () = assert!(I31_TAG == (1u128 << 63)); // i31 tag lives in the low 64 bits
 
+// --- the externref bridge: HOST_TAG and EXTERN_TAG (S1) -------------------------------
+//
+// Before this existed, `any.convert_extern` / `extern.convert_any` were **deliberately absent**
+// from the decoder, because an `externref` and a GC object shared one numeric space: a host
+// handle crossing the C ABI is a raw `uint64_t`, while `ref_matches`' `Any` arm reads a
+// non-null, non-i31 reference as a `gc_heap` INDEX. Convert one to the other and host handle 2
+// reads as GC object #2 — a type-confused read that the cast believes it verified.
+//
+// The fix is a representation, not two opcode arms. Every reference form lived in the LOW 64
+// bits of the `u128` slot, so the high half was free for exactly the two facts the low half
+// could not carry:
+//
+// ```text
+//   bit 65      bit 64     bits 63..0
+//   extern      host       the internal reference (null / i31 / funcref / gc index / host addr)
+// ```
+//
+// * [`HOST_TAG`] marks the low bits as a **host address** rather than a GC heap index. That is
+//   what makes the two spaces distinct, and it is the half that closes the type confusion.
+// * [`EXTERN_TAG`] marks the value as an **`externref` wrapper** around whatever the remaining
+//   bits describe. `extern.convert_any` sets it, `any.convert_extern` clears it — the spec's
+//   model exactly, where `(ref.extern n)` *is* `extern.convert_any (ref.host n)`.
+//
+// ⚠️ A `v128` uses the whole 128-bit slot, so these bits are free only for values validation has
+// proven to be references. That is the same contract [`I31_TAG`] already relies on.
+//
+// ⚠️ **`NULL_REF` never carries either tag.** Null externalizes and internalizes to null
+// (§4.4.7.3), so `ref.is_null` stays one `==` against the sentinel and every existing null check
+// keeps working untouched.
+
+/// Marks the low bits as a **host address** (`ref.host n`) rather than a GC heap index.
+///
+/// A host reference is an `anyref` and nothing narrower — in particular **not `eqref`**, which
+/// `ref_test.wast` pins directly (index 6, `any.convert_extern` of a host externref, answers 2
+/// for `any` and 0 for `eq`).
+pub const HOST_TAG: Value = 1 << 64;
+
+/// Marks the value as an **`externref` wrapper** around the internal reference in the remaining
+/// bits. Set by `extern.convert_any`, cleared by `any.convert_extern`.
+pub const EXTERN_TAG: Value = 1 << 65;
+
+const _: () = assert!(HOST_TAG > u64::MAX as Value); // both tags live ABOVE the low 64 bits
+const _: () = assert!(EXTERN_TAG > u64::MAX as Value);
+
+/// The value of `(ref.host n)`: an `anyref` naming host address `n`.
+#[must_use]
+pub fn host_ref(n: u64) -> Value {
+    HOST_TAG | Value::from(n)
+}
+
+/// `extern.convert_any` — wrap an internal reference as an `externref`. Null stays null.
+#[inline]
+#[must_use]
+pub fn externalize(v: Value) -> Value {
+    if v == NULL_REF { v } else { v | EXTERN_TAG }
+}
+
+/// `any.convert_extern` — unwrap an `externref` back to the internal reference it carries.
+/// Null stays null.
+///
+/// ⚠️ An `externref` that never went through [`externalize`] — one the *host* handed in — has no
+/// wrapper bit to clear, and unwrapping it must still yield a host reference rather than a bare
+/// integer that the `Any` arm would read as a GC index. That is why the boundary tags with
+/// `HOST_TAG | EXTERN_TAG` and this function only ever clears `EXTERN_TAG`.
+#[inline]
+#[must_use]
+pub fn internalize(v: Value) -> Value {
+    if v == NULL_REF { v } else { v & !EXTERN_TAG }
+}
+
 // --- funcref encoding: (owning instance, function index) ------------------------------
 //
 // **A `funcref` carries the identity of the instance that produced it.** Without that it is a bare
@@ -2914,6 +2984,18 @@ fn run(
                     pc += 1;
                 }
 
+                // --- WasmGC: the externref bridge (§4.4.7.3) ---
+                Op::AnyConvertExtern => {
+                    let r = frame.pop();
+                    frame.push(internalize(r));
+                    pc += 1;
+                }
+                Op::ExternConvertAny => {
+                    let r = frame.pop();
+                    frame.push(externalize(r));
+                    pc += 1;
+                }
+
                 // --- WasmGC: i31 (unboxed; i31_tag checked AFTER null_ref) ---
                 Op::RefI31 => {
                     let x = frame.pop_i32() as u32;
@@ -3805,6 +3887,21 @@ fn ref_matches(
     };
     match target_head.top() {
         RefHeap::Any => {
+            // ⚠️ **The type-confusion guard, and the reason `any.convert_extern` waited for a
+            // representation.** Below this point a non-null, non-i31 value is read as a GC heap
+            // INDEX. A host reference is not one — it is an opaque address in the embedder's own
+            // space — so it must be answered here, before the heap is indexed at all. It is
+            // `any` and nothing narrower: `ref_test.wast` index 6 asks `eq` of exactly this value
+            // and expects 0.
+            if v & HOST_TAG != 0 {
+                return target_head == RefHeap::Any;
+            }
+            // An `externref` wrapper cannot reach an `any` target: validation gives the two
+            // disjoint hierarchies. Refusing rather than unwrapping keeps it that way if it ever
+            // does — the accept side is the one that reads a field at another type's width.
+            if v & EXTERN_TAG != 0 {
+                return false;
+            }
             if v & I31_TAG != 0 {
                 return head_matches(module, RefHeap::I31, None, rt.heap);
             }
@@ -3896,7 +3993,11 @@ fn ref_matches(
                 _ => false,
             }
         }
-        _ => head_matches(module, RefHeap::Extern, None, rt.heap),
+        // The `extern` and `exn` hierarchies: every non-null value of one is that hierarchy's
+        // top, and neither has a concrete form. ⚠️ Passing the target's OWN top rather than a
+        // hardcoded `Extern` is what makes `ref.test exnref` on an `exnref` answer true; the
+        // hardcoded version asked whether `extern <: exn` and always said no.
+        _ => head_matches(module, target_head.top(), None, rt.heap),
     }
 }
 
@@ -5672,6 +5773,17 @@ fn eval_const_expr(
                         stack.truncate(base);
                         let v = alloc_object(pools, inst, ti, elems)?;
                         stack.push(v);
+                    }
+                    // The externref bridge — constant per §3.3.11, and `extern.wast` opens with
+                    // `(global externref (extern.convert_any (ref.null any)))`, so a module using
+                    // it does not BUILD without these two arms.
+                    0x1a => {
+                        let r = stack.pop().ok_or(Trap::ConstantExpr)?;
+                        stack.push(internalize(r));
+                    }
+                    0x1b => {
+                        let r = stack.pop().ok_or(Trap::ConstantExpr)?;
+                        stack.push(externalize(r));
                     }
                     // ref.i31 — unboxed, so no allocation. `NULL_REF` is checked before `I31_TAG`
                     // everywhere that reads a reference, which is what keeps the two apart.

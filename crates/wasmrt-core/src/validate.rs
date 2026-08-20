@@ -798,6 +798,22 @@ fn validate_const_expr(
                         }
                         push(&mut stack, V::concrete_ref(false, RefHeap::Array, ti))?;
                     }
+                    // any.convert_extern / extern.convert_any. Constant per §3.3.11, and
+                    // `extern.wast`'s very first global is `(extern.convert_any (ref.null any))`
+                    // — without these the whole module fails to build and takes every later
+                    // assertion in the file with it.
+                    0x1a | 0x1b => {
+                        let got = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                        let (want, from, to) = if sub == 0x1a {
+                            (V::EXTERNREF, V::ANYREF, V::ANYREF_NN)
+                        } else {
+                            (V::ANYREF, V::EXTERNREF, V::EXTERNREF_NN)
+                        };
+                        if !subtype_of(module, got, want) {
+                            return Err(ValidateError::TypeMismatch);
+                        }
+                        push(&mut stack, if got.is_non_null_ref() { to } else { from })?;
+                    }
                     // ref.i31
                     0x1c => {
                         let got = stack.pop().ok_or(ValidateError::StackUnderflow)?;
@@ -1725,6 +1741,27 @@ impl<'a> FuncValidator<'a> {
                 self.push_val_t(V::I31REF_NN);
             }
 
+            // §: `any.convert_extern : [(ref null1 extern)] → [(ref null1 any)]` and its inverse.
+            // **Nullability propagates** — a non-null operand yields a non-null result — so both
+            // arms read the type they actually popped instead of pushing the nullable form and
+            // letting a valid module be refused for it.
+            Op::AnyConvertExtern => match self.pop_expect(V::EXTERNREF)? {
+                StackType::Val(v) => {
+                    self.push_val_t(if v.is_non_null_ref() { V::ANYREF_NN } else { V::ANYREF });
+                }
+                StackType::Unknown => self.push_val(StackType::Unknown),
+            },
+            Op::ExternConvertAny => match self.pop_expect(V::ANYREF)? {
+                StackType::Val(v) => {
+                    self.push_val_t(if v.is_non_null_ref() {
+                        V::EXTERNREF_NN
+                    } else {
+                        V::EXTERNREF
+                    });
+                }
+                StackType::Unknown => self.push_val(StackType::Unknown),
+            },
+
             // --- WasmGC: struct objects ---
             // A concrete `(ref $t)` is popped as the CONCRETE type, never the family head:
             // popping `structref` would let ANY struct reference satisfy ANY `struct.*`, so
@@ -2089,13 +2126,27 @@ impl<'a> FuncValidator<'a> {
                 if lt.is_empty() {
                     return Err(ValidateError::TypeMismatch);
                 }
-                // What the branch carries: `dst` for br_on_cast (it fires on a match),
-                // `src` for br_on_cast_fail (it fires on a miss).
-                let carried = if instr.op == Op::BrOnCast {
-                    dst_vt
-                } else {
+                // The reference-type **difference** `rt1 \ rt2`: whichever path does NOT get the
+                // match gets this. A *nullable* `dst` swallows null on the matching path, so the
+                // other path's reference is non-null; a non-null `dst` leaves `src`'s nullability
+                // alone.
+                //
+                // ⚠️ **One expression, used by both instructions.** It was written out only for
+                // `br_on_cast`'s fall-through, and `br_on_cast_fail`'s branch — the *same* edge
+                // of the same instruction pair — carried a plain `src` instead. That refuses
+                // `br_on_cast_fail $l (ref null any) (ref null struct)` into a label typed
+                // `(ref any)`, which is the canonical null-splitting idiom the instruction exists
+                // for (`br_on_cast_fail.wast`'s `null-diff`). It errs in the *refusing* direction,
+                // so nothing ran wrong — and it stayed hidden because the whole module was
+                // unbuildable for want of `any.convert_extern` until S1 landed.
+                let diff = if dst_vt.is_non_null_ref() {
                     src_vt
+                } else {
+                    src_vt.non_null()
                 };
+                // What the branch carries: `dst` for br_on_cast (it fires on a match), the
+                // difference for br_on_cast_fail (it fires on a miss).
+                let carried = if instr.op == Op::BrOnCast { dst_vt } else { diff };
                 if !subtype_of(self.module, carried, lt[lt.len() - 1]) {
                     return Err(ValidateError::TypeMismatch);
                 }
@@ -2103,18 +2154,9 @@ impl<'a> FuncValidator<'a> {
                 self.pop_expect(src_vt)?; // the ref operand (top)
                 self.pop_vals(&prefix)?;
                 self.push_vals(&prefix);
-                // Fall-through: `src` for br_on_cast — but when the cast target is NULLABLE
-                // a null would have branched, so the fall-through ref is non-null.
-                // `br_on_cast_fail` falls through with the narrowed `dst`.
-                self.push_val_t(if instr.op == Op::BrOnCast {
-                    if dst_vt.is_non_null_ref() {
-                        src_vt
-                    } else {
-                        src_vt.non_null()
-                    }
-                } else {
-                    dst_vt
-                });
+                // Fall-through is the mirror: the difference for br_on_cast, the narrowed `dst`
+                // for br_on_cast_fail.
+                self.push_val_t(if instr.op == Op::BrOnCast { diff } else { dst_vt });
             }
             Op::I31GetS | Op::I31GetU => {
                 self.pop_expect(V::I31REF)?;

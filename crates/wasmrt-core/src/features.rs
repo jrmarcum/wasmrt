@@ -314,7 +314,9 @@ pub const fn op_feature(op: Op) -> Option<Feature> {
         RefEq | ArrayNew | ArrayNewDefault | ArrayNewFixed | ArrayGet | ArrayGetS
         | ArrayGetU | ArraySet | ArrayLen | RefTest | RefCastOp | RefI31 | I31GetS
         | I31GetU | StructNew | StructNewDefault | StructGet | StructGetS | StructGetU
-        | StructSet | BrOnCast | BrOnCastFail => Feature::Gc,
+        | StructSet | BrOnCast | BrOnCastFail | AnyConvertExtern | ExternConvertAny => {
+            Feature::Gc
+        }
 
         // --- sign extension ---
         I32Extend8S | I32Extend16S | I64Extend8S | I64Extend16S | I64Extend32S => {

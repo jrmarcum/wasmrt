@@ -1717,12 +1717,11 @@ fn classify_unknown_mnemonic(name: &str) -> Error {
     if matches!(name, "i64.add128" | "i64.sub128" | "i64.mul_wide_s" | "i64.mul_wide_u") {
         return Error::UnimplementedInstr;
     }
-    // The externref/anyref bridge — IN scope, and deliberately deferred until `Value` can tag an
-    // externref (`opcode.rs`, the `0xFB 0x1a`/`0x1b` note). A recorded deferral is still our
-    // gap, never a verdict about the input.
-    if matches!(name, "any.convert_extern" | "extern.convert_any") {
-        return Error::UnimplementedInstr;
-    }
+    // ⚠️ `any.convert_extern` / `extern.convert_any` were listed here until 2026-08-20. They are
+    // implemented now (S1 — the tagged `Value` representation), so leaving them would have made
+    // the assembler refuse an instruction the rest of the engine handles, and score it as OUR gap.
+    // **An entry here is a claim that the gap is still open; it has to be removed the day it
+    // closes**, and `wast::tests::every_skip_records_a_reason` depends on this list too.
     Error::UnknownInstr
 }
 
@@ -2822,6 +2821,10 @@ fn immediate_arity(op: crate::opcode::Op) -> usize {
         O::ArrayFill => 1,
         O::ArrayNewData | O::ArrayNewElem | O::ArrayInitData | O::ArrayInitElem
         | O::ArrayCopy => 2,
+        // The externref bridge takes no immediate. ⚠️ Listed rather than left to `_ => 0` for
+        // the same reason as the array bulk ops above: falling into the catch-all is how four
+        // instructions shipped as bare opcodes, and "0" has to be a decision, not a default.
+        O::AnyConvertExtern | O::ExternConvertAny => 0,
         // Loads/stores take optional `offset=`/`align=` atoms, consumed by their emitter.
         _ => 0,
     }
@@ -3317,7 +3320,9 @@ fn emit_op_with_immediates(
         | O::BrOnCastFail
         | O::RefI31
         | O::I31GetS
-        | O::I31GetU => {
+        | O::I31GetU
+        | O::AnyConvertExtern
+        | O::ExternConvertAny => {
             ctx.out.push(0xfb);
             let sub: u64 = match op {
                 O::StructNew => 0x00,
@@ -3344,6 +3349,8 @@ fn emit_op_with_immediates(
                 O::RefCastOp => 0x16,
                 O::BrOnCast => 0x18,
                 O::BrOnCastFail => 0x19,
+                O::AnyConvertExtern => 0x1a,
+                O::ExternConvertAny => 0x1b,
                 O::RefI31 => 0x1c,
                 O::I31GetS => 0x1d,
                 _ => 0x1e,
@@ -3521,7 +3528,13 @@ fn emit_op_with_immediates(
             uleb(&mut ctx.out, u64::from(ti));
             uleb(&mut ctx.out, u64::from(fi));
         }
-        O::ArrayLen | O::RefI31 | O::I31GetS | O::I31GetU | O::RefEq => {}
+        O::ArrayLen
+        | O::RefI31
+        | O::I31GetS
+        | O::I31GetU
+        | O::RefEq
+        | O::AnyConvertExtern
+        | O::ExternConvertAny => {}
         O::RefTest | O::RefCastOp => {
             let (nullable, code) = parse_ref_type_target(ctx, imm(0)?)?;
             if nullable {

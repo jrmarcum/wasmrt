@@ -6,10 +6,10 @@
 //! assembler. [`decode_body`] turns a function body's raw bytes into a flat `Vec<Instr>`
 //! with pre-parsed immediates.
 //!
-//! **Invariant (do not drift):** [`Op`] values `0xD7`–`0xFA` are **internal tags**, not
-//! wire bytes — they name ops whose real encoding is `0xFB`/`0xFC` + a LEB sub-opcode.
-//! [`decode_body`] rejects a raw byte in that range (accepting one would execute a
-//! non-standard encoding as a real instruction). [`Op::from_u8`] maps only real
+//! **Invariant (do not drift):** [`Op`] values `0x16`–`0x17` and `0xD7`–`0xFA` are
+//! **internal tags**, not wire bytes — they name ops whose real encoding is `0xFB`/`0xFC` +
+//! a LEB sub-opcode. [`decode_body`] rejects a raw byte in either range (accepting one would
+//! execute a non-standard encoding as a real instruction). [`Op::from_u8`] maps only real
 //! single-byte opcodes; the prefix families construct their `Op` variant directly.
 //!
 //! Unlike wazmrt, immediates that own data (`br_table` labels, typed-`select` types,
@@ -50,7 +50,7 @@ macro_rules! define_ops {
         impl Op {
             /// The op for a real **single-byte** opcode `b`, or `None` if `b` is not a
             /// defined single-byte op (prefix bytes `0xFB`–`0xFE` and the internal-tag
-            /// range `0xD7`–`0xFA` return `None`).
+            /// ranges `0x16`–`0x17` / `0xD7`–`0xFA` return `None`).
             #[must_use]
             pub const fn from_u8(b: u8) -> Option<Op> {
                 match b {
@@ -232,6 +232,13 @@ define_ops! {
         StructGet = 0xf5 => "struct.get", StructGetS = 0xf6 => "struct.get_s",
         StructGetU = 0xf7 => "struct.get_u", StructSet = 0xf8 => "struct.set",
         BrOnCast = 0xf9 => "br_on_cast", BrOnCastFail = 0xfa => "br_on_cast_fail",
+        // The externref bridge (`0xFB 0x1a/0x1b`). ⚠️ Their internal tags are `0x16`/`0x17`
+        // rather than the usual `0xd7..` block because that block is full and the two bytes
+        // either side of it (`0xfb`, `0xfc`) are *prefix* bytes — tagging with one of those
+        // would force `decode_body`'s internal-tag guard to reject the prefix it must accept.
+        // `0x16`/`0x17` are unassigned in the single-byte space, and the guard covers them.
+        AnyConvertExtern = 0x16 => "any.convert_extern",
+        ExternConvertAny = 0x17 => "extern.convert_any",
     }
 }
 
@@ -515,8 +522,9 @@ fn immediate_kind(b: u8) -> ImmKind {
         0x00 | 0x01 | 0x05 | 0x0b | 0x0f | 0x1a | 0x1b | 0xd1 | 0xd3 | 0xd4 | 0x45..=0xcc => {
             ImmKind::None
         }
-        // GC ops with no immediate: ref.i31 / i31.get_s / i31.get_u, array.len.
-        0xf0 | 0xf1 | 0xf2 | 0xed => ImmKind::None,
+        // GC ops with no immediate: ref.i31 / i31.get_s / i31.get_u, array.len, and the
+        // externref bridge (internal tags `0x16`/`0x17`).
+        0xf0 | 0xf1 | 0xf2 | 0xed | 0x16 | 0x17 => ImmKind::None,
         // GC ops with a single type index.
         0xe6 | 0xe7 | 0xe9 | 0xea | 0xeb | 0xec | 0xf3 | 0xf4 => ImmKind::GcType,
         // GC struct ops with a type index + field index.
@@ -979,22 +987,13 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                 },
                 0x18 => Instr { offset: 0, op: Op::BrOnCast, imm: read_br_cast(&mut r)? },
                 0x19 => Instr { offset: 0, op: Op::BrOnCastFail, imm: read_br_cast(&mut r)? },
-                // ⚠️⚠️ 0x1a `any.convert_extern` and 0x1b `extern.convert_any` are DELIBERATELY ABSENT.
-                //
-                // They are in scope and must eventually exist — but implementing them here, first,
-                // opens a silent-wrong-answer hole. An `externref` crosses the C ABI as a raw
-                // pass-through `uint64_t` (`wasmrt.h`), while `ref_matches`' `Any` arm treats any
-                // non-null, non-i31 reference as a `gc_heap` INDEX. The two share one numeric space,
-                // so once a host handle can be converted to `anyref`, host handle 2 reads as GC
-                // object #2 — a type-confused read that the cast believes it verified.
-                //
-                // 🔒 **Fix the representation FIRST, then add these two arms.** `Value` is a `u128`
-                // and every reference form lives in the low 64 bits (`NULL_REF = u64::MAX`,
-                // `I31_TAG = 1<<63`, a funcref's owner in 62..32, a GC index bare), so the high 64
-                // bits are free for an externref tag — no widening required, and the C ABI's
-                // pass-through contract can be preserved by tagging on entry and stripping on exit
-                // in `wasmrt-capi`'s two conversion functions. Reported by the wazmrt sweep and
-                // recorded in `cmem/known-issues.md`; unreachable today ONLY because of this gap.
+                // The externref bridge. An `externref` is a WRAPPER: `extern.convert_any` boxes
+                // an internal reference, `any.convert_extern` unboxes one, and null maps to null
+                // both ways (§4.4.7.3). The wrapper bit lives in `Value`'s high half, so the two
+                // numeric spaces the earlier note warned about — a host handle and a GC heap index
+                // — are no longer one space. See `interp::EXTERN_TAG` / `interp::HOST_TAG`.
+                0x1a => Instr { offset: 0, op: Op::AnyConvertExtern, imm: Imm::None },
+                0x1b => Instr { offset: 0, op: Op::ExternConvertAny, imm: Imm::None },
                 0x1c => Instr { offset: 0, op: Op::RefI31, imm: Imm::None },
                 0x1d => Instr { offset: 0, op: Op::I31GetS, imm: Imm::None },
                 0x1e => Instr { offset: 0, op: Op::I31GetU, imm: Imm::None },
@@ -1063,6 +1062,9 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
         // `0xFB`/`0xFC` prefix + sub-opcode (handled above). A raw byte in either range is not a
         // valid single-byte opcode. (`0xd0..=0xd6` are real ops; `0xfb..=0xfe` are prefixes.)
         //
+        // `0x16..=0x17` joined them with the externref bridge (`any.convert_extern` /
+        // `extern.convert_any`); both bytes are unassigned in the single-byte space.
+        //
         // ⚠️⚠️ **The `0xcd..=0xcf` half was added with the array bulk ops on 2026-08-19, and
         // extending this guard is not optional.** Those three tags name `array.copy` /
         // `array.init_data` / `array.init_elem` internally; without the guard a raw `0xcd` byte in
@@ -1071,7 +1073,7 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
         // space eventually means something else" defect recorded in `best-practices.md` §3A.2 the
         // same morning. **Whenever an internal tag is added, this range moves with it**; the test
         // `raw_internal_tag_bytes_are_refused` pins every one of them.
-        if (0xcd..=0xcf).contains(&b0) || (0xd7..=0xfa).contains(&b0) {
+        if (0x16..=0x17).contains(&b0) || (0xcd..=0xcf).contains(&b0) || (0xd7..=0xfa).contains(&b0) {
             return Err(DecodeError::UnsupportedOpcode);
         }
 
@@ -1311,8 +1313,9 @@ mod tests {
 
     #[test]
     fn rejects_raw_internal_tag_bytes() {
-        // `0xd7..=0xfa` are internal Op tags whose real wire form is a prefix + sub-opcode.
-        for b in [0xe3u8, 0xe4, 0xe5, 0xed, 0xf0, 0xf1, 0xf2, 0xd7, 0xdb, 0xfa] {
+        // `0x16..=0x17` and `0xd7..=0xfa` are internal Op tags whose real wire form is a
+        // prefix + sub-opcode.
+        for b in [0xe3u8, 0xe4, 0xe5, 0xed, 0xf0, 0xf1, 0xf2, 0xd7, 0xdb, 0xfa, 0x16, 0x17] {
             assert_eq!(decode_body(&[b]), Err(DecodeError::UnsupportedOpcode));
         }
         // The real single-byte ops just below the range must still decode.
@@ -1330,6 +1333,8 @@ mod tests {
         assert_eq!(Op::from_u8(0xfb), None);
         assert_eq!(Op::from_u8(0xdb), None); // the SIMD internal tag
         assert_eq!(Op::from_u8(0xe3), None); // table.grow internal tag
+        assert_eq!(Op::from_u8(0x16), None); // any.convert_extern internal tag
+        assert_eq!(Op::from_u8(0x17), None); // extern.convert_any internal tag
     }
 
     #[test]
@@ -1376,6 +1381,8 @@ mod tests {
             Op::StructSet,
             Op::BrOnCast,
             Op::BrOnCastFail,
+            Op::AnyConvertExtern,
+            Op::ExternConvertAny,
         ] {
             assert_eq!(Op::from_text_name(op.text_name()), Some(op));
         }

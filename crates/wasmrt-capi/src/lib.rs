@@ -178,6 +178,30 @@ fn kind_of(t: ValType) -> Option<wasmrt_valkind_t> {
     })
 }
 
+/// The C-visible `uint64_t` for a value, or `None` if it cannot cross the boundary.
+///
+/// ⚠️ **`wasmrt.h` promises an `externref` is "opaque to the host: pass it back unchanged", and
+/// after the externref bridge landed that promise is no longer free.** A HOST reference — one the
+/// embedder minted and handed in — round-trips exactly: the boundary re-tags it on the way back.
+/// A guest `extern.convert_any` of a struct does not; its payload is a GC heap **index**, and
+/// handing that out as a bare `uint64_t` would let the host pass back a number that the next
+/// `any.convert_extern` reads as a host address. That is precisely the type confusion the tagged
+/// `Value` representation exists to prevent, so it is **refused here** rather than marshalled
+/// into a plausible wrong value — the same rule `kind_of` already applies to `v128` and the GC
+/// reference types.
+const HOST_EXTERNREF_MSG: &str =
+    "an externref wrapping an internal reference cannot cross the C boundary";
+
+fn ref_bits(kind: wasmrt_valkind_t, v: Value) -> Option<u64> {
+    if kind != wasmrt_valkind_t::Externref || v == interp::NULL_REF {
+        return Some(v as u64);
+    }
+    if v & interp::EXTERN_TAG == 0 || v & interp::HOST_TAG == 0 {
+        return None;
+    }
+    Some((v & !(interp::EXTERN_TAG | interp::HOST_TAG)) as u64)
+}
+
 fn to_value(v: &wasmrt_val_t) -> Value {
     // Reading the union member the tag selects is the whole point of a tagged union; the
     // tag is set by the caller, and every arm below reads a member of the declared size.
@@ -191,12 +215,23 @@ fn to_value(v: &wasmrt_val_t) -> Value {
             wasmrt_valkind_t::I64 => interp::i64_value(v.of.i64_),
             wasmrt_valkind_t::F32 => interp::f32_value(v.of.f32_),
             wasmrt_valkind_t::F64 => interp::f64_value(v.of.f64_),
-            wasmrt_valkind_t::Funcref | wasmrt_valkind_t::Externref => Value::from(v.of.ref_),
+            wasmrt_valkind_t::Funcref => Value::from(v.of.ref_),
+            // An externref arriving from C is a HOST address, so it is tagged as one. Without
+            // this it would be a bare integer indistinguishable from a GC heap index the moment
+            // the guest ran `any.convert_extern` on it.
+            wasmrt_valkind_t::Externref => {
+                if v.of.ref_ == u64::MAX {
+                    interp::NULL_REF
+                } else {
+                    interp::externalize(interp::host_ref(v.of.ref_))
+                }
+            }
         }
     }
 }
 
-fn from_value(kind: wasmrt_valkind_t, v: Value) -> wasmrt_val_t {
+/// The C form of `v`, or `None` if it cannot cross — see [`ref_bits`].
+fn from_value(kind: wasmrt_valkind_t, v: Value) -> Option<wasmrt_val_t> {
     let of = match kind {
         wasmrt_valkind_t::I32 => wasmrt_val_union {
             i32_: interp::as_i32(v),
@@ -211,10 +246,10 @@ fn from_value(kind: wasmrt_valkind_t, v: Value) -> wasmrt_val_t {
             f64_: interp::as_f64(v),
         },
         wasmrt_valkind_t::Funcref | wasmrt_valkind_t::Externref => wasmrt_val_union {
-            ref_: v as u64,
+            ref_: ref_bits(kind, v)?,
         },
     };
-    wasmrt_val_t { kind, of }
+    Some(wasmrt_val_t { kind, of })
 }
 
 // =====================================================================================
@@ -990,11 +1025,16 @@ capi! {
             let mut in_vals: Vec<wasmrt_val_t> = Vec::with_capacity(args.len());
             for (i, &a) in args.iter().enumerate() {
                 let k = param_kinds.get(i).copied().unwrap_or(wasmrt_valkind_t::I64);
-                in_vals.push(from_value(k, a));
+                let Some(marshalled) = from_value(k, a) else {
+                    HOST_TRAP.with_borrow_mut(|slot| *slot = Some(cstring(HOST_EXTERNREF_MSG)));
+                    return Err(Trap::HostTrap);
+                };
+                in_vals.push(marshalled);
             }
+            // Zero is a valid bit pattern for every boundary kind, so this never refuses.
             let mut out_vals: Vec<wasmrt_val_t> = result_kinds
                 .iter()
-                .map(|&k| from_value(k, 0))
+                .filter_map(|&k| from_value(k, 0))
                 .collect();
             // Sized to the DECLARED arity, which the engine also sized `results` to; if a
             // module declared a different one the engine would have refused to link.
@@ -1441,9 +1481,12 @@ capi! {
                     #[allow(unsafe_code, reason = "writing one element of the caller's results array")]
                     // SAFETY: `i < nresults`, which was checked equal to the declared
                     // result count above, and `results` is the caller's array of that size.
+                    let Some(marshalled) = from_value(*k, v) else {
+                        return err(HOST_EXTERNREF_MSG);
+                    };
                     unsafe {
                         if !results.is_null() {
-                            core::ptr::write(results.add(i), from_value(*k, v));
+                            core::ptr::write(results.add(i), marshalled);
                         }
                     }
                 }
@@ -1574,8 +1617,9 @@ capi! {
         let Some(md) = s.inner.module_of(id) else { return false };
         let Some(ty) = md.globals.get(gi as usize) else { return false };
         let Some(kind) = kind_of(ty.content) else { return false };
+        let Some(marshalled) = from_value(kind, v) else { return false };
         #[allow(unsafe_code, reason = "writing a caller out-parameter")]
-        unsafe { ffi::out(out, from_value(kind, v)) }
+        unsafe { ffi::out(out, marshalled) }
     }
 }
 

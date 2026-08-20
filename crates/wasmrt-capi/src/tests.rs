@@ -1083,3 +1083,134 @@ fn a_reactor_without_initialize_is_not_an_error() {
     assert!(wasmrt_instance_initialize(f.store, inst, &raw mut trap).is_null());
     assert!(trap.is_null());
 }
+
+fn externv(handle: u64) -> wasmrt_val_t {
+    wasmrt_val_t {
+        kind: wasmrt_valkind_t::Externref,
+        of: wasmrt_val_union { ref_: handle },
+    }
+}
+
+fn as_refv(v: &wasmrt_val_t) -> u64 {
+    #[allow(unsafe_code, reason = "reading the union member the tag selects")]
+    // SAFETY: every caller below asserts the tag is a reference kind first.
+    unsafe {
+        v.of.ref_
+    }
+}
+
+/// `wasmrt.h` says an `externref` is "opaque to the host: pass it back unchanged". That was free
+/// while the guest could not touch one; the externref bridge (S1) makes it a real obligation, so
+/// it is asserted rather than assumed.
+///
+/// ⚠️ The engine tags a host handle internally — it has to, or the guest's `any.convert_extern`
+/// would hand the `any` hierarchy a bare integer that reads as a **GC heap index**. The C-visible
+/// `uint64_t` must come back *identical* anyway, which is what this pins.
+#[test]
+fn a_host_externref_round_trips_through_the_guest_unchanged() {
+    let f = Fixture::new(
+        r#"(module (func (export "id") (param externref) (result externref) (local.get 0))
+                   (func (export "there_and_back") (param externref) (result externref)
+                     (extern.convert_any (any.convert_extern (local.get 0)))))"#,
+    );
+    let inst = f.instantiate();
+    for name in ["id", "there_and_back"] {
+        let g = f.func(inst, name);
+        for handle in [0u64, 1, 2, 7, 0x1234_5678_9abc_def0] {
+            let args = [externv(handle)];
+            let mut results = [externv(0)];
+            let mut trap: *mut wasmrt_trap = core::ptr::null_mut();
+            let e = wasmrt_func_call(
+                f.store,
+                g,
+                args.as_ptr(),
+                args.len(),
+                results.as_mut_ptr(),
+                results.len(),
+                &raw mut trap,
+            );
+            assert!(e.is_null(), "{name}: {}", msg_of_err(e));
+            assert!(trap.is_null(), "{name}: {}", msg_of_trap(trap));
+            assert_eq!(results[0].kind, wasmrt_valkind_t::Externref);
+            assert_eq!(as_refv(&results[0]), handle, "{name} mangled host handle {handle}");
+        }
+    }
+}
+
+/// The other half, and the one that is easy to get wrong quietly: an `externref` the GUEST built
+/// by wrapping an internal reference has no host handle to give back. Its payload is a GC heap
+/// index, and handing that out as a bare `uint64_t` would let the embedder pass back a number that
+/// the next `any.convert_extern` reads as a host address — the same type confusion the tagged
+/// `Value` exists to prevent, relocated to the C boundary.
+///
+/// So it is **refused**, exactly as `kind_of` already refuses `v128` and the GC reference types.
+#[test]
+fn an_externref_wrapping_an_internal_reference_is_refused_at_the_boundary() {
+    let f = Fixture::new(
+        r#"(module (type $s (struct (field i32)))
+                   (func (export "wrap") (result externref)
+                     (extern.convert_any (struct.new $s (i32.const 1)))))"#,
+    );
+    let inst = f.instantiate();
+    let g = f.func(inst, "wrap");
+    let mut results = [externv(0)];
+    let mut trap: *mut wasmrt_trap = core::ptr::null_mut();
+    let e = wasmrt_func_call(
+        f.store,
+        g,
+        core::ptr::null(),
+        0,
+        results.as_mut_ptr(),
+        results.len(),
+        &raw mut trap,
+    );
+    assert!(!e.is_null(), "a value the boundary cannot carry must be an ERROR, not a plausible number");
+    assert!(
+        msg_of_err(e).contains("cannot cross the C boundary"),
+        "message was {:?}",
+        msg_of_err(e)
+    );
+    wasmrt_error_delete(e);
+}
+
+/// A null `externref` crosses as `UINT64_MAX` in both directions — the sentinel the boundary
+/// already used before the bridge existed, kept so no embedder has to change.
+#[test]
+fn a_null_externref_crosses_as_the_all_ones_sentinel() {
+    let f = Fixture::new(
+        r#"(module (func (export "id") (param externref) (result externref) (local.get 0))
+                   (func (export "mk") (result externref) (ref.null extern))
+                   (func (export "isnull") (param externref) (result i32)
+                     (ref.is_null (local.get 0))))"#,
+    );
+    let inst = f.instantiate();
+
+    let mut results = [externv(0)];
+    let mut trap: *mut wasmrt_trap = core::ptr::null_mut();
+    let e = wasmrt_func_call(
+        f.store,
+        f.func(inst, "mk"),
+        core::ptr::null(),
+        0,
+        results.as_mut_ptr(),
+        1,
+        &raw mut trap,
+    );
+    assert!(e.is_null(), "{}", msg_of_err(e));
+    assert_eq!(as_refv(&results[0]), u64::MAX);
+
+    // …and back in: the guest must agree it is null, which a bare host handle would not be.
+    let args = [externv(u64::MAX)];
+    let mut out = [i32v(0)];
+    let e = wasmrt_func_call(
+        f.store,
+        f.func(inst, "isnull"),
+        args.as_ptr(),
+        1,
+        out.as_mut_ptr(),
+        1,
+        &raw mut trap,
+    );
+    assert!(e.is_null(), "{}", msg_of_err(e));
+    assert_eq!(as_i32v(&out[0]), 1);
+}

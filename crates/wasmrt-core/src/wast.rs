@@ -26,7 +26,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::interp::{HostFunc, Imports, InstanceId, Store, Trap, Value};
+use crate::interp::{externalize, host_ref, HostFunc, Imports, InstanceId, Store, Trap, Value};
 use crate::linker::Linker;
 use crate::module::Module;
 use crate::sexpr::{self, Sexpr};
@@ -781,8 +781,23 @@ fn parse_const(form: &Sexpr) -> Result<Value, String> {
     match kw {
         // `ref.null` carries an ignorable heap type.
         "ref.null" => Ok(NULL_REF),
-        "ref.func" | "ref.extern" => match lit {
+        "ref.func" => match lit {
             Some(a) => parse_int_lit(a).map(|v| v as Value),
+            None => Ok(NULL_REF),
+        },
+        // ⚠️ `(ref.extern n)` is **not** a bare host index — the spec defines it as
+        // `extern.convert_any (ref.host n)`, i.e. an `externref` WRAPPING host address `n`
+        // (`extern.wast` asserts exactly that round trip). Passing the bare integer in is what
+        // let a host handle be read as a GC heap index, which is why the two conversions were
+        // held back until the representation existed.
+        "ref.extern" => match lit {
+            Some(a) => parse_int_lit(a).map(|v| externalize(host_ref(v as u64))),
+            None => Ok(NULL_REF),
+        },
+        // `(ref.host n)` is the INTERNAL half of the same value: an `anyref` naming host
+        // address `n`. It is what `any.convert_extern (ref.extern n)` produces.
+        "ref.host" => match lit {
+            Some(a) => parse_int_lit(a).map(|v| host_ref(v as u64)),
             None => Ok(NULL_REF),
         },
         "i32.const" => {
@@ -946,12 +961,22 @@ fn value_matches(got: Value, exp: &Sexpr) -> Result<bool, String> {
         }
         "ref.extern" => {
             return match lit {
-                Some(a) => Ok(got == parse_int_lit(a)? as Value),
+                Some(a) => Ok(got == externalize(host_ref(parse_int_lit(a)? as u64))),
                 None => Ok(got != NULL_REF),
             };
         }
-        "ref.struct" | "ref.array" | "ref.i31" | "ref.eq" | "ref.any" | "ref.host"
-        | "ref.data" => return Ok(got != NULL_REF),
+        // `(ref.host n)` names WHICH host address, and the internal (unwrapped) form of it —
+        // `externalize` is deliberately absent here, so `internalize`/`externalize` cannot both
+        // be no-ops and still satisfy this file.
+        "ref.host" => {
+            return match lit {
+                Some(a) => Ok(got == host_ref(parse_int_lit(a)? as u64)),
+                None => Ok(got != NULL_REF),
+            };
+        }
+        "ref.struct" | "ref.array" | "ref.i31" | "ref.eq" | "ref.any" | "ref.data" => {
+            return Ok(got != NULL_REF)
+        }
         "f32.const" => {
             return float_matches_32(got as u32, lit.ok_or("f32.const: missing literal")?);
         }
@@ -1288,9 +1313,15 @@ mod tests {
     #[test]
     fn every_skip_records_a_reason() {
         let s = run_script(
+            // ⚠️ The unbuildable module must use a construct `wat::classify_unknown_mnemonic`
+            // still reports as OUR gap. It was `any.convert_extern` until that landed (S1) and
+            // is `i64.add128` (wide-arithmetic) now. **Swap it the day wide-arithmetic lands** —
+            // and when nothing is left unimplemented, delete this arm rather than fake it: at
+            // that point there is no "module: unsupported" skip left to record a reason for.
             br#"(assert_exception (invoke "nope"))
-                (module (func (export "f") (result i32) (any.convert_extern (ref.null extern))))
-                (assert_return (invoke "f") (i32.const 1))
+                (module (func (export "f") (result i64)
+                  (i64.add128 (i64.const 1) (i64.const 0) (i64.const 1) (i64.const 0))))
+                (assert_return (invoke "f") (i64.const 1))
                 (assert_trap (invoke "f") "x")
                 (invoke "f")"#,
         )
