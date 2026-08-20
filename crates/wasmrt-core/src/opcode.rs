@@ -257,6 +257,8 @@ pub enum HeapType {
     NoFunc,
     NoExtern,
     Exn,
+    /// `noexn` — the bottom of the exception hierarchy (EH).
+    NoExn,
     /// A concrete type index.
     Concrete(u32),
 }
@@ -708,8 +710,11 @@ fn abstract_heap_val_type(ht: HeapType, nullable: bool) -> ValType {
     let (n, nn) = match ht {
         // `nofunc`/`noextern`/`none` are bottoms of their families; the port models each
         // as its family head, exactly as `module::read_heap_type_ref` does.
-        HeapType::Func | HeapType::NoFunc => (ValType::FUNCREF, ValType::FUNCREF_NN),
-        HeapType::Extern | HeapType::NoExtern => (ValType::EXTERNREF, ValType::EXTERNREF_NN),
+        HeapType::Func => (ValType::FUNCREF, ValType::FUNCREF_NN),
+        HeapType::Extern => (ValType::EXTERNREF, ValType::EXTERNREF_NN),
+        HeapType::NoFunc => (ValType::NULLFUNCREF, ValType::NULLFUNCREF_NN),
+        HeapType::NoExtern => (ValType::NULLEXTERNREF, ValType::NULLEXTERNREF_NN),
+        HeapType::NoExn => (ValType::NULLEXNREF, ValType::NULLEXNREF_NN),
         HeapType::Any => (ValType::ANYREF, ValType::ANYREF_NN),
         HeapType::Eq => (ValType::EQREF, ValType::EQREF_NN),
         HeapType::I31 => (ValType::I31REF, ValType::I31REF_NN),
@@ -746,6 +751,7 @@ pub fn read_heap_type(r: &mut Reader) -> DecodeResult<HeapType> {
         -0x0f => HeapType::None,
         -0x0d => HeapType::NoFunc,
         -0x0e => HeapType::NoExtern,
+        -0x0c => HeapType::NoExn,
         -0x17 => HeapType::Exn,
         _ => return Err(DecodeError::UnsupportedOpcode),
     })

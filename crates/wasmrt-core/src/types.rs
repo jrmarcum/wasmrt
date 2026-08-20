@@ -139,9 +139,22 @@ pub enum RefHeap {
     I31,
     Struct,
     Array,
+    /// `none` — the bottom of the `any` hierarchy.
     None,
     /// Exception references — its own hierarchy (EH proposal).
     Exn,
+    /// `nofunc` — the bottom of the `func` hierarchy.
+    ///
+    /// ⚠️ The three bottoms below were **collapsed onto their tops** until 2026-08-20:
+    /// `nullfuncref` parsed as `funcref`, `nullexternref` as `externref`, `nullexnref` as
+    /// `nullref`. Only null inhabits any of them, so nothing ever ran wrong — but they are
+    /// distinct TYPES, `ref.test (ref null nofunc)` on a real funcref must answer 0, and
+    /// `ref_null.wast`'s second module (which names all four bottoms) would not build at all.
+    NoFunc,
+    /// `noextern` — the bottom of the `extern` hierarchy.
+    NoExtern,
+    /// `noexn` — the bottom of the `exn` hierarchy.
+    NoExn,
 }
 
 impl RefHeap {
@@ -159,6 +172,13 @@ impl RefHeap {
             RefHeap::Array => bool_pick(is_nullable, ValType::ARRAYREF, ValType::ARRAYREF_NN),
             RefHeap::None => bool_pick(is_nullable, ValType::NULLREF, ValType::NULLREF_NN),
             RefHeap::Exn => bool_pick(is_nullable, ValType::EXNREF, ValType::EXNREF_NN),
+            RefHeap::NoFunc => {
+                bool_pick(is_nullable, ValType::NULLFUNCREF, ValType::NULLFUNCREF_NN)
+            }
+            RefHeap::NoExtern => {
+                bool_pick(is_nullable, ValType::NULLEXTERNREF, ValType::NULLEXTERNREF_NN)
+            }
+            RefHeap::NoExn => bool_pick(is_nullable, ValType::NULLEXNREF, ValType::NULLEXNREF_NN),
         }
     }
 
@@ -167,9 +187,9 @@ impl RefHeap {
     #[must_use]
     pub const fn top(self) -> RefHeap {
         match self {
-            RefHeap::Func => RefHeap::Func,
-            RefHeap::Extern => RefHeap::Extern,
-            RefHeap::Exn => RefHeap::Exn,
+            RefHeap::Func | RefHeap::NoFunc => RefHeap::Func,
+            RefHeap::Extern | RefHeap::NoExtern => RefHeap::Extern,
+            RefHeap::Exn | RefHeap::NoExn => RefHeap::Exn,
             _ => RefHeap::Any,
         }
     }
@@ -187,6 +207,12 @@ impl RefHeap {
             None => matches!(other, I31 | Struct | Array | Eq | Any),
             I31 | Struct | Array => matches!(other, Eq | Any),
             Eq => other == Any,
+            // Each hierarchy's bottom is below everything in it. Concrete types are not
+            // represented here — a concrete target is decided by the declared subtype chain — so
+            // the head relation is all a bottom needs.
+            NoFunc => other == Func,
+            NoExtern => other == Extern,
+            NoExn => other == Exn,
             _ => false, // func/extern/exn/any have no proper supertype here
         }
     }
@@ -236,6 +262,12 @@ impl ValType {
     pub const EXNREF: ValType = ValType(0x69);
     /// `(ref null none)` — bottom of the `any` hierarchy.
     pub const NULLREF: ValType = ValType(0x71);
+    /// `(ref null nofunc)` — bottom of the `func` hierarchy.
+    pub const NULLFUNCREF: ValType = ValType(0x73);
+    /// `(ref null noextern)` — bottom of the `extern` hierarchy.
+    pub const NULLEXTERNREF: ValType = ValType(0x72);
+    /// `(ref null noexn)` — bottom of the `exn` hierarchy.
+    pub const NULLEXNREF: ValType = ValType(0x74);
 
     // Non-nullable reference types (function-references + GC proposals). Synthetic
     // internal tags in an otherwise-unused valtype-byte range — our assembler/decoder
@@ -251,6 +283,10 @@ impl ValType {
     pub const NULLREF_NN: ValType = ValType(0x58);
     /// `(ref exn)` — non-null exception reference.
     pub const EXNREF_NN: ValType = ValType(0x57);
+    /// `(ref nofunc)` / `(ref noextern)` / `(ref noexn)` — uninhabited but syntactically valid.
+    pub const NULLFUNCREF_NN: ValType = ValType(0x56);
+    pub const NULLEXTERNREF_NN: ValType = ValType(0x55);
+    pub const NULLEXNREF_NN: ValType = ValType(0x54);
 
     /// Largest type index a concrete `(ref $t)` can carry. [`ValType::concrete_ref`]
     /// masks with the 28-bit index, so anything above this **silently truncates** — and
@@ -326,9 +362,9 @@ impl ValType {
         matches!(
             self.0,
             // nullable
-            0x70 | 0x6f | 0x6e | 0x6d | 0x6c | 0x6b | 0x6a | 0x69 | 0x71
+            0x70 | 0x6f | 0x6e | 0x6d | 0x6c | 0x6b | 0x6a | 0x69 | 0x71 | 0x72 | 0x73 | 0x74
             // non-null
-            | 0x68 | 0x67 | 0x66 | 0x65 | 0x62 | 0x61 | 0x59 | 0x58 | 0x57
+            | 0x68 | 0x67 | 0x66 | 0x65 | 0x62 | 0x61 | 0x59 | 0x58 | 0x57 | 0x56 | 0x55 | 0x54
         )
     }
 
@@ -340,7 +376,7 @@ impl ValType {
         }
         matches!(
             self.0,
-            0x68 | 0x67 | 0x66 | 0x65 | 0x62 | 0x61 | 0x59 | 0x58 | 0x57
+            0x68 | 0x67 | 0x66 | 0x65 | 0x62 | 0x61 | 0x59 | 0x58 | 0x57 | 0x56 | 0x55 | 0x54
         )
     }
 
@@ -362,6 +398,9 @@ impl ValType {
             0x6a => ValType::ARRAYREF_NN,
             0x69 => ValType::EXNREF_NN,
             0x71 => ValType::NULLREF_NN,
+            0x73 => ValType::NULLFUNCREF_NN,
+            0x72 => ValType::NULLEXTERNREF_NN,
+            0x74 => ValType::NULLEXNREF_NN,
             _ => self,
         }
     }
@@ -382,6 +421,9 @@ impl ValType {
             0x59 => ValType::ARRAYREF,
             0x57 => ValType::EXNREF,
             0x58 => ValType::NULLREF,
+            0x56 => ValType::NULLFUNCREF,
+            0x55 => ValType::NULLEXTERNREF,
+            0x54 => ValType::NULLEXNREF,
             _ => self,
         }
     }
@@ -413,6 +455,9 @@ impl ValType {
             0x6a | 0x59 => RefHeap::Array,
             0x69 | 0x57 => RefHeap::Exn,
             0x71 | 0x58 => RefHeap::None,
+            0x73 | 0x56 => RefHeap::NoFunc,
+            0x72 | 0x55 => RefHeap::NoExtern,
+            0x74 | 0x54 => RefHeap::NoExn,
             _ => unreachable!("ref_heap on a non-reference value type"),
         }
     }

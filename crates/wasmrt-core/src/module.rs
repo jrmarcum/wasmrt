@@ -411,8 +411,11 @@ impl Module {
     /// to its composite family. Errors if a concrete index is out of range.
     pub fn ref_head(&self, ht: HeapType) -> DecodeResult<RefHeap> {
         Ok(match ht {
-            HeapType::Func | HeapType::NoFunc => RefHeap::Func,
-            HeapType::Extern | HeapType::NoExtern => RefHeap::Extern,
+            HeapType::Func => RefHeap::Func,
+            HeapType::Extern => RefHeap::Extern,
+            HeapType::NoFunc => RefHeap::NoFunc,
+            HeapType::NoExtern => RefHeap::NoExtern,
+            HeapType::NoExn => RefHeap::NoExn,
             HeapType::Any => RefHeap::Any,
             HeapType::Eq => RefHeap::Eq,
             HeapType::I31 => RefHeap::I31,
@@ -727,8 +730,13 @@ fn read_val_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<ValType> {
         0x7d => ValType::F32,
         0x7c => ValType::F64,
         0x7b => ValType::V128,
-        0x70 | 0x73 => ValType::FUNCREF,   // funcref, nullfuncref (nofunc)
-        0x6f | 0x72 => ValType::EXTERNREF, // externref, nullexternref (noextern)
+        0x70 => ValType::FUNCREF,
+        0x6f => ValType::EXTERNREF,
+        // The three hierarchy BOTTOMS. ⚠️ These aliased onto their tops — `nullfuncref` decoded as
+        // `funcref` — which only null inhabits either way, but they are distinct types and
+        // `ref.test (ref null nofunc)` on a real funcref must answer 0.
+        0x73 => ValType::NULLFUNCREF,
+        0x72 => ValType::NULLEXTERNREF,
         0x6e => ValType::ANYREF,
         0x6d => ValType::EQREF,
         0x6c => ValType::I31REF,
@@ -736,7 +744,7 @@ fn read_val_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<ValType> {
         0x6a => ValType::ARRAYREF,
         0x71 => ValType::NULLREF, // none
         0x69 => ValType::EXNREF,
-        0x74 => ValType::NULLREF, // nullexnref — closest modelled bottom
+        0x74 => ValType::NULLEXNREF,
         // ⚠️ `0x57`–`0x68` are `ValType`'s INTERNAL tags for the non-null abstract references and
         // were accepted here as if they were value-type bytes. They are not: §5.3.5 spells
         // `(ref ht)` as `0x64 ht`, and nothing else. Accepting them let wasmrt read a binary no
@@ -769,8 +777,11 @@ fn read_heap_type_ref(r: &mut Reader, nullable: bool, kinds: &[CompKind]) -> Dec
         return Ok(ValType::concrete_ref(nullable, head, ti));
     }
     let (n, nn) = match ht {
-        -0x10 | -0x0d => (ValType::FUNCREF, ValType::FUNCREF_NN), // func, nofunc
-        -0x11 | -0x0e => (ValType::EXTERNREF, ValType::EXTERNREF_NN), // extern, noextern
+        -0x10 => (ValType::FUNCREF, ValType::FUNCREF_NN),
+        -0x11 => (ValType::EXTERNREF, ValType::EXTERNREF_NN),
+        -0x0d => (ValType::NULLFUNCREF, ValType::NULLFUNCREF_NN),
+        -0x0e => (ValType::NULLEXTERNREF, ValType::NULLEXTERNREF_NN),
+        -0x0c => (ValType::NULLEXNREF, ValType::NULLEXNREF_NN),
         -0x12 => (ValType::ANYREF, ValType::ANYREF_NN),
         -0x13 => (ValType::EQREF, ValType::EQREF_NN),
         -0x14 => (ValType::I31REF, ValType::I31REF_NN),

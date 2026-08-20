@@ -4120,7 +4120,7 @@ fn head_matches(module: &Module, actual: RefHeap, actual_ti: Option<u32>, target
     match target {
         HeapType::Concrete(t) => actual_ti.is_some_and(|ti| module.is_subtype(ti, t)),
         // The uninhabited bottoms: only a null ref has these, already handled by `ref_matches`.
-        HeapType::NoFunc | HeapType::NoExtern => false,
+        HeapType::NoFunc | HeapType::NoExtern | HeapType::NoExn => false,
         _ => module
             .ref_head(target)
             .is_ok_and(|th| actual.is_subtype_of(th)),

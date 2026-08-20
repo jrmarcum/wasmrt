@@ -371,9 +371,11 @@ pub fn val_type_feature(v: ValType) -> Option<Feature> {
         return Some(Feature::FunctionReferences);
     }
     match v.ref_heap() {
-        RefHeap::Exn => Some(Feature::Exceptions),
+        RefHeap::Exn | RefHeap::NoExn => Some(Feature::Exceptions),
+        // The bottoms of the func and extern hierarchies are GC additions too — they do not exist
+        // in reference-types, which has only `funcref`/`externref`.
         RefHeap::Any | RefHeap::Eq | RefHeap::I31 | RefHeap::Struct | RefHeap::Array
-        | RefHeap::None => Some(Feature::Gc),
+        | RefHeap::None | RefHeap::NoFunc | RefHeap::NoExtern => Some(Feature::Gc),
         // `funcref`/`externref` as a value type is reference-types; the *non-nullable*
         // spellings `(ref func)` / `(ref extern)` need function-references.
         RefHeap::Func | RefHeap::Extern => {

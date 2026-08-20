@@ -2507,7 +2507,12 @@ fn subtype_of(module: &Module, sub: V, sup: V) -> bool {
         return sub.ref_heap().is_subtype_of(sup.ref_heap());
     }
     if sup.is_concrete() {
-        return sub.ref_heap() == RefHeap::None;
+        // A concrete type's only abstract subtype is the BOTTOM of its hierarchy: `none` for
+        // struct/array, `nofunc` for a func type. ⚠️ This listed only `none`, because `nofunc`
+        // did not exist as a type — it parsed as `funcref`, which is not a subtype of anything
+        // concrete, so `(global (ref null $t) (ref.null nofunc))` was refused.
+        return sub.ref_heap() == RefHeap::None && sup.ref_heap() != RefHeap::Func
+            || sub.ref_heap() == RefHeap::NoFunc && sup.ref_heap() == RefHeap::Func;
     }
     sub.ref_heap().is_subtype_of(sup.ref_heap())
 }

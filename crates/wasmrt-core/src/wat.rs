@@ -774,15 +774,19 @@ fn string_to_val_type(atom: &str) -> Option<V> {
         // none; the cost is real and is two stale `.wat` files in the ArtOfWebAssembly corpus.
         // 🎓 A leniency with no wrong-value consequence is still a leniency: it is the engine
         // telling a tool its output is fine when the next runtime will reject it.
-        "funcref" | "nullfuncref" => V::FUNCREF,
-        "externref" | "nullexternref" => V::EXTERNREF,
+        "funcref" => V::FUNCREF,
+        "externref" => V::EXTERNREF,
+        // The hierarchy bottoms are their own types (see `heap_type_to_val_type`).
+        "nullfuncref" => V::NULLFUNCREF,
+        "nullexternref" => V::NULLEXTERNREF,
+        "nullexnref" => V::NULLEXNREF,
         "anyref" => V::ANYREF,
         "eqref" => V::EQREF,
         "i31ref" => V::I31REF,
         "structref" => V::STRUCTREF,
         "arrayref" => V::ARRAYREF,
         "nullref" => V::NULLREF,
-        "exnref" | "nullexnref" => V::EXNREF,
+        "exnref" => V::EXNREF,
         _ => return None,
     })
 }
@@ -807,9 +811,15 @@ fn heap_type_to_val_type(s: &Sexpr, nullable: bool, type_names: &[Option<String>
         return Ok(V::concrete_ref(nullable, crate::types::RefHeap::Struct, ti));
     }
     let pair = match atom {
-        "func" | "funcref" | "nofunc" => (V::FUNCREF, V::FUNCREF_NN),
-        "extern" | "externref" | "noextern" => (V::EXTERNREF, V::EXTERNREF_NN),
-        "exn" | "exnref" | "noexn" => (V::EXNREF, V::EXNREF_NN),
+        "func" | "funcref" => (V::FUNCREF, V::FUNCREF_NN),
+        "extern" | "externref" => (V::EXTERNREF, V::EXTERNREF_NN),
+        "exn" | "exnref" => (V::EXNREF, V::EXNREF_NN),
+        // ⚠️ The three hierarchy BOTTOMS mapped onto their tops here: `(ref null nofunc)` became
+        // `funcref`. Only null inhabits either, so nothing ran wrong — but they are distinct
+        // types, and `ref_null.wast`'s second module declares globals of all four.
+        "nofunc" | "nullfuncref" => (V::NULLFUNCREF, V::NULLFUNCREF_NN),
+        "noextern" | "nullexternref" => (V::NULLEXTERNREF, V::NULLEXTERNREF_NN),
+        "noexn" | "nullexnref" => (V::NULLEXNREF, V::NULLEXNREF_NN),
         "any" | "anyref" => (V::ANYREF, V::ANYREF_NN),
         "eq" | "eqref" => (V::EQREF, V::EQREF_NN),
         "i31" | "i31ref" => (V::I31REF, V::I31REF_NN),
@@ -4362,6 +4372,9 @@ fn parse_ref_type_target(ctx: &Ctx, s: &Sexpr) -> Result<(bool, i64)> {
         "arrayref" => (true, "array"),
         "exnref" => (true, "exn"),
         "nullref" => (true, "none"),
+        "nullfuncref" => (true, "nofunc"),
+        "nullexternref" => (true, "noextern"),
+        "nullexnref" => (true, "noexn"),
         other => (false, other),
     };
     if let Some(code) = abstract_heap_code(head) {
@@ -5413,6 +5426,9 @@ mod tests {
             ("(ref array)", 0x6a),
             ("(ref exn)", 0x69),
             ("(ref none)", 0x71),
+            ("(ref nofunc)", 0x73),
+            ("(ref noextern)", 0x72),
+            ("(ref noexn)", 0x74),
         ] {
             let src = format!("(module (func (export \"f\") (param {text})))");
             let bytes = asm(&src).unwrap_or_else(|e| panic!("{text}: {e:?}"));
