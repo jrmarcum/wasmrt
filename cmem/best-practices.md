@@ -1151,3 +1151,38 @@ That is almost certainly the memory the question came from.
 
 ⚠️ The cost of the refusal is unchanged and small: the `.wat` corpus reads 529/532, the three files are
 not gated by any `cargo` step, and wazmrt paid exactly the same price for exactly the same reason.
+
+### §3.11a — the trap inside it: **A REJECTION MUST BE ROUTED TO THE CODE THAT KNOWS WHY**
+
+*Reported by the owner from wazmrt's closure note, and it bit wasmrt too — checked because it was
+reported, not assumed to be absent.*
+
+wazmrt recorded that `isRefType` **still answers TRUE for `anyfunc`, deliberately**. Returning false
+would route `(table 4 anyfunc)` down the func-index path, where `anyfunc` parses as a function NAME and
+fails as `UnknownIdentifier` — which `wast.zig` banks as *its own* limitation. **The deviation would
+have come back disguised as a SKIP and the baseline would have gone green for the wrong reason.**
+
+wasmrt had the same slip in its own dialect. Dropping `"anyfunc"` from `string_to_val_type` also
+dropped it out of the *routing* predicate `string_to_val_type(a).is_some()`, so two positions fell
+through to the funcidx path and reported **`BadNumber`** — `anyfunc` read as an INDEX:
+
+```
+(elem (i32.const 0) anyfunc (ref.func $f))   -> BadNumber
+(ref.null anyfunc)                           -> BadNumber
+```
+
+wasmrt's score was not corrupted — `BadNumber` is not in `is_unsupported()`, so it fails rather than
+skips — but the *message* named the wrong thing, and the score being right was luck about one enum's
+membership rather than design.
+
+🔒 **The fix has two halves and both are load-bearing.** `is_type_keyword` (the routing predicate)
+still claims an obsolete keyword, so the token reaches the code that can explain it; and
+`Error::ObsoleteKeyword("funcref")` is a **dedicated** variant, so the message keeps the compatibility
+hint even though the acceptance does not — *the input is legacy, not nonsense.* wazmrt made the same
+two moves.
+
+⚠️⚠️ **Enumerating the positions is what finished it.** Four were fixed on the first pass and the table
+test found a **fifth**: `ref.null` reads a heap type through its own reader. Thirteen positions are now
+pinned in one test, one row each, because a guard can be right in four places and wrong in one —
+which is T12z's rule (*name an invariant, enumerate EVERY entry point in a table, check each*) paying
+off in a place nobody had listed as a surface.

@@ -74,6 +74,24 @@ pub enum Error {
     /// pass is the one direction that cannot be noticed afterwards. Misfiling in this direction
     /// only costs a skip.
     UnimplementedInstr,
+    /// A **pre-standard type keyword** that a proposal renamed — the payload is the modern
+    /// spelling, so the message can name it.
+    ///
+    /// ⚠️⚠️ Its own variant rather than [`Error::BadValType`], and the reason is a trap the sibling
+    /// runtime hit first and recorded (`wazmrt` closed the same deviation on 2026-08-17). Dropping
+    /// `anyfunc` from the type table is only half a refusal: the token then falls out of the
+    /// *routing* predicate too, and lands wherever the parser looks next. Here that was the
+    /// funcidx path — `(elem (i32.const 0) anyfunc …)` and `(ref.null anyfunc)` both came back as
+    /// **`BadNumber`**, because `anyfunc` was being read as an INDEX. wazmrt's version of the same
+    /// slip produced `UnknownIdentifier`, which its `.wast` runner banks as *its own* limitation,
+    /// so the deviation came back disguised as a SKIP and the baseline went green for the wrong
+    /// reason.
+    ///
+    /// 🔒 **So the routing predicate ([`is_type_keyword`]) still answers TRUE for an obsolete
+    /// keyword** — the token must reach the code that knows *why* it is refused. A rejection routed
+    /// to a parser that does not recognise it lands in the wrong bucket, and the bucket is what the
+    /// score reads. The input is legacy, not nonsense, and the message says so.
+    ObsoleteKeyword(&'static str),
     /// A form of the wrong shape (an atom where a list was required, etc.).
     BadForm,
     /// A numeric literal that does not parse, or does not fit its type.
@@ -105,6 +123,11 @@ impl fmt::Display for Error {
         match self {
             Error::Parse(e) => write!(f, "s-expression parse error: {e}"),
             Error::Unsupported(what) => write!(f, "unsupported text construct: {what}"),
+            // The whole point of a dedicated variant: the input is LEGACY, not nonsense, so the
+            // message keeps the compatibility hint even though the acceptance does not.
+            Error::ObsoleteKeyword(modern) => {
+                write!(f, "obsolete keyword — this type is spelled `{modern}` now")
+            }
             other => write!(f, "wat error: {other:?}"),
         }
     }
@@ -759,6 +782,29 @@ fn resolve_by_name(names: &[Option<String>], s: &Sexpr) -> Result<u32> {
 
 // --- Value types --------------------------------------------------------------
 
+/// A pre-standard type keyword and the modern spelling that replaced it.
+///
+/// One authority, consulted by both the ROUTING predicate ([`is_type_keyword`], which must still
+/// claim it) and every rejecting site. See [`Error::ObsoleteKeyword`] for why those are two jobs.
+fn obsolete_type_keyword(atom: &str) -> Option<&'static str> {
+    match atom {
+        // Renamed by reference-types. `obsolete-keywords.wast` asserts the module is malformed.
+        // ⚠️ Not to be confused with the **JS WebAssembly API**'s `element: "anyfunc"`, which is
+        // that surface's required spelling — V8 rejects `"funcref"` there. Same word, different
+        // language; see `cmem/best-practices.md` §3.11.
+        "anyfunc" => Some("funcref"),
+        _ => None,
+    }
+}
+
+/// Does this atom occupy a **type position**? Used to route, not to accept.
+///
+/// 🔒 True for an obsolete keyword as well as a current one. A parser that stops recognising a
+/// token stops sending it to the code that can explain it.
+fn is_type_keyword(atom: &str) -> bool {
+    string_to_val_type(atom).is_some() || obsolete_type_keyword(atom).is_some()
+}
+
 /// A value type spelled as a bare keyword.
 fn string_to_val_type(atom: &str) -> Option<V> {
     Some(match atom {
@@ -810,6 +856,9 @@ fn heap_type_to_val_type(s: &Sexpr, nullable: bool, type_names: &[Option<String>
         // re-derives the family from its type-kind pre-scan.
         return Ok(V::concrete_ref(nullable, crate::types::RefHeap::Struct, ti));
     }
+    if let Some(modern) = obsolete_type_keyword(atom) {
+        return Err(Error::ObsoleteKeyword(modern));
+    }
     let pair = match atom {
         "func" | "funcref" => (V::FUNCREF, V::FUNCREF_NN),
         "extern" | "externref" => (V::EXTERNREF, V::EXTERNREF_NN),
@@ -840,7 +889,11 @@ fn parse_val_type(s: &Sexpr, type_names: &[Option<String>]) -> Result<V> {
         }
         return Err(Error::BadValType);
     }
-    string_to_val_type(want_atom(s).map_err(|_| Error::BadValType)?).ok_or(Error::BadValType)
+    let atom = want_atom(s).map_err(|_| Error::BadValType)?;
+    if let Some(modern) = obsolete_type_keyword(atom) {
+        return Err(Error::ObsoleteKeyword(modern));
+    }
+    string_to_val_type(atom).ok_or(Error::BadValType)
 }
 
 /// Is this form a reference type (`(ref …)`)?
@@ -2263,7 +2316,10 @@ fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     }
     // An explicit element type may follow (`funcref`, `(ref …)`).
     if let Some(s) = items.get(j) {
-        if s.as_atom().is_some_and(|a| string_to_val_type(a).is_some()) || is_ref_type_form(s) {
+        // ⚠️ `is_type_keyword`, not `string_to_val_type` — an obsolete keyword still occupies a
+        // type position, and must reach `parse_val_type` to be refused there. Routing it onward
+        // makes it a funcidx, and the error becomes `BadNumber`.
+        if s.as_atom().is_some_and(is_type_keyword) || is_ref_type_form(s) {
             elem_type = parse_val_type(s, &b.type_names)?;
             j += 1;
         }
@@ -3682,7 +3738,16 @@ fn emit_op_with_immediates(
             // rejected. Abstract codes come from the one `abstract_heap_code` table, so
             // `nofunc`/`noexn` cannot drift into their family heads.
             let s = imm(0)?;
-            let code = match abstract_heap_code(want_atom(s)?) {
+            let a = want_atom(s)?;
+            // ⚠️ The **fifth** entry point, and the one that survived fixing the other four.
+            // `ref.null` reads a heap type through its own reader, so it needs its own guard: the
+            // fall-through below is exactly the funcidx path that turned `(ref.null anyfunc)` into
+            // `BadNumber`. Enumerating the positions is what found it — the first four looked like
+            // the whole set.
+            if let Some(modern) = obsolete_type_keyword(a) {
+                return Err(Error::ObsoleteKeyword(modern));
+            }
+            let code = match abstract_heap_code(a) {
                 Some(c) => c,
                 None => i64::from(resolve_by_name(ctx.type_names, s)?),
             };
@@ -4360,6 +4425,9 @@ fn parse_ref_type_target(ctx: &Ctx, s: &Sexpr) -> Result<(bool, i64)> {
             let nullable = l.len() >= 3 && eq_atom(&l[1], "null");
             let ht = &l[l.len() - 1];
             let a = want_atom(ht)?;
+            if let Some(modern) = obsolete_type_keyword(a) {
+                return Err(Error::ObsoleteKeyword(modern));
+            }
             if let Some(code) = abstract_heap_code(a) {
                 return Ok((nullable, code));
             }
@@ -4369,6 +4437,11 @@ fn parse_ref_type_target(ctx: &Ctx, s: &Sexpr) -> Result<(bool, i64)> {
     }
     // A bare heap type: the `…ref` shorthands are nullable, bare heads are not.
     let a = want_atom(s)?;
+    // Refused HERE rather than falling through to `resolve_by_name`, which would read it as a
+    // type index and report `BadNumber` — the wrong bucket.
+    if let Some(modern) = obsolete_type_keyword(a) {
+        return Err(Error::ObsoleteKeyword(modern));
+    }
     let (nullable, head) = match a {
         "funcref" => (true, "func"),
         "externref" => (true, "extern"),
@@ -4945,6 +5018,52 @@ mod tests {
         }
     }
 
+    /// ⚠️⚠️ **Every type position, enumerated — because dropping a keyword from the type table is
+    /// only half a refusal.** The token then falls out of the *routing* predicate too and lands
+    /// wherever the parser looks next; here that was the funcidx path, so
+    /// `(elem (i32.const 0) anyfunc …)` and `(ref.null anyfunc)` came back as **`BadNumber`** —
+    /// `anyfunc` read as an INDEX. The sibling runtime hit the same slip and recorded it: its
+    /// version produced `UnknownIdentifier`, which its `.wast` runner banks as *its own*
+    /// limitation, so the deviation returned disguised as a SKIP and the baseline went green for
+    /// the wrong reason.
+    ///
+    /// 🎓 **A rejection has to be routed to the code that knows WHY, or it lands in the wrong
+    /// bucket — and the bucket is what the score reads.** Four positions were fixed first and this
+    /// table found the fifth (`ref.null`, which reads a heap type through its own reader). One
+    /// entry per position, so a future path cannot be right in four places and wrong in one.
+    #[test]
+    fn an_obsolete_type_keyword_is_refused_in_every_type_position() {
+        for src in [
+            r#"(module (table 4 anyfunc))"#,
+            r#"(module (table $t (export "e") 4 anyfunc))"#,
+            r#"(module (import "m" "t" (table 1 anyfunc)))"#,
+            r#"(module (global $g anyfunc (ref.null func)))"#,
+            r#"(module (func (param anyfunc)))"#,
+            r#"(module (func (result anyfunc) (ref.null func)))"#,
+            r#"(module (func (local anyfunc)))"#,
+            r#"(module (type (func (param anyfunc))))"#,
+            r#"(module (func (param (ref anyfunc))))"#,
+            r#"(module (func (block (result anyfunc) (ref.null func) (drop))))"#,
+            r#"(module (func $f) (table 1 funcref) (elem (i32.const 0) anyfunc (ref.func $f)))"#,
+            r#"(module (func (result funcref) (ref.null anyfunc)))"#,
+            r#"(module (func (param funcref) (result i32) (ref.test anyfunc (local.get 0))))"#,
+        ] {
+            assert_eq!(
+                asm(src),
+                Err(Error::ObsoleteKeyword("funcref")),
+                "wrong bucket for: {src}"
+            );
+        }
+        // …and the modern spellings still assemble, so the guard is not simply refusing the shape.
+        for src in [
+            r#"(module (table 4 funcref))"#,
+            r#"(module (func (result funcref) (ref.null func)))"#,
+            r#"(module (type $t (func)) (func (param (ref null $t))))"#,
+        ] {
+            assert!(asm(src).is_ok(), "must still assemble: {src}");
+        }
+    }
+
     #[test]
     fn parses_value_types() {
         let none: Vec<Option<String>> = Vec::new();
@@ -4959,7 +5078,7 @@ mod tests {
         // `anyfunc` is the PRE-STANDARD spelling and is malformed — the direction is pinned
         // here, because it was accepted for the whole port and the reason given was that real
         // `.wat` still emits it. wasmtime 47 refuses it too.
-        assert!(p("anyfunc").is_err(), "the obsolete `anyfunc` spelling must be refused");
+        assert_eq!(p("anyfunc"), Err(Error::ObsoleteKeyword("funcref")));
         assert_eq!(p("externref").unwrap(), V::EXTERNREF);
         assert_eq!(p("exnref").unwrap(), V::EXNREF);
         assert_eq!(p("(ref null any)").unwrap(), V::ANYREF);
