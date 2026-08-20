@@ -45,6 +45,29 @@ field-coverage half never did** (X2). A ten-clause spot probe found this one; `s
 collapsing to the bare form is **correct** — a bare composite type *is* `sub final ϵ` — which was
 checked before reporting rather than counted as a sixth.
 
+## 🔴 OPEN — the bare-memidx SEGMENT spellings are refused, and they are valid
+
+`(data 0 (i32.const 0) "x")` and `(elem 0 (i32.const 0) $f)` — a segment naming its memory/table by a
+bare index before the offset — are **valid today**. wasmtime accepts both. wasmrt refuses them:
+
+| form | wasmrt | wasmtime |
+| --- | --- | --- |
+| `(data 0 (i32.const 0) "x")` | `BadForm` | accepted |
+| `(elem 0 (i32.const 0) $f)` | `TypeMismatch` ⚠️ *misleading* | accepted |
+| `(data (i32.const 0) "x")` | accepted | accepted |
+| `(elem (i32.const 0) $f)` | accepted | accepted |
+
+A **false rejection** — the safe direction, and still wrong. ⚠️ The `elem` half does not even fail
+cleanly: it reports `TypeMismatch`, so the error names the wrong stage and the wrong thing.
+
+⚠️⚠️ **This is CORE `.wat` grammar, and it was found in `proposals/threads/imports.wast`** — the only
+file in the corpus that exercises it. That is why "the 257 core spec files are at 0 failed / 0
+skipped" is a statement about **directories, not about rules**: this gap was always in core grammar
+and simply had no core file to fail in. 🎓 *A milestone scoped by where a test lives is not the same
+as one scoped by what a test checks.*
+
+Found 2026-08-20 by the Track M/A triage. Costs 4 assertions directly.
+
 ## ✅ CLOSED 2026-08-20 — the T13 day-2 sweep. **Read this before believing anything below it.**
 
 **F1–F7 and S1, S2, S3, S6, S7 are all closed**, and the 257 CORE spec files are at 0 failed / 0

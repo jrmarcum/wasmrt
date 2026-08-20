@@ -102,6 +102,21 @@ is the suspect, compare the SOURCE across engines.* It is the **fifth** instance
 mechanism, and like the first four it was found by accident: T10a's opcode half shipped 2026-08-08,
 its module-field half never did. See `known-issues.md` (top) and `best-practices.md` §5.8.
 
+✅ **TRACK M/A IS ALREADY TRIAGED (2026-08-20)** — the owner asked whether it should go first, and
+the answer changed the work-list rather than the order. **Not one of its 13 assertions is a threads or
+atomics defect**, the same result wazmrt got: **4** are era-pinned (wasmrt is RIGHT, the file predates
+multi-memory/multi-table — wasmtime accepts those modules too) and are an **owner DECISION, not code**;
+**4** more are the same modules *misreported by our own runner*, which builds an `assert_invalid`
+module all the way through **link** when validation is where that assertion ends; **4** are a generic
+**core `.wat` grammar gap** — the bare-memidx segment spelling `(data 0 (i32.const 0) "x")` /
+`(elem 0 …)`, which wasmtime accepts and we refuse; and **1** is a missing `spectest.shared_memory`.
+
+⚠️⚠️ **That forces a correction to a claim made the same day.** "The 257 core spec files are at
+0 failed / 0 skipped" is a statement about **directories, not about rules** — the segment-spelling gap
+is core `.wat` grammar that simply has no core file to fail in. 🎓 *A milestone scoped by where a
+test lives is not the same as one scoped by what a test checks*, and the second is the one that was
+meant. Revised order: **X1 → M/A instrument → M/A grammar → the era-pinned decision → W → P → D.**
+
 🔒 **The order held.** "All failures first, then the skips" was probed rather than adopted on
 2026-08-19, and it played out as measured: the failure pass cleared most of the cascades, and S1 — the
 externref bridge, the one item phase 1 provably could not reach — was worth 229 assertions against a

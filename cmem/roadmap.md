@@ -227,7 +227,7 @@ two above is *evidence the work is landing*, and the commit must say which.
 | --- | --- | --- | --- | --- | --- |
 | **W** | wide-arithmetic | 1 | 108 | 99 | **best ratio left — do first** |
 | **P** | custom-page-sizes | 34 | 7 | 7 | small feature, **memory-safety item** |
-| **M/A** | threads | 13 | 18 | 18 | ⚠️ **triage before costing** |
+| **M/A** | threads | 13 | 18 | 18 | ✅ **TRIAGED — not a threads track.** 0 of 13 are threads defects; see below |
 | **D** | custom-descriptors | 64 | 451 | 436 | largest lever, largest risk, **last** |
 
 ⚠️ **436 of the 451 custom-descriptors skips are cascades**, and 99 of wide-arithmetic's 108 are. A
@@ -250,13 +250,11 @@ and convert or justify **each one, in the commit message**. Then the memory64 in
 1-byte-page memory must refuse an out-of-bounds access at BYTE granularity**; the assertions alone
 would not catch a bounds check that silently kept 64 KiB.
 
-**Track M/A — threads.** ⚠️⚠️ **Triage before costing — this is the track most likely to be
-mis-scoped, and wazmrt's equivalent entry was wrong twice over: not one of its 15 was a threads
-defect.** Two reasons to expect the same here: the `proposals/threads/` directory is a snapshot pinned
-to a spec **before multi-memory and multi-table**, so some assertions are era-pinned rather than
-defects; and 4 of wasmrt's 13 already read *"Invalid: rejected at the wrong stage"*, which is a
-stage-routing question, not an atomics one. **Deliverable of the triage: a cause per assertion, before
-any implementation is priced.**
+**Track M/A — threads.** ✅ **TRIAGED 2026-08-20 — see the breakdown below the track list.** The
+prediction held exactly: **not one of the 13 is a threads or atomics defect**, the same result wazmrt
+got. It decomposes into an owner DECISION (4, era-pinned — wasmrt is right and the file is stale), an
+INSTRUMENT fix (4, our runner links an `assert_invalid` module), a generic CORE text-format gap (4,
+the bare-memidx segment spelling, which wasmtime accepts and we refuse) and a HARNESS export (1).
 
 **Track D — custom-descriptors.** The largest feature since GC, and an extension of a proposal wasmrt
 already ships. **D1 gates everything else; do not reorder.**
@@ -291,6 +289,42 @@ already ships. **D1 gates everything else; do not reorder.**
 * 🔒 **Out of scope but do it anyway, as D2 lands:** `struct.new` / `struct.new_default` must REFUSE a
   type that declares a descriptor, or a half-implemented D2 can build an object D3 says is
   unconstructable.
+
+###### ✅ TRACK M/A — TRIAGED 2026-08-20 (owner asked whether it should go first). **It is not a threads track.**
+
+**Not one of the 13 is a threads or atomics defect** — the same result wazmrt got, arrived at
+independently. The deliverable was "a cause per assertion before any implementation is priced"; here
+it is, verified against wasmtime rather than reasoned out:
+
+| # | cause | what it actually is | work |
+| --- | --- | --- | --- |
+| **4** | `(memory 0) (memory 0)` / two tables asserted invalid | ⚠️ **wasmrt is RIGHT and the file is STALE.** `proposals/threads/` is a snapshot pinned before multi-memory and multi-table; wasmtime accepts both modules too. | 🚦 **a DECISION, no code** |
+| **4** | the same four modules in their `(import "" "" …)` spelling | ⚠️ **Our runner MISREPORTS them.** `assert_invalid` builds all the way through **link**, so an unresolvable import surfaces as *"rejected at the wrong stage (link: unknown import)"*. Validation is where `assert_invalid` ends — it should never reach the linker. | **instrument**, corpus-wide |
+| **4** | `(data 0 (i32.const 0) "x")`, `(elem 0 (i32.const 0) $f)` | 🔴 **A generic CORE text-format gap.** The bare-memidx segment spelling is **valid today** — wasmtime accepts both — and wasmrt refuses them (`BadForm`, and `elem` fails as a misleading `TypeMismatch`). A false rejection, and nothing to do with threads. | **core `.wat` grammar** |
+| **1** | `spectest.shared_memory` not defined | harness: the spectest module needs a shared-memory export, exactly like `spectest.table64` added on 2026-08-20. | **harness** |
+
+⚠️⚠️ **THE CORRECTION THIS FORCES, and it is about a claim made earlier the same day.** "The 257 core
+spec files are at 0 failed / 0 skipped" is a statement about **directories, not about rules**. The
+bare-memidx segment spelling is core `.wat` grammar; it is simply not exercised by any file outside
+`proposals/`. 🎓 *A milestone scoped by where a test lives is not the same as one scoped by what a test
+checks* — and the second is the one that was meant.
+
+🚦 **THE DECISION, and it is the owner's.** Four assertions cannot be satisfied without deliberately
+breaking multi-memory/multi-table, which wasmrt supports and the spec requires. T13's gate says **zero
+failed / zero skipped / EMPTY baseline / zero deliberate deviations**, and these four cannot meet all
+four at once. The options, cheapest first:
+
+1. **Refresh the vendored snapshot.** `proposals/threads/` may simply be behind upstream. It lives in
+   the wasmtk tree, so this is a wasmtk change, not a wasmrt one — and it is the only option that
+   keeps every T13 clause intact. ⚠️ **Check upstream before choosing anything below it.**
+2. **An explained four-line baseline** — contradicts "empty baseline", but honestly: *the engine is
+   newer than the test*.
+3. **Treat the era-pinned file as out of corpus** — cleanest number, worst precedent: a file removed
+   for failing is the failure mode the baseline discipline exists to prevent.
+
+**Revised order:** X1 (a live wrong ANSWER outranks a wrong REPORT) → M/A's instrument fix (it changes
+how `assert_invalid` is scored **corpus-wide**, so it belongs before more work is measured against the
+current numbers) → M/A's text-format gap → the decision above → then W → P → D.
 
 ###### 🧾 Definition of done for each track
 
