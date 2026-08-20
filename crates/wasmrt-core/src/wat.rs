@@ -443,15 +443,47 @@ fn check_float_syntax(body: &str, is_hex: bool) -> Result<()> {
     }
 }
 
-fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
-    // The wasm-specific NaN spellings: `nan:canonical`, `nan:arithmetic`, `nan:0x<payload>`.
+/// Which grammar a float literal is being read under.
+///
+/// ⚠️ **`nan:canonical` and `nan:arithmetic` are NOT float literals.** §6.3.2's `fN` admits
+/// `nan`, `nan:0x`<hexnum> and the numeric forms — nothing else. The two named spellings belong
+/// to the **script** grammar (§7): they are patterns an `assert_return` matches a *result*
+/// against, and `f32.wast` asserts that a module containing one is malformed. One parser served
+/// both, so the pattern language leaked into the module language.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloatCtx {
+    /// Inside a module: §6.3.2 only.
+    Module,
+    /// Inside a `.wast` script's expectation: §6.3.2 plus the two NaN patterns.
+    Script,
+}
+
+fn parse_float_bits(lit: &str, f: FloatFmt, ctx: FloatCtx) -> Option<u64> {
+    // The NaN spellings. `nan:0x<payload>` in both grammars; `nan:canonical`/`nan:arithmetic`
+    // in scripts only.
     if let Some(colon) = lit.find(':') {
         let canonical: u64 = 1u64 << (f.mant_bits - 1);
         let exp_all = (f.max_biased as u64) << f.mant_bits;
         let mant_mask = (1u64 << f.mant_bits) - 1;
+        // Everything before the colon must be exactly `nan`, optionally signed — the head was
+        // never checked, so `foo:0x1` parsed as a NaN.
+        let head = &lit[..colon];
+        if !matches!(head, "nan" | "+nan" | "-nan") {
+            return None;
+        }
         let tail = &lit[colon + 1..];
         let mut bits = exp_all | canonical;
-        if tail != "canonical" && tail != "arithmetic" {
+        if tail == "canonical" || tail == "arithmetic" {
+            if ctx == FloatCtx::Module {
+                return None;
+            }
+        } else {
+            // §6.3.2: the payload is `nan:0x` hexnum — **hex only**. `nan:1` parsed as decimal
+            // 1 and produced a perfectly good NaN, which is accept-invalid (`const.wast`).
+            let hex = tail.strip_prefix("0x").or_else(|| tail.strip_prefix("0X"))?;
+            if hex.is_empty() {
+                return None;
+            }
             let payload = parse_u64_str(tail).ok()?;
             // The payload must fit the mantissa and be non-zero — a zero payload is an
             // infinity, not a NaN. Masking instead of checking turned an out-of-range
@@ -651,14 +683,14 @@ fn parse_float_bits(lit: &str, f: FloatFmt) -> Option<u64> {
     Some(bits)
 }
 
-/// Parse a WAT `f32` literal to its bit pattern.
-pub(crate) fn parse_f32_bits(lit: &str) -> Option<u32> {
-    parse_float_bits(lit, F32_FMT).map(|b| b as u32)
+/// Parse a WAT `f32` literal to its bit pattern, under `ctx`'s grammar.
+pub(crate) fn parse_f32_bits(lit: &str, ctx: FloatCtx) -> Option<u32> {
+    parse_float_bits(lit, F32_FMT, ctx).map(|b| b as u32)
 }
 
-/// Parse a WAT `f64` literal to its bit pattern.
-pub(crate) fn parse_f64_bits(lit: &str) -> Option<u64> {
-    parse_float_bits(lit, F64_FMT)
+/// Parse a WAT `f64` literal to its bit pattern, under `ctx`'s grammar.
+pub(crate) fn parse_f64_bits(lit: &str, ctx: FloatCtx) -> Option<u64> {
+    parse_float_bits(lit, F64_FMT, ctx)
 }
 
 /// Parse an integer literal and check it fits `bits` wide.
@@ -709,9 +741,14 @@ fn string_to_val_type(atom: &str) -> Option<V> {
         "f32" => V::F32,
         "f64" => V::F64,
         "v128" => V::V128,
-        // `anyfunc` is the pre-standard spelling of `funcref`; MVP-era tools and
-        // hand-written `.wat` still emit it (`(table N anyfunc)`).
-        "funcref" | "nullfuncref" | "anyfunc" => V::FUNCREF,
+        // ⚠️ `anyfunc` — the pre-standard spelling of `funcref` — was accepted here until
+        // 2026-08-20 "because MVP-era tools still emit it". It is **malformed**
+        // (`obsolete-keywords.wast`), and wasmtime 47 refuses it with the same reasoning,
+        // listing the legal spellings. Accepting it was a deliberate deviation, and T13 has
+        // none; the cost is real and is two stale `.wat` files in the ArtOfWebAssembly corpus.
+        // 🎓 A leniency with no wrong-value consequence is still a leniency: it is the engine
+        // telling a tool its output is fine when the next runtime will reject it.
+        "funcref" | "nullfuncref" => V::FUNCREF,
         "externref" | "nullexternref" => V::EXTERNREF,
         "anyref" => V::ANYREF,
         "eqref" => V::EQREF,
@@ -1245,12 +1282,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         ("data", &b.data_names),
     ] {
         let _ = space; // named for the reader; the error carries no payload
-        for i in 0..names.len() {
-            let Some(n) = names[i].as_deref() else { continue };
-            if names[..i].iter().any(|m| m.as_deref() == Some(n)) {
-                return Err(Error::DuplicateName);
-            }
-        }
+        check_unique_names(names)?;
     }
 
     emit_module(
@@ -1346,10 +1378,30 @@ fn parse_type_body(
         }
         _ => return Err(Error::BadForm),
     };
+    check_unique_names(&names)?;
     types.push(def);
     supers.push(super_ref);
     finals.push(is_final);
     field_names.push(names);
+    Ok(())
+}
+
+/// No `$name` may repeat within one namespace (§6.3.5). `None` entries are unnamed and never
+/// collide.
+///
+/// 🔒 **One authority, three namespaces.** It was written for the module's index spaces, and the
+/// same rule governs a function's locals (parameters and locals share ONE space, so
+/// `(func (param $foo i32) (local $foo i32))` is malformed) and a struct type's field names. Each
+/// of those had no check at all, in the **accepting** direction — 4 `assert_malformed`s across
+/// `func.wast` and `struct.wast`. A second copy of the loop would have been a third place for the
+/// rule to drift.
+fn check_unique_names(names: &[Option<String>]) -> Result<()> {
+    for i in 0..names.len() {
+        let Some(n) = names[i].as_deref() else { continue };
+        if names[..i].iter().any(|m| m.as_deref() == Some(n)) {
+            return Err(Error::DuplicateName);
+        }
+    }
     Ok(())
 }
 
@@ -1673,6 +1725,9 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             }
         }
     }
+
+    // Parameters and locals share ONE index space, so a name may not repeat across the two.
+    check_unique_names(&local_names)?;
 
     if let Some(r) = import {
         let ti = type_ref.unwrap_or_else(|| intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig));
@@ -2990,14 +3045,22 @@ fn emit_try_table(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     let mut j = 1;
     let label = opt_name(l, &mut j);
     let bt = parse_block_type(ctx, l, &mut j)?;
-    // Push the try_table's own label FIRST, so a `(catch … 0)` targeting it resolves to 0
-    // (label 0 = the try_table block) and outer labels are > 0.
+    emit_block_type(ctx, bt)?;
+    // ⚠️⚠️ **The catch labels resolve in the ENCLOSING scope** — the try_table's own label is
+    // pushed AFTER them. `C ⊢ catch ok` is checked in `C`, before the rule extends it with the
+    // block's label, so `(catch $e 0)` names the block *around* the try_table.
+    //
+    // This pushed first, "so a `(catch … 0)` targeting it resolves to 0". The validator and the
+    // interpreter both agreed with it, so wasmrt round-tripped its own output perfectly and the
+    // suite was almost entirely green — but the BYTES were off by one, and wasmtime 47 refuses
+    // them: `catch_all label must have no result types`, resolving our `1` to the function.
+    // 🎓 Three components agreeing is not evidence when all three learned it from each other;
+    // only an outside reader can tell a convention from a bug.
+    emit_catch_clauses(ctx, l, &mut j)?;
     if ctx.labels.len() >= MAX_CTRL_DEPTH {
         return Err(Error::NestingTooDeep);
     }
     ctx.labels.push(label);
-    emit_block_type(ctx, bt)?;
-    emit_catch_clauses(ctx, l, &mut j)?;
     emit_seq(ctx, &l[j..])?;
     ctx.out.push(0x0b);
     ctx.labels.pop();
@@ -3145,19 +3208,19 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             "legacy `delegate` (rejected, matching the oracle)",
         )),
         O::TryTable => {
-            // Flat: `try_table $l? blocktype? catch* … end`. Push the label before
-            // resolving the catch labels (label 0 = the try_table itself); the body
-            // instructions follow and the eventual `end` pops it.
+            // Flat: `try_table $l? blocktype? catch* … end`. The catch labels resolve in the
+            // ENCLOSING scope, so the try_table's own label goes on only after them — see the
+            // note in `emit_try_table`, which had the same off-by-one.
             let mut j = i + 1;
             let label = opt_name(items, &mut j);
             let bt = parse_block_type(ctx, items, &mut j)?;
             ctx.out.push(0x1f);
+            emit_block_type(ctx, bt)?;
+            emit_catch_clauses(ctx, items, &mut j)?;
             if ctx.labels.len() >= MAX_CTRL_DEPTH {
                 return Err(Error::NestingTooDeep);
             }
             ctx.labels.push(label);
-            emit_block_type(ctx, bt)?;
-            emit_catch_clauses(ctx, items, &mut j)?;
             Ok(j)
         }
         // §6.5.2: `else` and `end` may REPEAT the enclosing block's label — `(block $l … end $l)`.
@@ -3206,19 +3269,16 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
                     .count();
             }
             let end = (i + 1 + n).min(items.len());
-            emit_op_with_immediates(ctx, op, &items[..end], i + 1)?;
-            // Loads/stores may carry `offset=`/`align=` atoms beyond the fixed arity.
-            let mut j = end;
+            // ⚠️ A load/store gets the UNtruncated slice: its memarg atoms sit past the fixed
+            // arity, and the emitter is the half that knows how many of them there are. Handing
+            // it `&items[..end]` is what silently dropped `offset=`/`align=` in the flat form.
             if takes_memarg(op) {
-                while items
-                    .get(j)
-                    .and_then(Sexpr::as_atom)
-                    .is_some_and(|a| a.starts_with("offset=") || a.starts_with("align="))
-                {
-                    j += 1;
-                }
+                emit_op_with_immediates(ctx, op, items, i + 1)?;
+                let (j, ..) = parse_memarg_run(ctx, items, i + 1, false, 0)?;
+                return Ok(j);
             }
-            Ok(j)
+            emit_op_with_immediates(ctx, op, &items[..end], i + 1)?;
+            Ok(end)
         }
     }
 }
@@ -3367,11 +3427,11 @@ fn emit_op_with_immediates(
         }
         O::I64Const => sleb(&mut ctx.out, parse_int_fit(want_atom(imm(0)?)?, 64)?),
         O::F32Const => {
-            let bits = parse_f32_bits(want_atom(imm(0)?)?).ok_or(Error::BadNumber)?;
+            let bits = parse_f32_bits(want_atom(imm(0)?)?, FloatCtx::Module).ok_or(Error::BadNumber)?;
             ctx.out.extend_from_slice(&bits.to_le_bytes());
         }
         O::F64Const => {
-            let bits = parse_f64_bits(want_atom(imm(0)?)?).ok_or(Error::BadNumber)?;
+            let bits = parse_f64_bits(want_atom(imm(0)?)?, FloatCtx::Module).ok_or(Error::BadNumber)?;
             ctx.out.extend_from_slice(&bits.to_le_bytes());
         }
         O::LocalGet | O::LocalSet | O::LocalTee => {
@@ -3584,41 +3644,23 @@ fn emit_op_with_immediates(
         _ => {}
     }
 
-    // Loads/stores: an `align=`/`offset=` pair follows the opcode.
+    // Loads/stores: `memidx? offset=? align=?` follows the opcode.
+    //
+    // ⚠️⚠️ **This had its own copy of the scan, and in FLAT form it never ran at all.** `emit_flat`
+    // truncated `items` to the fixed-arity end before calling here — which for a load/store is
+    // `start` itself — so the loop looked one past the end of its own input, found nothing, and
+    // emitted the DEFAULT memarg. `i32.const 0 i32.load offset=4` read at offset **0** and
+    // returned the wrong number: no error, no diagnostic. A separate loop in `emit_flat` then
+    // skipped the atoms so nothing downstream noticed they had been dropped.
+    //
+    // It now uses the SIMD family's scan, which was already correct because the flat form forced
+    // it to be: it stops at the first atom that is neither `offset=`/`align=` nor index-like, so
+    // a following mnemonic (`drop`, `i32.const`) is not swallowed as a memory index. That is the
+    // whole reason the two copies differed, and it is why there is now one.
     if takes_memarg(op) {
-        let mut align: Option<u32> = None;
-        let mut offset: u64 = 0;
-        let mut mem: u32 = 0;
-        let mut k = start;
-        // An optional leading memory index (multi-memory).
-        if let Some(a) = items.get(k).and_then(Sexpr::as_atom) {
-            if !a.starts_with("offset=") && !a.starts_with("align=") {
-                mem = resolve_by_name(ctx.mem_names, &items[k])?;
-                k += 1;
-            }
-        }
-        while let Some(a) = items.get(k).and_then(Sexpr::as_atom) {
-            if let Some(v) = a.strip_prefix("offset=") {
-                offset = parse_u64_str(v)?;
-            } else if let Some(v) = a.strip_prefix("align=") {
-                let bytes = parse_u64_str(v)?;
-                if !bytes.is_power_of_two() {
-                    return Err(Error::BadImmediate);
-                }
-                align = Some(bytes.trailing_zeros());
-            } else {
-                break;
-            }
-            k += 1;
-        }
-        let a = align.unwrap_or_else(|| crate::opcode::natural_align_log2(op));
-        if mem == 0 {
-            uleb(&mut ctx.out, u64::from(a));
-        } else {
-            uleb(&mut ctx.out, u64::from(a | 0x40));
-            uleb(&mut ctx.out, u64::from(mem));
-        }
-        uleb(&mut ctx.out, offset);
+        let (_, align, mem, offset, _) =
+            parse_memarg_run(ctx, items, start, false, crate::opcode::natural_align_log2(op))?;
+        emit_memarg_bytes(&mut ctx.out, align, mem, offset);
     }
     Ok(())
 }
@@ -4039,11 +4081,11 @@ fn parse_v128_const(items: &[Sexpr], mut j: usize, out: &mut [u8; 16]) -> Result
         let a = want_atom(s)?;
         match shape {
             "f32x4" => {
-                let bits = parse_f32_bits(a).ok_or(Error::BadNumber)?;
+                let bits = parse_f32_bits(a, FloatCtx::Module).ok_or(Error::BadNumber)?;
                 out[k * 4..k * 4 + 4].copy_from_slice(&bits.to_le_bytes());
             }
             "f64x2" => {
-                let bits = parse_f64_bits(a).ok_or(Error::BadNumber)?;
+                let bits = parse_f64_bits(a, FloatCtx::Module).ok_or(Error::BadNumber)?;
                 out[k * 8..k * 8 + 8].copy_from_slice(&bits.to_le_bytes());
             }
             "i8x16" => out[k] = parse_int_fit(a, 8)? as u8,
@@ -4083,11 +4125,15 @@ fn emit_memarg_bytes(out: &mut Vec<u8>, align_log2: u32, mem: u32, offset: u64) 
 /// Collect the leading memarg-ish atom run: `memidx? offset=? align=?`, plus a trailing
 /// lane index for the `*_lane` ops.
 ///
+/// 🔒 **The one authority for a memarg, scalar and SIMD alike.** It lived in the SIMD emitter and
+/// the scalar loads/stores had their own copy — which never handled the flat form and dropped
+/// `offset=`/`align=` there entirely, a wrong VALUE rather than a rejection.
+///
 /// Only `offset=`/`align=` atoms and index-like atoms are taken. Stopping at anything else
 /// matters in the FLAT form, where `items` is the whole sibling instruction sequence: a
 /// following mnemonic (`drop`, `i32.const`) is not index-like and must NOT be swallowed as
 /// a memory or lane index.
-fn parse_simd_memarg(
+fn parse_memarg_run(
     ctx: &Ctx,
     items: &[Sexpr],
     mut j: usize,
@@ -4162,7 +4208,7 @@ fn emit_simd(
         SimdImm::Const => j = parse_v128_const(items, j, &mut cbytes)?,
         SimdImm::Mem | SimdImm::MemLane => {
             let want_lane = imm == SimdImm::MemLane;
-            let r = parse_simd_memarg(ctx, items, j, want_lane, align)?;
+            let r = parse_memarg_run(ctx, items, j, want_lane, align)?;
             j = r.0;
             align = r.1;
             mem = r.2;
@@ -4214,7 +4260,7 @@ fn emit_atomic(
         ctx.out.push(0x00);
         return Ok(j);
     }
-    let (mut j, align, mem, offset, _) = parse_simd_memarg(ctx, items, j, false, natural)?;
+    let (mut j, align, mem, offset, _) = parse_memarg_run(ctx, items, j, false, natural)?;
     if folded {
         while j < items.len() {
             j = emit_one(ctx, items, j)?;
@@ -4848,7 +4894,10 @@ mod tests {
         assert_eq!(p("f64").unwrap(), V::F64);
         assert_eq!(p("v128").unwrap(), V::V128);
         assert_eq!(p("funcref").unwrap(), V::FUNCREF);
-        assert_eq!(p("anyfunc").unwrap(), V::FUNCREF); // pre-standard spelling
+        // `anyfunc` is the PRE-STANDARD spelling and is malformed — the direction is pinned
+        // here, because it was accepted for the whole port and the reason given was that real
+        // `.wat` still emits it. wasmtime 47 refuses it too.
+        assert!(p("anyfunc").is_err(), "the obsolete `anyfunc` spelling must be refused");
         assert_eq!(p("externref").unwrap(), V::EXTERNREF);
         assert_eq!(p("exnref").unwrap(), V::EXNREF);
         assert_eq!(p("(ref null any)").unwrap(), V::ANYREF);
@@ -5047,52 +5096,52 @@ mod tests {
         // than a rejected one, so the same number in decimal and in hex would compile to
         // different modules.
         assert_eq!(
-            parse_f64_bits("0x0123456789ABCDEFabcdef").unwrap(),
+            parse_f64_bits("0x0123456789ABCDEFabcdef", FloatCtx::Script).unwrap(),
             0x44f2_3456_789a_bcdf
         );
         assert_eq!(
-            parse_f64_bits("0x0123456789ABCDEFa").unwrap(),
+            parse_f64_bits("0x0123456789ABCDEFa", FloatCtx::Script).unwrap(),
             0x43b2_3456_789a_bcdf
         );
         assert_eq!(
-            parse_f64_bits("0x1.23456789abcdep+81").unwrap(),
+            parse_f64_bits("0x1.23456789abcdep+81", FloatCtx::Script).unwrap(),
             0x4502_3456_789a_bcde
         );
     }
 
     #[test]
     fn parses_ordinary_float_literals() {
-        assert_eq!(parse_f64_bits("1.5").unwrap(), 1.5f64.to_bits());
-        assert_eq!(parse_f64_bits("-0.0").unwrap(), (-0.0f64).to_bits());
-        assert_eq!(parse_f64_bits("0").unwrap(), 0.0f64.to_bits());
-        assert_eq!(parse_f32_bits("1.5").unwrap(), 1.5f32.to_bits());
-        assert_eq!(parse_f32_bits("-2.5e3").unwrap(), (-2500.0f32).to_bits());
-        assert_eq!(parse_f64_bits("inf").unwrap(), f64::INFINITY.to_bits());
+        assert_eq!(parse_f64_bits("1.5", FloatCtx::Script).unwrap(), 1.5f64.to_bits());
+        assert_eq!(parse_f64_bits("-0.0", FloatCtx::Script).unwrap(), (-0.0f64).to_bits());
+        assert_eq!(parse_f64_bits("0", FloatCtx::Script).unwrap(), 0.0f64.to_bits());
+        assert_eq!(parse_f32_bits("1.5", FloatCtx::Script).unwrap(), 1.5f32.to_bits());
+        assert_eq!(parse_f32_bits("-2.5e3", FloatCtx::Script).unwrap(), (-2500.0f32).to_bits());
+        assert_eq!(parse_f64_bits("inf", FloatCtx::Script).unwrap(), f64::INFINITY.to_bits());
         assert_eq!(
-            parse_f64_bits("-inf").unwrap(),
+            parse_f64_bits("-inf", FloatCtx::Script).unwrap(),
             f64::NEG_INFINITY.to_bits()
         );
         // The exponent-less hex form the text format also allows.
-        assert_eq!(parse_f64_bits("0x10").unwrap(), 16.0f64.to_bits());
-        assert_eq!(parse_f64_bits("0x1.8p+1").unwrap(), 3.0f64.to_bits());
-        assert!(parse_f64_bits("0x").is_none());
-        assert!(parse_f64_bits("1.2.3").is_none());
+        assert_eq!(parse_f64_bits("0x10", FloatCtx::Script).unwrap(), 16.0f64.to_bits());
+        assert_eq!(parse_f64_bits("0x1.8p+1", FloatCtx::Script).unwrap(), 3.0f64.to_bits());
+        assert!(parse_f64_bits("0x", FloatCtx::Script).is_none());
+        assert!(parse_f64_bits("1.2.3", FloatCtx::Script).is_none());
     }
 
     #[test]
     fn parses_the_wasm_nan_spellings() {
-        let canonical = parse_f64_bits("nan:canonical").unwrap();
+        let canonical = parse_f64_bits("nan:canonical", FloatCtx::Script).unwrap();
         assert!(f64::from_bits(canonical).is_nan());
         assert_eq!(canonical, f64::NAN.to_bits() & !(1u64 << 63));
-        let arith = parse_f64_bits("nan:arithmetic").unwrap();
+        let arith = parse_f64_bits("nan:arithmetic", FloatCtx::Script).unwrap();
         assert!(f64::from_bits(arith).is_nan());
         // An explicit payload lands in the mantissa.
-        let payload = parse_f64_bits("nan:0x4000000000000").unwrap();
+        let payload = parse_f64_bits("nan:0x4000000000000", FloatCtx::Script).unwrap();
         assert_eq!(payload & 0xf_ffff_ffff_ffff, 0x4000000000000);
         assert!(f64::from_bits(payload).is_nan());
         // The sign is honoured.
-        assert_ne!(parse_f64_bits("-nan:canonical").unwrap() >> 63, 0);
-        assert!(f32::from_bits(parse_f32_bits("nan").unwrap()).is_nan());
+        assert_ne!(parse_f64_bits("-nan:canonical", FloatCtx::Script).unwrap() >> 63, 0);
+        assert!(f32::from_bits(parse_f32_bits("nan", FloatCtx::Script).unwrap()).is_nan());
     }
 
     #[test]
@@ -5100,16 +5149,16 @@ mod tests {
         // 0.75 ULP — just ABOVE half the smallest f64 subnormal — must round up to it
         // rather than flush to zero. This is the case a two-stage rounding (clamp the
         // kept-bit count, then scale) gets wrong by discarding the sticky bit.
-        assert_eq!(parse_f64_bits("0x1.8p-1075").unwrap(), 1);
+        assert_eq!(parse_f64_bits("0x1.8p-1075", FloatCtx::Script).unwrap(), 1);
         // Exactly half ties to even → zero.
-        assert_eq!(parse_f64_bits("0x1p-1075").unwrap(), 0);
+        assert_eq!(parse_f64_bits("0x1p-1075", FloatCtx::Script).unwrap(), 0);
         // The smallest subnormal itself.
-        assert_eq!(parse_f64_bits("0x1p-1074").unwrap(), 1);
+        assert_eq!(parse_f64_bits("0x1p-1074", FloatCtx::Script).unwrap(), 1);
         // Exactly halfway BETWEEN subnormals 1 and 2 ties to even → 2.
-        assert_eq!(parse_f64_bits("0x1.8p-1074").unwrap(), 2);
+        assert_eq!(parse_f64_bits("0x1.8p-1074", FloatCtx::Script).unwrap(), 2);
         // Rounding up out of the subnormal range lands on the smallest normal.
         assert_eq!(
-            parse_f64_bits("0x1.fffffffffffffp-1023").unwrap(),
+            parse_f64_bits("0x1.fffffffffffffp-1023", FloatCtx::Script).unwrap(),
             f64::MIN_POSITIVE.to_bits()
         );
     }
@@ -5284,7 +5333,8 @@ mod tests {
     #[test]
     fn runs_try_table_from_text() {
         // The catch clause branches OUT of the try_table to the enclosing block, carrying
-        // the tag's payload. Label 0 is the try_table itself, so the block is label 1.
+        // the tag's payload. ⚠️ A catch label counts from OUTSIDE the try_table, so the
+        // enclosing block is label 0 — `$h` resolves there, and the emitted byte is 0.
         let src = r#"(module
             (tag $e (param i32))
             (func (export "f") (result i32)
@@ -5294,6 +5344,38 @@ mod tests {
                   (throw $e)))))"#;
         let r = run(src, "f", &[]);
         assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    /// ⚠️⚠️ **The bytes, not the answer.** A `try_table` catch label counts from the scope
+    /// ENCLOSING the try_table (§: `C ⊢ catch ok` is checked before the rule extends `C` with the
+    /// block's label). The assembler pushed the try_table's own label first, the validator pushed
+    /// its frame first, and the interpreter added `d` instead of `d + 1` — three components that
+    /// agreed with each other, so every behavioural test above passed and the spec suite was
+    /// almost entirely green while the emitted module was **rejected by wasmtime 47**
+    /// (`catch_all label must have no result types`, resolving our `1` to the function).
+    ///
+    /// 🎓 *Agreement between components that learned the convention from each other is not
+    /// evidence.* Only reading the byte — or handing it to an outside reader — can tell a
+    /// convention from a bug, which is why this test asserts the encoding rather than the result.
+    #[test]
+    fn a_catch_label_is_encoded_relative_to_the_enclosing_scope() {
+        let bytes = asm_valid(
+            r#"(module
+                (tag $e)
+                (func (export "f")
+                  (block $h
+                    (try_table (catch_all $h)))))"#,
+        );
+        // … 1f 40 01 02 <label> 0b …  — try_table, void blocktype, 1 clause, catch_all, label.
+        let at = bytes
+            .windows(4)
+            .position(|w| w == [0x1f, 0x40, 0x01, 0x02])
+            .expect("the try_table's catch vector must be in the emitted body");
+        assert_eq!(
+            bytes[at + 4],
+            0x00,
+            "the enclosing block is label 0 from a catch clause, not 1"
+        );
     }
 
     #[test]
@@ -6011,19 +6093,19 @@ mod tests {
         for bad in ["_100", "99_", "1__000", "_1"] {
             assert!(parse_u64_str(bad).is_err(), "should reject `{bad}`");
         }
-        assert!(parse_f64_bits("1_000.5").is_some());
+        assert!(parse_f64_bits("1_000.5", FloatCtx::Script).is_some());
         for bad in ["_100", "1.0_", "1_.0", "1__000", "+_100"] {
-            assert!(parse_f64_bits(bad).is_none(), "should reject `{bad}`");
+            assert!(parse_f64_bits(bad, FloatCtx::Script).is_none(), "should reject `{bad}`");
         }
 
         // "between two digits", not "between two alphanumerics" — the looser reading admits
         // these, because `x`, `e` and `p` are alphanumeric. Which characters count as digits
         // depends on the radix: `e` is a digit in hex but an exponent marker in decimal.
         for bad in ["1_e1", "1e_1", "0x_1", "0x1_", "0x1_p3"] {
-            assert!(parse_f64_bits(bad).is_none(), "should reject `{bad}`");
+            assert!(parse_f64_bits(bad, FloatCtx::Script).is_none(), "should reject `{bad}`");
         }
         for ok in ["0x1_e2", "0x1p1_0", "0xa_b", "1.0e1_0"] {
-            assert!(parse_f64_bits(ok).is_some(), "should accept `{ok}`");
+            assert!(parse_f64_bits(ok, FloatCtx::Script).is_some(), "should accept `{ok}`");
         }
         assert!(parse_u64_str("0x_1").is_err());
         assert_eq!(parse_u64_str("0xa_b").unwrap(), 0xab);

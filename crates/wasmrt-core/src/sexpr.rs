@@ -101,6 +101,9 @@ pub enum ParseErrorKind {
     MalformedUtf8,
     /// `id ::= '$' idchar+` — a bare `$`, or the quoted form `$""`, names nothing.
     EmptyIdentifier,
+    /// `annot ::= '(@' annotid annotelem* ')'` — the id must follow `@` **immediately** and
+    /// name something: `(@)`, `(@ x)`, `(@(@a)x)` and `(@"")` are all malformed.
+    EmptyAnnotationId,
 }
 
 /// Is this byte an `idchar` (§6.2.2)?
@@ -325,6 +328,43 @@ impl Parser<'_> {
         Ok(Sexpr::List(items))
     }
 
+    /// Consume an annotation's **id**, which must follow `@` with nothing in between.
+    ///
+    /// ⚠️ **Skipping an annotation is not the same as not reading it** — the same rule the body
+    /// loop below already applies to the source character set, and this is the other half of it.
+    /// `(@` is not a token on its own: `annot ::= '(@' annotid annotelem* ')'`, so `(@)`,
+    /// `(@ x)`, `(@(@a)x)` and `(@"")` are **malformed source**, not annotations a tool is free
+    /// to ignore. Ignoring an unrecognised annotation is what the proposal asks for; ignoring a
+    /// malformed one is accept-invalid.
+    ///
+    /// Two spellings, per the proposal's own valid module (`(@aas-3!@$d-@#4)` and `(@"a")`):
+    /// a run of `idchar`, or a quoted **name** — which still has to be non-empty and still has to
+    /// be a name, so `(@"")`, `(@"<raw newline>")` and `(@"\ef")` are all refused, each by the
+    /// rule that already governs the equivalent `$`-identifier.
+    fn read_annotation_id(&mut self) -> Result<()> {
+        match self.src.get(self.pos) {
+            Some(b'"') => {
+                let s = self.parse_string()?;
+                if s.is_empty() {
+                    return Err(self.err(ParseErrorKind::EmptyAnnotationId));
+                }
+                if core::str::from_utf8(&s).is_err() {
+                    return Err(self.err(ParseErrorKind::MalformedUtf8));
+                }
+                Ok(())
+            }
+            Some(&c) if is_idchar(c) => {
+                while self.src.get(self.pos).is_some_and(|&c| is_idchar(c)) {
+                    self.pos += 1;
+                }
+                Ok(())
+            }
+            // Whitespace, `(`, `)`, end of input — the id is missing. ⚠️ A *space* is the
+            // interesting one: `(@ a)` looks like an annotation named `a` and is not one.
+            _ => Err(self.err(ParseErrorKind::EmptyAnnotationId)),
+        }
+    }
+
     /// Skip an annotation `(@id …)` whole, treating it as trivia.
     ///
     /// The annotations proposal is not one wasmrt targets, and it says explicitly that a tool
@@ -337,6 +377,7 @@ impl Parser<'_> {
     /// annotation — `(@a ;; bla)` and `(@a (; ) ;))` both appear in the proposal's own tests.
     fn skip_annotation(&mut self) -> Result<()> {
         self.pos += 2; // consume `(@`
+        self.read_annotation_id()?;
         let mut depth = 1usize;
         while self.pos < self.src.len() && depth > 0 {
             match self.src[self.pos] {

@@ -842,10 +842,10 @@ fn parse_int_lit(a: &str) -> Result<i64, String> {
 /// A float literal's bits, including the wasm NaN spellings. Shares the assembler's parser
 /// so an expectation and the module it checks can never disagree about a literal.
 fn float_bits_32(lit: &str) -> Result<u32, String> {
-    wat::parse_f32_bits(lit).ok_or_else(|| format!("bad f32 literal `{lit}`"))
+    wat::parse_f32_bits(lit, wat::FloatCtx::Script).ok_or_else(|| format!("bad f32 literal `{lit}`"))
 }
 fn float_bits_64(lit: &str) -> Result<u64, String> {
-    wat::parse_f64_bits(lit).ok_or_else(|| format!("bad f64 literal `{lit}`"))
+    wat::parse_f64_bits(lit, wat::FloatCtx::Script).ok_or_else(|| format!("bad f64 literal `{lit}`"))
 }
 
 /// `(v128.const <shape> <lane>…)` → the 128-bit value.

@@ -2095,11 +2095,18 @@ impl Frame<'_> {
                         store.exn_store.push(exn.clone());
                         self.push(ei as Value);
                     }
-                    // The clause's label is relative to the try_table (label 0 = the
-                    // try_table block itself), which sits `d` deep — so branch to
-                    // `d + c.label`. `c.label` is an unvalidated `u32`, so widen before
-                    // adding and reject an over-`u32` total rather than wrapping.
-                    let target = d as u64 + u64::from(c.label);
+                    // The clause's label is relative to the scope ENCLOSING the try_table
+                    // (§: `C ⊢ catch ok` is checked before the rule extends `C` with the
+                    // block's label), so label 0 is the block one level out. The try_table's
+                    // own label sits `d` deep, so branch to `d + 1 + c.label`.
+                    //
+                    // ⚠️ This read `d + c.label` — the same off-by-one the assembler and the
+                    // validator carried, which is why all three agreed and the suite stayed
+                    // green while the emitted bytes were rejected by wasmtime.
+                    //
+                    // `c.label` is an unvalidated `u32`, so widen before adding and reject an
+                    // over-`u32` total rather than wrapping.
+                    let target = d as u64 + 1 + u64::from(c.label);
                     let target = u32::try_from(target).map_err(|_| Trap::UndefinedLabel)?;
                     return self.branch(target).map(Some);
                 }
@@ -6794,12 +6801,14 @@ mod tests {
     #[test]
     fn eh_try_table_catches_throw() {
         // (block (result i32)
-        //   (try_table (result i32) (catch $e 1)   ;; label 1 = the enclosing block
+        //   (try_table (result i32) (catch $e 0)   ;; label 0 = the enclosing block —
+        //                                          ;; a catch label counts from OUTSIDE the
+        //                                          ;; try_table (§ `C ⊢ catch ok`).
         //     i32.const 42 ; throw $e))            ;; the payload lands in the block
         let entry = [
             0x00, //
             0x02, 0x7f, // block (result i32)
-            0x1f, 0x7f, 0x01, 0x00, 0x00, 0x01, // try_table (result i32) [catch tag 0 -> label 1]
+            0x1f, 0x7f, 0x01, 0x00, 0x00, 0x00, // try_table (result i32) [catch tag 0 -> label 0]
             0x41, 0x2a, // i32.const 42
             0x08, 0x00, // throw tag 0
             0x0b, // end try_table
@@ -6827,7 +6836,7 @@ mod tests {
             0x01, 0x01, 0x7f, // one i32 local
             0x41, 0x07, 0x21, 0x00, // local 0 = 7
             0x02, 0x40, // block (void)
-            0x1f, 0x40, 0x01, 0x02, 0x01, // try_table (void) [catch_all -> label 1]
+            0x1f, 0x40, 0x01, 0x02, 0x00, // try_table (void) [catch_all -> label 0 = the block]
             0x41, 0x05, // i32.const 5
             0x08, 0x00, // throw tag 0
             0x0b, // end try_table
@@ -6844,11 +6853,11 @@ mod tests {
     fn eh_exception_unwinds_across_a_call() {
         // f0 catches what f1 throws — the exception crosses a call boundary.
         // f1: i32.const 8 ; throw $e      (uncaught in f1)
-        // f0: block (result i32) (try_table (catch $e 1) (call 1)) end
+        // f0: block (result i32) (try_table (catch $e 0) (call 1)) end
         let f0 = [
             0x00, //
             0x02, 0x7f, // block (result i32)
-            0x1f, 0x40, 0x01, 0x00, 0x00, 0x01, // try_table (void) [catch tag 0 -> label 1]
+            0x1f, 0x40, 0x01, 0x00, 0x00, 0x00, // try_table (void) [catch tag 0 -> label 0]
             0x10, 0x01, // call 1
             0x0b, // end try_table
             0x41, 0x00, // i32.const 0 (normal path)
@@ -6882,9 +6891,9 @@ mod tests {
         let entry = [
             0x00, //
             0x02, 0x7f, // block $outer (result i32)
-            0x1f, 0x40, 0x01, 0x00, 0x00, 0x01, // try_table (void) [catch tag0 -> $outer]
+            0x1f, 0x40, 0x01, 0x00, 0x00, 0x00, // try_table (void) [catch tag0 -> $outer]
             0x02, 0x02, // block $inner : type 2 = () -> (i32, exnref)
-            0x1f, 0x40, 0x01, 0x01, 0x00, 0x01, // try_table (void) [catch_ref tag0 -> $inner]
+            0x1f, 0x40, 0x01, 0x01, 0x00, 0x00, // try_table (void) [catch_ref tag0 -> $inner]
             0x41, 0x11, // i32.const 17
             0x08, 0x00, // throw tag 0
             0x0b, // end inner try_table

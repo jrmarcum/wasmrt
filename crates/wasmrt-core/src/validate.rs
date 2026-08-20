@@ -158,6 +158,7 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
     }
 
     check_module_features(module, features)?;
+    check_type_index_scope(module)?;
     check_declared_subtyping(module)?;
 
     // C.refs (§3.4.10, "undeclared function reference"): a `ref.func x` inside a function
@@ -170,11 +171,12 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
             refs[e.index as usize] = true;
         }
     }
-    if let Some(si) = module.start {
-        if (si as usize) < n_funcs {
-            refs[si as usize] = true;
-        }
-    }
+    // ⚠️ **`start` is NOT one of them.** §3.5.16 builds `C.refs` from globals, exports, element
+    // segments and declarative elements — the places a *reference to* a function is produced.
+    // The start function is CALLED, not referenced, so `(module (start $f) (func $f (drop
+    // (ref.func $f))))` is invalid, and `ref_func.wast` says so. Listing it here made the module
+    // validate: an accept-invalid, and the rule it broke is the whole point of `C.refs`.
+    // wasmtime 47 agrees, offset for offset.
 
     // Global init const-exprs: each must produce exactly the declared type. Defined globals
     // occupy the tail of the global space.
@@ -198,14 +200,13 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
             }
         }
         for ex in &elem.exprs {
-            validate_const_expr(
-                module,
-                ex,
-                elem.elem_type,
-                n_imported_globals,
-                Some(&mut refs),
-                features,
-            )?;
+            // ⚠️ Every global, not just the imported ones. An element segment is decoded AFTER
+            // the global section, so a `global.get` in one of its item expressions can name a
+            // *defined* global — `global.wast`'s definition-order module does exactly that
+            // (`(elem (table $t) (global.get $g3) funcref (global.get $gf))`) and was refused.
+            // The segment's OFFSET expression below already used `all_globals`; the item
+            // expressions did not, and the two are read from the same section.
+            validate_const_expr(module, ex, elem.elem_type, all_globals, Some(&mut refs), features)?;
         }
         if elem.mode == crate::module::ElementMode::Active {
             let ti = elem.table_index as usize;
@@ -282,11 +283,27 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
                 return Err(ValidateError::InvalidLimits);
             }
         }
-        // A table's initializer expression must produce its element type
-        // (function-references). Checked against ALL globals, since a table is defined
-        // after every global in the index space.
+        // A table's initializer expression must produce its element type (function-references).
+        //
+        // ⚠️⚠️ **Only the IMPORTED globals are in scope here, and the reason is section order,
+        // not index order.** The table section is decoded *before* the global section, so when
+        // this expression is read no defined global exists yet — `(table $t 10 funcref
+        // (global.get $g))` naming a defined `$g` is "unknown global" (`global.wast`), and
+        // wasmtime 47 refuses it with that exact wording. This passed `all_globals` with the
+        // comment "a table is defined after every global in the index space", which is true and
+        // is about the wrong ordering: what a constant expression can see is decided by what has
+        // been DECLARED before it, and the three const-expr sites disagree for that reason —
+        // table init: imports only; a global initializer: imports + earlier defined globals;
+        // elem/data: all of them.
         if let Some(expr) = &tt.init {
-            validate_const_expr(module, expr, tt.element, all_globals, Some(&mut refs), features)?;
+            validate_const_expr(
+                module,
+                expr,
+                tt.element,
+                n_imported_globals,
+                Some(&mut refs),
+                features,
+            )?;
         }
     }
 
@@ -450,12 +467,43 @@ fn gate(f: Option<Feature>, features: &Features) -> ValidateResult<()> {
     }
 }
 
-/// Every proposal a module names through its **declarations** — types, limits, segment
-/// modes — as opposed to its instructions (gated in [`FuncValidator::step`]).
+/// A type definition may name only types declared **before it**, plus the members of its own rec
+/// group (§3.5.16) — never a type defined later.
 ///
-/// Declarations are checked separately from instructions on purpose: a disabled proposal
-/// must not be reachable through a *type* while all its opcodes are refused. A module
-/// could otherwise declare a `v128` global, or an `(array …)` type, with SIMD or GC off.
+/// ⚠️ **The types being *present in the module* is not the question.** `(module (type (func (param
+/// (ref 1)))) (type (func)))` has both types, and was accepted; the rule is about SCOPE, and the
+/// scope ends at the current rec group. That is also why the two halves cannot be checked by one
+/// bound: a rec group's members may refer to each other freely (a linked list needs it), so the
+/// limit is the group's END, not the type's own index. `type-rec.wast` and
+/// `type-equivalence.wast` each pin one shape of this.
+///
+/// A type not covered by any recorded group is treated as its own singleton, which is exactly what
+/// the spec says a type written without `(rec …)` is — so a hand-built [`Module`] with no
+/// `rec_groups` gets the same rule rather than no rule.
+fn check_type_index_scope(module: &Module) -> ValidateResult<()> {
+    // `limit[i]` is one past the last type index `i` may name.
+    let mut limit: Vec<u32> = (0..module.comp_types.len() as u32).map(|i| i + 1).collect();
+    for &(start, len) in &module.rec_groups {
+        let end = start.saturating_add(len);
+        for slot in limit.iter_mut().skip(start as usize).take(len as usize) {
+            *slot = end;
+        }
+    }
+    for (i, ct) in module.comp_types.iter().enumerate() {
+        let end = limit[i];
+        let in_scope = |t: &V| !t.is_concrete() || t.concrete_index() < end;
+        let ok = match ct {
+            CompType::Func(ft) => ft.params.iter().chain(&ft.results).all(in_scope),
+            CompType::Struct(fs) => fs.iter().all(|f| in_scope(&f.storage.unpacked())),
+            CompType::Array(f) => in_scope(&f.storage.unpacked()),
+        };
+        if !ok {
+            return Err(ValidateError::UndefinedType);
+        }
+    }
+    Ok(())
+}
+
 /// Every declared supertype must actually be one (§3.4.5) — and must be open to being one.
 ///
 /// wasmrt had **no** check here: `module.supertypes` was populated at decode and then only ever
@@ -564,6 +612,12 @@ fn field_matches(
     }
 }
 
+/// Every proposal a module names through its **declarations** — types, limits, segment
+/// modes — as opposed to its instructions (gated in [`FuncValidator::step`]).
+///
+/// Declarations are checked separately from instructions on purpose: a disabled proposal
+/// must not be reachable through a *type* while all its opcodes are refused. A module
+/// could otherwise declare a `v128` global, or an `(array …)` type, with SIMD or GC off.
 fn check_module_features(module: &Module, features: &Features) -> ValidateResult<()> {
     if *features == Features::all() {
         return Ok(()); // the default: nothing to gate, and no walk to pay for
@@ -1332,14 +1386,19 @@ impl<'a> FuncValidator<'a> {
                 // Clone the clauses before pushing: the frame push borrows `self` mutably,
                 // and the clauses live in the instruction's immediate.
                 let catches = tt.catches.clone();
-                self.push_ctrl(FrameKind::TryTable, pop, push)?;
-                // Each clause's target label must accept exactly what the handler pushes:
-                // the tag's params, plus an `exnref` for the `_ref` forms. Label indices
-                // resolve with the try_table frame already on top.
+                // Each clause's target label must accept exactly what the handler pushes: the
+                // tag's params, plus an `exnref` for the `_ref` forms.
+                //
+                // ⚠️⚠️ **Resolved BEFORE the frame is pushed.** `C ⊢ catch ok` is checked in `C`,
+                // not in the context the rule extends with the block's label — so `catch_all 0`
+                // names the block *enclosing* the try_table. Doing it after made
+                // `(func (result exnref) (try_table (catch_all 0)))` valid, because label 0 was
+                // the try_table's own empty result instead of the function's `[exnref]`.
                 for c in &catches {
                     let lt = self.label_types_at(c.label)?;
                     self.check_catch(c, &lt)?;
                 }
+                self.push_ctrl(FrameKind::TryTable, pop, push)?;
             }
             Op::Throw => {
                 let ft = self
@@ -1400,9 +1459,20 @@ impl<'a> FuncValidator<'a> {
                 return Err(ValidateError::UnsupportedValidation);
             }
             Op::Rethrow => {
-                // Re-raise the exception caught `l` levels out: `l` must resolve, and
-                // control transfers, so the rest of the block is dead.
-                self.label_types_at(expect_label(&instr.imm)?)?;
+                // Re-raise the exception caught `l` levels out: `l` must resolve **to a `catch`
+                // handler**, and control transfers, so the rest of the block is dead.
+                //
+                // ⚠️ The kind check was missing, and without it `rethrow` has nothing to re-raise:
+                // `(func (rethrow 0))` and `(func (block (rethrow 0)))` both validated
+                // (`legacy/rethrow.wast` calls them "invalid rethrow label"). The label RESOLVING
+                // is not the question — every block resolves; the question is whether it caught
+                // anything.
+                let l = expect_label(&instr.imm)?;
+                self.label_types_at(l)?;
+                let frame = &self.ctrls[self.ctrls.len() - 1 - l as usize];
+                if frame.kind != FrameKind::CatchLegacy {
+                    return Err(ValidateError::MismatchedCatch);
+                }
                 self.set_unreachable();
             }
             Op::End => {
@@ -3449,9 +3519,10 @@ mod tests {
 
     #[test]
     fn eh_try_table_typing() {
-        // (block (result i32) (try_table (catch $e 1) (i32.const 42) (throw $e)))
+        // (block (result i32) (try_table (catch $e 0) (i32.const 42) (throw $e)))
+        // ⚠️ The catch label counts from OUTSIDE the try_table, so the enclosing block is 0.
         let ok = [
-            0x00, 0x02, 0x7f, 0x1f, 0x7f, 0x01, 0x00, 0x00, 0x01, 0x41, 0x2a, 0x08, 0x00, 0x0b,
+            0x00, 0x02, 0x7f, 0x1f, 0x7f, 0x01, 0x00, 0x00, 0x00, 0x41, 0x2a, 0x08, 0x00, 0x0b,
             0x0b, 0x0b,
         ];
         assert_eq!(check(&eh_mod(&ok, &[0x7f])), Ok(()));
@@ -3459,7 +3530,7 @@ mod tests {
         // A `catch_all` clause binds nothing, so its target label must carry no values —
         // here it targets a `(result i32)` block.
         let bad_all = [
-            0x00, 0x02, 0x7f, 0x1f, 0x7f, 0x01, 0x02, 0x01, 0x41, 0x2a, 0x08, 0x00, 0x0b, 0x0b,
+            0x00, 0x02, 0x7f, 0x1f, 0x7f, 0x01, 0x02, 0x00, 0x41, 0x2a, 0x08, 0x00, 0x0b, 0x0b,
             0x0b,
         ];
         assert_eq!(
