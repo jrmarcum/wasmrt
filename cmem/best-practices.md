@@ -1103,3 +1103,51 @@ gratuitous strictness is the same message inverted. Both are deliberate deviatio
 ⚠️ The `delegate` case adds a rider: **a rationale can outlive the thing it rationalised.** "Matching
 the oracle" was written into three separate comments, and none of them was revisited when the oracle
 was retired nine days later. When a project-level premise changes, grep for the comments that cite it.
+
+## §3.11 — **THE SAME WORD ON TWO SURFACES IS TWO WORDS** (2026-08-20)
+
+*Bought by: the owner's `anyfunc` question, probed and answered in about twenty minutes.*
+
+The owner asked whether refusing `anyfunc` was wrong, on the recollection that wazmrt had fixed it and
+that it "matches the output of wasmtk, wazero, wasmer and bun" — possibly a Rust issue, since wasmtime
+is Rust. **Probed rather than agreed with, and the answer is no — but the recollection was pointing at
+something real, on a different surface.**
+
+`anyfunc` exists in two places that have nothing to do with each other:
+
+| surface | spelling | verdict |
+| --- | --- | --- |
+| **`.wat` text format** — `(table 4 anyfunc)` | renamed to `funcref` by reference-types | **malformed**; `obsolete-keywords.wast` asserts it |
+| **JS WebAssembly API** — `new WebAssembly.Table({element:"anyfunc"})` | the original and still-required string | **mandatory** — V8 (node, deno) *rejects* `"funcref"` here |
+
+`wasmtk/src/wast.ts:362` builds its spectest table with `element: "anyfunc"`, and it is **correct** to.
+That is almost certainly the memory the question came from.
+
+**What the measurement showed** (run, not read — the coordinate rule applied to a technical claim):
+
+* **wazmrt (Zig, no Rust anywhere) refuses all three files**, with a *dedicated* `ObsoleteKeyword`
+  error for `anyfunc` and `DuplicateName` for the duplicate locals. Its `known-issues.md` records the
+  closure on **2026-08-17** and names **the same two ArtOfWebAssembly files** as the cost it accepted.
+  So the sibling is not fixed to accept them — it converged on the same refusal, nine days earlier.
+* **wazero has no text front end at all** — it answers `invalid magic number` for a `.wat`, because it
+  reads it as a binary. It has no opinion on either question.
+* **bun / node / deno** consume binaries; their `anyfunc` is the JS-API string above.
+* **wasmer** rejects both, but it uses the same Rust `wat` crate family as wasmtime, so it is
+  *consistent* evidence, not *independent* evidence.
+* **The spec testsuite is the anchor and settles it without any engine**: `obsolete-keywords.wast`
+  asserts `anyfunc` malformed, and `func.wast` asserts `duplicate local` **three times** (param+param,
+  param+local, local+local).
+
+🎓 **Two lessons, and the second is the transferable one.**
+
+1. **"Engine X accepts it" is only evidence if engine X has the front end you are asking about.** Four
+   of the five runtimes named cannot parse `.wat` at all. Before quoting a runtime's behaviour as a
+   cross-check, establish that it *has* the surface in question — otherwise "it works there" means
+   only that it was never asked.
+2. **A shared name across an API boundary will be recalled as one fact.** `anyfunc` in the JS API and
+   `anyfunc` in `.wat` diverged when reference-types renamed the text form and the JS API kept the old
+   string for compatibility. Anyone who has written both will remember "anyfunc is fine" and be right
+   about the half they wrote. **Ask which surface before answering.**
+
+⚠️ The cost of the refusal is unchanged and small: the `.wat` corpus reads 529/532, the three files are
+not gated by any `cargo` step, and wazmrt paid exactly the same price for exactly the same reason.

@@ -17,6 +17,24 @@ implemented. Specifically **now DONE, and their notes below are historical**:
 | "`nullfuncref`/`nullexternref`/`nullexnref` collapse onto their tops" | **implemented** as distinct types |
 | "`anyfunc` accepted for MVP-era tools" | **refused**, as the spec and wasmtime require |
 
+### 🔒 SETTLED 2026-08-20 — the three `.wat` corpus files are CORPUS DEFECTS. Do not re-open.
+
+`table_export.wat` / `table_test.wat` (`anyfunc`) and `dynrt_lib_modc.wat` (`(local $alist i32)` four
+times in one function) are refused, and that is correct. **Measured, not assumed:**
+
+* **wazmrt — Zig, no Rust — refuses all three**, `ObsoleteKeyword` and `DuplicateName`. It closed
+  `anyfunc` on **2026-08-17** and its own `known-issues.md` names *these same two files* as the cost.
+* **wazero has no `.wat` front end** (`invalid magic number`); bun/node/deno consume binaries only.
+  So "it works in those" is not evidence about the text format — they were never asked.
+* **The spec testsuite settles it without any engine**: `obsolete-keywords.wast` asserts `anyfunc`
+  malformed; `func.wast` asserts `duplicate local` three times.
+* ⚠️ **The `anyfunc` that IS correct is the JS WebAssembly API's `element: "anyfunc"`** — which
+  `wasmtk/src/wast.ts:362` uses, and which V8 *requires* (node and deno reject `"funcref"` there).
+  Same word, different surface. Full write-up: `best-practices.md` §3.11.
+
+Nothing in `cargo test` or CI reads that corpus; 529/532 is a manual measurement of somebody else's
+files. Fixing them is a wasmtk change, not a wasmrt one.
+
 🆕 **What replaced them is one open item and four proposals.** ⚠️⚠️ **wasmrt's emitted binaries were
 not readable by another engine** whenever they contained a non-null abstract reference type or a
 `try_table` — both now fixed and pinned by tests that assert the BYTE. The lesson is
