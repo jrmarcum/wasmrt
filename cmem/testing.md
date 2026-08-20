@@ -33,7 +33,29 @@ leads produced by that arrangement** ("the oracle runs this, so our type-checker
 running an entry point that skipped validation, `best-practices.md` §2.3a). Retiring the oracle removes
 the class; do not reintroduce it by reasoning about what wazmrt would do.
 
-## Spec-suite conformance — current (2026-08-19, T13 clear-out day 1) — **99.7%**
+## Spec-suite conformance — current (2026-08-20, T13 clear-out day 2) — **99.8%**
+
+🎯 **63,807 passed / 112 failed / 584 skipped** over 284 files. **The 257 CORE spec files are at
+0 failed and 0 skipped**; every remaining number is inside `proposals/`:
+
+| proposal | failures | skips |
+| --- | --- | --- |
+| custom-descriptors (`*desc*` + `exact`) | 64 | 451 |
+| custom-page-sizes | 34 | 7 |
+| threads | 13 | 18 |
+| wide-arithmetic | 1 | 108 |
+
+Day 2 closed **F1–F7** (58 core failures → 0) and **S1, S2, S3, S6, S7**. What remains is proposal
+IMPLEMENTATION — tracks D, P, M/A and W — not defect repair. Full record in
+[roadmap.md](roadmap.md); the lessons are `best-practices.md` §3.8b, §5.6b and §5.7.
+
+⚠️⚠️ **Two of the day's fixes were wire-format divergences that the spec suite could not see**, because
+wasmrt's assembler and decoder agreed with each other: every non-null abstract reference type was
+emitted as `ValType`'s internal tag rather than `0x64 <heaptype>`, and `try_table`'s catch label was
+off by one. **wasmtime 47 rejects both.** `wasmtime compile out.wasm` is now part of how a
+format-level change is checked — see §3.8b.
+
+## Spec-suite conformance — day 1 (2026-08-19) — **99.7%**
 
 `wasmrt wast <testsuite>` over the 284 vendored files:
 

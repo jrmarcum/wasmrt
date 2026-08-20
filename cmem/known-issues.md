@@ -1,6 +1,33 @@
 # Known Issues
 
-## 🔎 OPEN — S1: the externref/anyref bridge. **Phase 2, and the one item the failure pass cannot reach.**
+## ✅ CLOSED 2026-08-20 — the T13 day-2 sweep. **Read this before believing anything below it.**
+
+**F1–F7 and S1, S2, S3, S6, S7 are all closed**, and the 257 CORE spec files are at 0 failed / 0
+skipped (63,807 / 112 / 584 — see `roadmap.md` and `testing.md`). Entries further down this file were
+written while those were open; several state as a *deliberate decision* something that is now simply
+implemented. Specifically **now DONE, and their notes below are historical**:
+
+| was recorded as | now |
+| --- | --- |
+| S1 — `any.convert_extern` / `extern.convert_any` "deliberately absent" | **implemented**, on the tagged `Value` representation the old note specified (`HOST_TAG` bit 64, `EXTERN_TAG` bit 65) |
+| "imported tags cannot link" | **implemented** — a tag is a store slot, matched on its type INDEX |
+| "imported globals link **by value**, so a mutable global import is a snapshot" | **implemented** — an imported global is the exporter's store slot, shared |
+| "`delegate` is rejected, inherited from the oracle" | **implemented** — the oracle retired on 2026-08-11 and the rationale with it |
+| "`assert_exception` unhandled" / "`get` action unsupported" | **implemented** |
+| "`nullfuncref`/`nullexternref`/`nullexnref` collapse onto their tops" | **implemented** as distinct types |
+| "`anyfunc` accepted for MVP-era tools" | **refused**, as the spec and wasmtime require |
+
+🆕 **What replaced them is one open item and four proposals.** ⚠️⚠️ **wasmrt's emitted binaries were
+not readable by another engine** whenever they contained a non-null abstract reference type or a
+`try_table` — both now fixed and pinned by tests that assert the BYTE. The lesson is
+`best-practices.md` §3.8b, and the standing instruction is: **run a format-level change through
+`wasmtime compile out.wasm`.** The remaining work is proposal implementation only —
+custom-descriptors (64 failures / 451 skips), custom-page-sizes (34 / 7), threads (13 / 18),
+wide-arithmetic (1 / 108).
+
+---
+
+## 🗄 HISTORICAL — S1: the externref/anyref bridge. **Closed 2026-08-20; kept for the reasoning.** **Phase 2, and the one item the failure pass cannot reach.**
 
 🔒 **Scheduled behind the failure pass (owner, 2026-08-19): all 172 failures first, then the skips.**
 That order is measured-correct — 739 of 930 cascade skips live in files that also carry failures — but

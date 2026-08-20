@@ -180,7 +180,66 @@ Produced after the **skip census** (`testing.md`) made the skip column attributa
 ⚠️ **The track table was ranked on numbers that could not distinguish a root from its shadow;** these
 are ranked on *assertions unblocked*, which is what the ranking rule above actually asks for.
 
-##### FAILURES — 172 = **58 core** + 114 proposals
+##### ✅ DAY 2 (2026-08-20) — **F1–F7 CLOSED, S1/S2/S3/S6/S7 CLOSED, and the CORE SUITE is at 0/0**
+
+**63,333 / 172 / 1,024 → 63,807 / 112 / 584.** +474 passes, −60 failures, −440 skips.
+**Core failures 58 → 0; core skips → 0.** Every remaining number is inside `proposals/`:
+
+| proposal | failures | skips | track |
+| --- | --- | --- | --- |
+| custom-descriptors (`*desc*` + `exact`) | 64 | 451 | D / S4 |
+| custom-page-sizes | 34 | 7 | P |
+| threads | 13 | 18 | M / A |
+| wide-arithmetic | 1 | 108 | W / S5 |
+
+**No file lost a pass at any step** (`scripts/conformance-diff.sh`, run between every landing).
+444 core tests, 490 workspace, clippy clean. The `.wat` corpus went **532/532 → 529/532**, and all
+three are **corpus defects wasmtime refuses on the same lines** — two ArtOfWebAssembly files spelling
+`anyfunc`, and `dynrt_lib_modc.wat` declaring `(local $alist i32)` four times in one function.
+
+🎓 **The day's shape, and it is not what the plan predicted.** The plan said fixing failures would
+clear skips (79% of cascades sat in files that also carried failures) and that S1 was the one big item
+phase 1 could not reach. Both held. What the plan did **not** predict is that four of the failures
+were **wrong ANSWERS wearing a conformance-failure label**, and that two of them made wasmrt's binary
+output unreadable by any other engine:
+
+1. ⚠️⚠️ **Every non-null abstract reference type was emitted as an INTERNAL TAG.** `ValType` keeps
+   `(ref any)` etc. as synthetic bytes in an unused valtype range and `emit_val_type` pushed
+   `v.bits()` straight into the binary. Our own decoder read them back, so the round trip was green —
+   **wasmtime 47 answers `invalid value type`**. No module wasmrt assembled containing one was
+   WebAssembly.
+2. ⚠️⚠️ **`try_table`'s catch label was off by one on the wire.** Assembler, validator and interpreter
+   all agreed with each other and all disagreed with the spec.
+3. ⚠️ **A flat-form memarg was silently dropped**: `i32.const 0 i32.load offset=4` read at offset 0.
+4. ⚠️ **Reference locals were zero-filled**, so an uninitialized `(ref null $t)` read as GC object 0.
+5. ⚠️ **An exception's tag was a module-local index**, so tag 0 caught tag 0 across a link.
+6. ⚠️ **An imported global was bound by VALUE** — a copy, not the shared store address.
+
+🔬 **The instrument moved three times, and each move paid immediately.**
+* Every assertion failure now **names its action** (`assert_return (invoke "imported-mismatch")`).
+  Finding the tag defect went from a bisect to a read.
+* A skip reason that names the **wrong** cause is worse than a bare counter: `(get "x")` returned
+  `NoTarget`, which renders as "an earlier module did not build", so 11 skips were blamed on a
+  module-build failure in two files where every module built.
+* The decoder now counts control nesting, so an unbalanced body is malformed at **decode** instead of
+  arriving as the validator's `ControlUnderflow` — and two of the decoder's own test fixtures turned
+  out to be unbalanced.
+
+**What is left, measured rather than estimated:**
+
+| # | item | failures | skips | note |
+| --- | --- | --- | --- | --- |
+| **D** | custom-descriptors: `*desc*` instructions + `exact` | 64 | 451 | the largest single lever; a scope decision, not a defect |
+| **P** | custom-page-sizes | 34 | 7 | |
+| **M/A** | threads: shared memories + atomics | 13 | 18 | |
+| **W** | wide-arithmetic: `i64.add128` / `sub128` / `mul_wide_*` | 1 | 108 | 4 instructions holding 108 assertions — the best ratio left |
+
+⚠️ **All four are proposal IMPLEMENTATION, not defect repair.** The F/S triage below is retained as
+the record of how the work was scoped; its numbers are the 2026-08-19 baseline, not the current state.
+
+---
+
+##### FAILURES — 172 = **58 core** + 114 proposals *(baseline, 2026-08-19 — all core items now CLOSED)*
 
 | # | item | core fails | where |
 | --- | --- | --- | --- |
@@ -246,7 +305,7 @@ column must be **read**. But the **fix order** runs the other way: a failure is 
 directly; a cascade is not actionable at all until its root moves. **Read the skip column to RANK; work
 the failure column to FIX.**
 
-##### 📐 Phase 1 — FAILURES. All 172. `[ ]`
+##### 📐 Phase 1 — FAILURES. All 172. `[x]` **core done 2026-08-20; 112 proposal failures remain**
 
 **F1 → F2 → F3 → F4 → F5 → F6 → F7**, then the proposal failures (custom-descriptors 65,
 custom-page-sizes 34, threads 14, wide-arithmetic 1). F1 leads on **direction**: accept-invalid is the
@@ -256,7 +315,7 @@ silent-wrong-output class and 55% of the core failures.
 cascades convert into verdicts. **The gate stays "no file lost a pass", per file** —
 `scripts/conformance-diff.sh`, never the totals.
 
-##### 📐 Phase 2 — the RESIDUAL SKIPS. `[ ]`
+##### 📐 Phase 2 — the RESIDUAL SKIPS. `[x]` **S1/S2/S3/S6/S7 done 2026-08-20; S4 and S5 remain**
 
 Only what phase 1 could not reach: the **191 cascades in the 8 files with zero failures**, plus the 96
 capability gaps. **Re-measure before starting** — the S-list will have shrunk, and some of it will have

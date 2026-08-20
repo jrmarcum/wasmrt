@@ -29,36 +29,46 @@ than the thing the consumer uses.
 ## Where the port actually is (keep this line current)
 
 **T0–T8 DONE (published through v0.9.0); T9's eighteen passes landed 2026-08-14; 🆕 T13 — the
-CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 1 landed 2026-08-19, all unreleased.**
+CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 2 landed 2026-08-20, all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.7%** (**63,333 / 172 / 1,024** of 63,505),
-**484 workspace tests**, Miri 28/28, no file lost a pass in any pass.
-**Day 1 moved 62,238 / 378 / 2,038 → 63,333 / 172 / 1,024** (+1,095 passes, **−206 failures**) across
-~20 fixes — WasmGC array bulk ops, table64 end to end, the assembler scoring split, and a dozen text
-format / validator defects. ⚠️ *Adjudicated GREW, because skips became verdicts; read the three
-numbers, never the rate alone.*
-🔬 **The day ended on the INSTRUMENT.** The `.wast` runner listed a file only when it had **failures**,
-so **234 of 1,024 skips lived in files that printed nothing** — `ref_test.wast` (68 skips),
-`ref_cast.wast` (42) and both `br_on_cast*.wast` (27 each) had **never appeared in a conformance
-report** — and a skip was a bare counter at all twenty sites. Both fixed; the census shows **928 of
-1,024 skips (91%) are CASCADES** behind a handful of roots and only **96** are real gaps, resolving to
-**seven items**. ⚠️⚠️ **Ranking by the skip column would have put a 108-skip cascade above the single
-root that produces it.** 🎓 *A number the report cannot attribute is not a measurement*
-(`cmem/best-practices.md` §5.6). The remaining work is scoped in `cmem/roadmap.md` as **F1–F7** (the
-172 failures; **F1 = accept-invalid, 32 core, ranked first on DIRECTION not count**) and **S1–S7** (the
-1,024 skips).
-🔒 **THE ORDER IS ALL FAILURES FIRST, THEN THE SKIPS (owner, 2026-08-19)** — wazmrt found that fixing
-the failures cleared a lot of the skips, and it was **probed here rather than agreed with**: **739 of
-930 cascade skips (79%) sit in files that ALSO carry failures**, so most of phase 2 clears itself.
-`exact-casts.wast` is 3 failures holding 108 skips with zero capability gaps. 🎓 **Read the skip column
-to RANK; work the failure column to FIX** (`cmem/best-practices.md` §5.5a — the inverse of §5.6, and
-both are true because they answer different questions).
-⚠️⚠️ **Phase 2 is mandatory and re-measured, because the biggest single item is in the 21% the failure
-pass cannot reach**: S1 — the externref/anyref bridge, ~181 assertions — sits behind `ref_test`,
-`ref_cast`, `br_on_cast` and `br_on_cast_fail`, which have **zero failures between them**. When it is
-reached, fix the `Value` representation FIRST, or host handle 2 reads as GC object #2. The `.wat`
-corpus figure is ⚠️ **UNVERIFIED as of 2026-08-19** — its denominator moved (532 `.wat` files in the
-wasmtk tree today; see `cmem/testing.md`) — and **every CLI command that takes a module
+**embeddable from C** via `wasmrt.h`. Spec suite **99.8%** (**63,807 / 112 / 584**), **490 workspace
+tests**, Miri 28/28, no file lost a pass in any pass.
+🎯 **THE 257 CORE SPEC FILES ARE AT 0 FAILED / 0 SKIPPED.** Day 2 closed **F1–F7** (58 core failures
+→ 0) and **S1, S2, S3, S6, S7**; 63,333/172/1,024 → 63,807/112/584. Everything that remains is inside
+`proposals/` and is **implementation, not defect repair**: custom-descriptors 64 failures + 451 skips
+(track D), custom-page-sizes 34 + 7 (P), threads 13 + 18 (M/A), wide-arithmetic 1 + 108 (W). That is a
+**scope decision for the owner**, not a bug hunt — see `cmem/roadmap.md`.
+⚠️⚠️ **THE FINDING IS NOT IN THE CONFORMANCE NUMBERS.** Two of the day's fixes were **wire-format
+divergences the spec suite structurally could not see**, because wasmrt's assembler and decoder agreed
+with each other: every **non-null abstract reference type** was emitted as `ValType`'s *internal tag*
+(`(ref any)` as the single byte `0x66`) instead of §5.3.5's `0x64 <heaptype>`, and **`try_table`'s
+catch label was off by one** in the assembler, the validator and the interpreter alike. **wasmtime 47
+refuses both.** 🎓 *Agreement between components that learned the convention from each other is not
+evidence* (`cmem/best-practices.md` §3.8b) — **hand wasmrt's output to an outside reader**
+(`wasmtime compile out.wasm`) whenever a format-level change lands. It is one command and it found
+both in an afternoon.
+⚠️ Four more were **wrong ANSWERS wearing a conformance-failure label**: a flat-form `offset=` was
+silently dropped (`i32.const 0 i32.load offset=4` read at offset **0**), reference locals were
+zero-filled so an uninitialized `(ref null $t)` read as **GC object 0**, an exception's tag was a
+module-local index so tag 0 caught tag 0 across a link, and an imported global was bound **by value**
+rather than shared. Each needs two modules or a shared store to be visible — which is why 63,000
+assertions had not seen them.
+⚠️ **The `.wat` corpus went 532/532 → 529/532, and all three are CORPUS defects** wasmtime refuses on
+the same lines (two ArtOfWebAssembly files spell `anyfunc`; `dynrt_lib_modc.wat` declares
+`(local $alist i32)` four times in one function). Reported, not worked around — not our files.
+🔒 **The order held.** "All failures first, then the skips" was probed rather than adopted and played
+out as measured: the failure pass cleared most of the cascades, and S1 — the externref bridge, the one
+item phase 1 provably could not reach — delivered 229 assertions against a logged 181.
+
+*Day 1 (2026-08-19) moved 62,238 / 378 / 2,038 → 63,333 / 172 / 1,024 across ~20 fixes and ended on the
+INSTRUMENT: the runner listed a file only when it had failures, so 234 skips lived in files that printed
+nothing, and a skip was a bare counter at all twenty sites. The census that followed showed 928 of 1,024
+skips (91%) were CASCADES behind a handful of roots, which is what produced the F1–F7 / S1–S7 scoping.
+🎓 A number the report cannot attribute is not a measurement (`cmem/best-practices.md` §5.6).*
+✅ **The `.wat` corpus is VERIFIED at 529/532** (2026-08-20, assemble→decode→validate over all 532
+files in the wasmtk tree — the denominator that had been ⚠️ unverified since 2026-08-19). The three
+failures are **corpus defects wasmtime refuses on the same lines**, not ours.
+**Every CLI command that takes a module
 now accepts that `.wat` directly** — `run`, `wasi` and summarize assemble text before decoding, through one
 shared loader. ⚠️⚠️ **That gap had been open for the whole port and was found by an owner QUESTION, not a
 test — the second in two days.** It is structural: every gate here compares *answers* on inputs both

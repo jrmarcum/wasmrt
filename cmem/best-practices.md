@@ -1029,3 +1029,77 @@ adoptable as ours**.
 
 *(Borrowed method — wazmrt reclassified its own bake-off out of its work queue on 2026-08-18 for exactly
 this reason, and the reclassification is what made its remaining fix list read honestly.)*
+
+---
+
+## §3.8b — **THREE COMPONENTS THAT AGREE ARE NOT THREE WITNESSES** (2026-08-20)
+
+*Bought by: the `try_table` catch label, the non-null-reference valtype encoding.*
+
+wasmrt's assembler emitted `(ref any)` as the single byte `0x66` — `ValType`'s **internal tag** for
+that type, in an unused valtype-byte range. Its decoder read `0x66` back as `(ref any)`. Its
+validator and interpreter agreed. Every round-trip test passed; the spec suite was 99.7%. And
+**wasmtime 47 answers `invalid value type (at offset 0xd)`**: §5.3.5 spells a non-null abstract
+reference `0x64` + the head's heap-type byte, and no module wasmrt assembled containing one was
+WebAssembly at all.
+
+The same day, the same shape, a different rule: a `try_table` catch label counts from the scope
+*enclosing* the try_table. The assembler pushed the try_table's own label first, the validator pushed
+its frame first, and the interpreter added `d` instead of `d + 1`. Three components, one convention,
+zero disagreement — and every emitted `try_table` was rejected by wasmtime.
+
+🎓 **Agreement between components that learned the convention from each other is not evidence.** A
+round trip tests that the two halves are inverses, which they can be while both are wrong. Only a
+reader that did not write the bytes can tell a convention from a bug.
+
+⚠️ Why the NULLABLE forms hid it: `funcref` is genuinely `0x70`, `anyref` genuinely `0x6e`. The
+internal representation coincided with the wire format for the common half, which is exactly what made
+the shortcut look total. **An internal representation that resembles the wire format will eventually
+be mistaken for it.**
+
+**What to do about it:** when a format has an outside reader, run the output through it. `wasmtime
+compile out.wasm` is one command, it takes no fixtures, and it found two wire divergences in an
+afternoon. Both are now pinned by tests that assert the **byte**, not the answer.
+
+## §5.6b — **A REASON THAT NAMES THE WRONG CAUSE IS WORSE THAN NO REASON** (2026-08-20)
+
+*Bought by: `(get "x")` reported as "an earlier module did not build".*
+
+§5.6 says a number the report cannot attribute is not a measurement. The corollary costs more. The
+`.wast` runner returned `ActionErr::NoTarget` for the `get` action — reading an exported global —
+because it was never wired to `Store::export_global`. `NoTarget` renders as **"an earlier module did
+not build"**, so `exports.wast` and `linking.wast` reported 11 skips blamed on a module-build failure
+in two files where every module built cleanly.
+
+A bare counter says "something happened here". A wrong reason says "this specific thing happened
+here", and the census that reads it will scope the work behind a problem that does not exist. 🎓
+**When adding a skip site, ask what the reason will read like to someone who was not there** — and
+give a distinct one to a distinct cause, rather than reusing whichever variant is already in scope.
+
+The same pass added the other half: every `assert_return`/`assert_trap` failure now **names the action
+that produced it**. `result mismatch (got 0x2, expected 3)` in a 60-assertion file is a bisect;
+`assert_return (invoke "imported-mismatch"): result mismatch` is a diagnosis. It found a cross-module
+tag-identity defect on the first read.
+
+## §5.7 — **A LENIENCY WITH NO WRONG-VALUE CONSEQUENCE IS STILL A DEVIATION** (2026-08-20)
+
+*Bought by: `anyfunc`, `nullfuncref`, `nofunc`, and legacy `delegate`.*
+
+Four constructs were wrong in a way that could not produce a wrong answer, and all four survived for
+exactly that reason:
+
+* `anyfunc` — the pre-standard spelling of `funcref` — was accepted "because MVP-era tools still emit
+  it". It is malformed, and wasmtime refuses it.
+* `nullfuncref` / `nullexternref` / `nullexnref` were collapsed onto their tops. **Only null inhabits
+  either**, so nothing ever ran wrong; they are still distinct types, and `ref.test (ref null nofunc)`
+  on a real funcref must answer 0.
+* Legacy `delegate` was refused in the assembler, the validator and the interpreter "matching the
+  oracle" — an oracle that retired on 2026-08-11.
+
+🎓 **"It cannot produce a wrong value" is an argument about severity, not about correctness.** A
+leniency is the engine telling a tool its output is fine when the next runtime will reject it; a
+gratuitous strictness is the same message inverted. Both are deliberate deviations, and T13 has none.
+
+⚠️ The `delegate` case adds a rider: **a rationale can outlive the thing it rationalised.** "Matching
+the oracle" was written into three separate comments, and none of them was revisited when the oracle
+was retired nine days later. When a project-level premise changes, grep for the comments that cite it.
