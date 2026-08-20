@@ -115,7 +115,7 @@ module all the way through **link** when validation is where that assertion ends
 0 failed / 0 skipped" is a statement about **directories, not about rules** — the segment-spelling gap
 is core `.wat` grammar that simply has no core file to fail in. 🎓 *A milestone scoped by where a
 test lives is not the same as one scoped by what a test checks*, and the second is the one that was
-meant. Revised order: **X1 → M/A instrument → M/A grammar → the era-pinned decision → W → P → D.**
+meant. 🔒 **DECIDED (owner, 2026-08-20): refresh the vendored `proposals/threads/` snapshot** — verified stale from the tree itself (the core `imports.wast` has **0** multi-memory/multi-table assertions, the threads copy has **6**, same checkout). It is a **wasmtk** change, not a wasmrt one. Expected: threads **13 → 5**, and those 5 are ours — 4 segment-spelling, 1 harness. Revised order: **X1 → M/A instrument → M/A grammar → snapshot refresh → W → P → D.**
 
 🔒 **The order held.** "All failures first, then the skips" was probed rather than adopted on
 2026-08-19, and it played out as measured: the failure pass cleared most of the cascades, and S1 — the

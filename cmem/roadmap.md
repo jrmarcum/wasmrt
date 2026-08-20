@@ -309,18 +309,41 @@ bare-memidx segment spelling is core `.wat` grammar; it is simply not exercised 
 `proposals/`. 🎓 *A milestone scoped by where a test lives is not the same as one scoped by what a test
 checks* — and the second is the one that was meant.
 
-🚦 **THE DECISION, and it is the owner's.** Four assertions cannot be satisfied without deliberately
-breaking multi-memory/multi-table, which wasmrt supports and the spec requires. T13's gate says **zero
-failed / zero skipped / EMPTY baseline / zero deliberate deviations**, and these four cannot meet all
-four at once. The options, cheapest first:
+🔒 **DECIDED (owner, 2026-08-20): OPTION 1 — REFRESH THE VENDORED `proposals/threads/` SNAPSHOT.**
+It is the only option that keeps every T13 clause intact — zero failed, zero skipped, **empty
+baseline**, zero deliberate deviations — because it removes the conflict instead of documenting it.
 
-1. **Refresh the vendored snapshot.** `proposals/threads/` may simply be behind upstream. It lives in
-   the wasmtk tree, so this is a wasmtk change, not a wasmrt one — and it is the only option that
-   keeps every T13 clause intact. ⚠️ **Check upstream before choosing anything below it.**
-2. **An explained four-line baseline** — contradicts "empty baseline", but honestly: *the engine is
-   newer than the test*.
-3. **Treat the era-pinned file as out of corpus** — cleanest number, worst precedent: a file removed
-   for failing is the failure mode the baseline discipline exists to prevent.
+✅ **The premise was VERIFIED before the decision was recorded, from data already on disk** — the
+snapshot is demonstrably stale, not merely suspected to be:
+
+| file, same vendored checkout | "multiple memories" / "multiple tables" assertions | lines |
+| --- | --- | --- |
+| `imports.wast` (core) | **0** — updated when multi-memory and multi-table landed | 767 |
+| `proposals/threads/imports.wast` | **6** — still asserts them invalid | 605 |
+
+One tree, one checkout: the core file moved with the spec and the proposal snapshot did not. That is
+what a per-proposal snapshot *is*, and it is why **wasmrt is right and the test is old** — confirmed
+independently by wasmtime, which accepts both modules too.
+
+🔒🔒 **This is a wasmtk change, not a wasmrt one.** The corpus lives in the wasmtk tree; **do not edit
+it from a wasmrt session** unless the owner directs it that time. Record, propose, and let wasmtk's own
+session make the commit — the same rule that governs the sibling runtime's files, for the same reason.
+
+📐 **What the refresh does and does not buy.** It should clear **8 of the 13** threads failures — the
+2 in `memory.wast`, and 6 in `imports.wast` (2 reported as *"module was accepted"*, 4 as *"rejected at
+the wrong stage"*, which are the same era-pinned assertions wearing our runner's misreport). It clears
+**none** of the other 5: the **4** bare-memidx segment-spelling failures are a core `.wat` grammar gap
+that is genuinely ours, and **1** is the missing `spectest.shared_memory`. **So threads goes 13 → 5,
+and those 5 are wasmrt's own work.**
+
+⚠️ **Expect the adjudicated total to MOVE, and not only downward.** A newer snapshot tests more than an
+older one, so the refresh can add assertions as well as retire them. That is honest movement; measure
+after, do not predict the number.
+
+⚠️ **The instrument fix is still worth doing on its own merits**, and it is independent of the refresh:
+`assert_invalid` must stop after validation instead of building through to **link**. Those 4 assertions
+would disappear with the snapshot either way, but the misreport is corpus-wide and will resurface
+elsewhere the moment another file pairs an unresolvable import with a validity assertion.
 
 **Revised order:** X1 (a live wrong ANSWER outranks a wrong REPORT) → M/A's instrument fix (it changes
 how `assert_invalid` is scored **corpus-wide**, so it belongs before more work is measured against the

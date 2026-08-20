@@ -45,6 +45,28 @@ field-coverage half never did** (X2). A ten-clause spot probe found this one; `s
 collapsing to the bare form is **correct** — a bare composite type *is* `sub final ϵ` — which was
 checked before reporting rather than counted as a sixth.
 
+## 🔒 DECIDED — the era-pinned `proposals/threads/` assertions: REFRESH THE SNAPSHOT (owner, 2026-08-20)
+
+8 of the 13 `proposals/threads/` failures are assertions that a **modern engine must fail**: the
+snapshot predates multi-memory and multi-table, so it asserts `(memory 0) (memory 0)` invalid, and
+wasmrt — like wasmtime — accepts it. **The engine is newer than the test.**
+
+✅ **Verified from the vendored tree itself, before deciding:** the *core* `imports.wast` in the same
+checkout has **0** such assertions (767 lines); `proposals/threads/imports.wast` has **6** (605 lines).
+One tree, one checkout, one file updated and one not — which is exactly what a per-proposal snapshot
+is, and it makes "the snapshot is behind" a measurement rather than a hypothesis.
+
+**Decision: refresh the vendored snapshot** — the only route that keeps T13's *empty baseline* clause
+intact, because it removes the conflict rather than documenting it. Rejected alternatives: an explained
+four-line baseline (honest, but contradicts "empty"); dropping the file from the corpus (cleanest
+number, worst precedent — a file removed for failing is the failure mode the baseline discipline exists
+to prevent).
+
+🔒🔒 **It is a wasmtk change.** The corpus is not ours; do not edit it from a wasmrt session unless the
+owner directs it that time. **Expected effect: threads 13 → 5**, and the remaining 5 are wasmrt's own —
+4 bare-memidx segment spellings (see the entry above) and 1 missing `spectest.shared_memory`.
+⚠️ A newer snapshot may also *add* assertions; measure after, do not predict.
+
 ## 🔴 OPEN — the bare-memidx SEGMENT spellings are refused, and they are valid
 
 `(data 0 (i32.const 0) "x")` and `(elem 0 (i32.const 0) $f)` — a segment naming its memory/table by a
