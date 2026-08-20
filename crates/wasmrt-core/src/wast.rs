@@ -563,8 +563,18 @@ impl Runner {
             .target(module_name.as_deref())
             .ok_or(ActionErr::NoTarget)?;
         if kw == "get" {
-            // Reading an exported global is not part of the embedding surface yet.
-            return Err(ActionErr::NoTarget);
+            // `(get $M? "name")` reads an exported GLOBAL — an action, not a call.
+            //
+            // ⚠️⚠️ This returned `NoTarget`, so 11 assertions were reported as "an earlier module
+            // did not build" in two files where every module built fine. A skip reason that names
+            // the wrong cause is worse than a bare counter: the census reads it, believes it, and
+            // scopes the work behind a module-build problem that does not exist. `Store` has had
+            // `export_global` since T8 — the action was simply never wired to it.
+            return self
+                .store
+                .export_global(inst, &export)
+                .map(|v| alloc::vec![v])
+                .ok_or(ActionErr::NoTarget);
         }
         self.store
             .invoke(inst, &export, &args)
