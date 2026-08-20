@@ -1186,3 +1186,37 @@ test found a **fifth**: `ref.null` reads a heap type through its own reader. Thi
 pinned in one test, one row each, because a guard can be right in four places and wrong in one —
 which is T12z's rule (*name an invariant, enumerate EVERY entry point in a table, check each*) paying
 off in a place nobody had listed as a surface.
+
+## §5.8 — **SCOPING IS A MEASUREMENT, AND IT FINDS THINGS** (2026-08-20)
+
+*Bought by: `(memory 1 (pagesize 1))`, found while costing the proposal work — not by a test.*
+
+Four proposals were left, all filed as "implementation, not defect repair". Costing them meant probing
+what each construct does **today**, one line per proposal. Three answered honestly:
+`(ref (exact $t))` → `BadValType`, `struct.new_desc` → `BadForm`, `i64.add128` → `UnimplementedInstr`.
+The fourth **ran**.
+
+`(memory 1 (pagesize 1))` assembled, validated and executed — and the emitted bytes were
+**byte-identical to `(memory 1)`**. The clause was parsed, accepted and discarded, so a guest asking
+for a 1-byte memory silently got 64 KiB and every out-of-bounds access it should have trapped on
+succeeded.
+
+🎓 **A track filed as "not started" is a claim about the code, and claims about the code get checked.**
+"We do not implement X" and "we refuse X" are different statements, and only the second is safe. The
+first is compatible with *accepting X and doing the wrong thing*, which is what was happening.
+**Before pricing a feature, run its smallest example** — the answer is either a refusal (safe, and the
+cost is real work) or something worse than the missing feature.
+
+⚠️⚠️ **The sharp edge, and it nearly hid this.** The first cross-check against wasmtime **agreed** —
+same `memory.size`, same non-trapping load. It agreed because it was handed *wasmrt's emitted bytes*,
+which no longer contained the clause. Feeding wasmtime the **source** produced an immediate refusal.
+🔒 *When the emitter is the suspect, compare the SOURCE across engines, never the suspect's output.*
+§3.8b says an outside reader is what tells a convention from a bug; this is the rider — **give the
+outside reader the same input you gave the suspect.**
+
+⚠️ And the discipline that keeps a scope honest in the other direction: the same ten-clause probe
+flagged `(sub final (func))` as "dropped" because it emits the bare composite form. It is **not** a
+defect — a bare composite type *is* `sub final ϵ`, so the two are one type and the shorter encoding is
+correct. Checked before reporting. **A scoping pass that reports its false positives is worth less
+than one that checks them**, and one wrong entry in a work-list costs a day.
+

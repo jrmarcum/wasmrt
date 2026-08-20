@@ -1,5 +1,50 @@
 # Known Issues
 
+## 🔴 OPEN — `(pagesize N)` is PARSED AND SILENTLY DROPPED. A wrong module, not a missing feature.
+
+**Found 2026-08-20 while SCOPING the proposal work, not by a test.** Priority X1 in `roadmap.md`.
+
+```wat
+(module (memory 1 (pagesize 1)))   ;; one page of ONE BYTE
+```
+
+wasmrt assembles this to bytes that are **byte-identical to `(module (memory 1))`** — the clause is
+read, accepted, and thrown away. The module then runs as an ordinary 64 KiB-paged memory:
+
+| | wasmrt today | required |
+| --- | --- | --- |
+| `memory.size` | 1 | 1 (agrees by luck — 1 page either way) |
+| `i32.load8_u` at address 1 | returns 0 | **trap** — the memory is 1 byte |
+| `i32.load8_u` at address 65535 | returns 0 | **trap** |
+
+⚠️ **wasmtime refuses the same source outright**: *"the custom page sizes proposal must be enabled to
+customize a memory's page size (at offset 0x1d)."* Ours accepts it and answers wrongly.
+
+⚠️⚠️ **The first comparison against wasmtime AGREED, and it was measuring the wrong thing.** Handing
+wasmtime *our emitted bytes* got the same answers — because those bytes no longer say `pagesize`. The
+disagreement only appears when the **source** is given to both. 🎓 *When an emitter is the suspect,
+compare the SOURCE across engines, never the output of the suspect* (`best-practices.md` §3.8b names
+the general rule; this is the sharp edge of it).
+
+**Why it matters more than a conformance miss:** every bounds check in the engine compares against
+`pages × 65536`. A guest declaring byte pages gets a memory 65,536× larger than it asked for, and
+addresses that must trap silently succeed. It is in the silent-wrong-output class this port ranks
+worst, and it is reachable from plain text input today.
+
+**The honest immediate fix (X1):** refuse the clause — `Error::Unsupported("custom-page-sizes")` —
+until Track P implements it. That converts a wrong answer into a refusal, which is the safe direction,
+and it is what wazmrt did (it refused by name as `UnsupportedProposal` before implementing).
+⚠️ Expect skips to RISE and `custom-page-sizes-invalid.wast`'s 16 *"module was accepted"* failures to
+resolve; both are honest movement, not regression.
+
+🎯 **It is the FIFTH instance of the T10a emitter mechanism** — *the emitter reconstructs a form from a
+subset of the parser's facts* — and, like the first four, it was found by accident rather than by the
+sweep that was specified to catch it. T10a's opcode half shipped 2026-08-08; **the `ModuleBuild`
+field-coverage half never did** (X2). A ten-clause spot probe found this one; `shared`, `mut`,
+`declare`, `start`, memory64/table64 `i64` and `rec` all survive correctly, and `(sub final (func))`
+collapsing to the bare form is **correct** — a bare composite type *is* `sub final ϵ` — which was
+checked before reporting rather than counted as a sixth.
+
 ## ✅ CLOSED 2026-08-20 — the T13 day-2 sweep. **Read this before believing anything below it.**
 
 **F1–F7 and S1, S2, S3, S6, S7 are all closed**, and the 257 CORE spec files are at 0 failed / 0

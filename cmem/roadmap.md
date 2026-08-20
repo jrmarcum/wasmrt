@@ -180,6 +180,130 @@ Produced after the **skip census** (`testing.md`) made the skip column attributa
 ⚠️ **The track table was ranked on numbers that could not distinguish a root from its shadow;** these
 are ranked on *assertions unblocked*, which is what the ranking rule above actually asks for.
 
+##### 📐 THE REMAINING WORK, SCOPED 2026-08-20. `[ ]` **Not started — this is tomorrow's list.**
+
+**63,807 / 112 / 584.** Core is at 0/0; all 112 failures and 584 skips are in four `proposals/`
+directories. Scoped the way wazmrt scoped its equivalent tracks — **method borrowed, design not**
+(`best-practices.md` §3A.2) — because that project shipped all four and its notes carry measured
+costs and the traps it hit.
+
+###### 🚦 The ranking argument, which is NOT the assertion count
+
+⚠️ **Refusing an untargeted proposal is the SAFE direction.** A module wasmrt will not run cannot do
+harm. Implementing one **adds attack surface rather than closing a gap** — the honest framing is *"we
+choose to support more language, and the risk now lives in our implementation of it."* So every track
+below carries an explicit **soundness checkpoint**, not an assertion count alone.
+
+⚠️⚠️ **But wasmrt is not uniformly refusing, and that inverts one priority.** Scoping found a live
+defect: **`(memory 1 (pagesize 1))` assembles, validates and RUNS today** — the clause is silently
+dropped and the module becomes a plain 64 KiB-paged memory, byte-identical to `(memory 1)`. wasmtime
+refuses the same source outright (*"the custom page sizes proposal must be enabled to customize a
+memory's page size"*). That is a **wrong module**, not a missing feature, and it is X1 below.
+
+###### ⚠️ Two predictions to record BEFORE starting, so honest movement is not read as regression
+
+1. **Passes will go DOWN when `exact` lands.** `exact.wast` scores 19 passed / 17 failed, and the file
+   holds **20 negative assertions** (5 `assert_invalid` + 15 `assert_malformed`) — so essentially all
+   of its current passes are rejections, and many are rejections *for the wrong reason*: wasmrt cannot
+   parse `exact`, `BadValType` is not on the skip list, and a parse gap therefore scores as a correct
+   refusal. **Implementing half a feature exposes them as false passes.** wazmrt measured **18 lost
+   passes that were not regressions** on this same file family.
+2. **Skips will RISE when X1 lands**, because a silently-accepted module becomes an honest refusal.
+
+🔒 **The gate stays `scripts/conformance-diff.sh`, per file** — but a per-file loss that is one of the
+two above is *evidence the work is landing*, and the commit must say which.
+
+###### 🔧 CROSS-CUTTING — do these first; they are not part of any one track
+
+| # | item | why first |
+| --- | --- | --- |
+| **X1** | **Refuse `(pagesize N)` honestly** until Track P lands | ⚠️ P0. A live silent-wrong-module defect *today*. One clause, and it converts a wrong answer into a refusal. Expected: `custom-page-sizes-invalid.wast`'s 16 *"module was accepted"* failures resolve; some `custom-page-sizes.wast` failures become honest skips. |
+| **X2** | **The `ModuleBuild` field-coverage sweep** — T10a's still-open half | 🎯 **X1 IS the fifth instance of the mechanism T10a named**, and the first four were all found by accident. The opcode half shipped 2026-08-08; the module-field half never did, and it is exactly what would have caught this. A spot-probe of ten clauses found one real drop — a real sweep is the deliverable. ⚠️ `(sub final (func))` emitting the bare form is **correct**, not a drop: a bare composite type *is* `sub final ϵ`. Verified before reporting. |
+| **X3** | **A proposal's `Feature` gate is a DELIVERABLE of its track, not a follow-up** | 🔒 `Feature` has **15 members and none of the three new proposals**. wazmrt shipped custom-page-sizes with no gate and it became **unrefusable** — every switch off, still accepted. T13's own gate already demands "a `Feature` flag **and a test that the flag refuses it**"; this makes it a line item, because it is the one question a per-proposal checklist cannot ask itself. |
+
+###### 📊 THE FOUR TRACKS, ranked
+
+| track | proposal | fails | skips | of which CASCADE | verdict |
+| --- | --- | --- | --- | --- | --- |
+| **W** | wide-arithmetic | 1 | 108 | 99 | **best ratio left — do first** |
+| **P** | custom-page-sizes | 34 | 7 | 7 | small feature, **memory-safety item** |
+| **M/A** | threads | 13 | 18 | 18 | ⚠️ **triage before costing** |
+| **D** | custom-descriptors | 64 | 451 | 436 | largest lever, largest risk, **last** |
+
+⚠️ **436 of the 451 custom-descriptors skips are cascades**, and 99 of wide-arithmetic's 108 are. A
+skip total is dominated by cascades and **over-counts as a size estimate** — read it to RANK, work the
+roots to FIX (§5.5a). Root counts: W **9**, P **0**, M/A **0**, D **15**.
+
+**Track W — wide-arithmetic.** `i64.add128`, `i64.sub128`, `i64.mul_wide_s`, `i64.mul_wide_u`. Four
+instructions, no immediates, no new types, and Rust's native `u128` does the arithmetic. Currently
+`UnimplementedInstr`, so the classifier already routes them honestly. wazmrt shipped this for **~3 KB
+and its file went 0/0/109 → 107/0/0 on the first run.** Deliverables: the four opcodes end to end, a
+`Feature::WideArithmetic` gate + a test that it refuses (X3), and multi-value results (each returns
+two `i64`s — wasmrt has multi-value, so this is a check, not work).
+
+**Track P — custom-page-sizes.** A memory declares its own page size, byte-granular instead of 64 KiB.
+🔒 **THE SECURITY ITEM.** `memory.size` returns PAGES, `memory.grow` takes PAGES, and **every bounds
+check compares against `pages × page_size`. A single site left holding the hardcoded 65536 is a
+memory-safety hole, not a conformance miss.** Deliverable: enumerate every use of `PAGE_SIZE` / `65536`
+and convert or justify **each one, in the commit message**. Then the memory64 interaction —
+`page_size × page_count` must not overflow the 64-bit index space. **Verify beyond the assertions: a
+1-byte-page memory must refuse an out-of-bounds access at BYTE granularity**; the assertions alone
+would not catch a bounds check that silently kept 64 KiB.
+
+**Track M/A — threads.** ⚠️⚠️ **Triage before costing — this is the track most likely to be
+mis-scoped, and wazmrt's equivalent entry was wrong twice over: not one of its 15 was a threads
+defect.** Two reasons to expect the same here: the `proposals/threads/` directory is a snapshot pinned
+to a spec **before multi-memory and multi-table**, so some assertions are era-pinned rather than
+defects; and 4 of wasmrt's 13 already read *"Invalid: rejected at the wrong stage"*, which is a
+stage-routing question, not an atomics one. **Deliverable of the triage: a cause per assertion, before
+any implementation is priced.**
+
+**Track D — custom-descriptors.** The largest feature since GC, and an extension of a proposal wasmrt
+already ships. **D1 gates everything else; do not reorder.**
+
+* **D1 — `(ref (exact $t))`. THE HARD ONE.** Exact refs change **SUBTYPING**, not just parsing:
+  `(ref (exact $t))` is **not** satisfied by a subtype of `$t`. So `subtype_of`, `ref_matches`,
+  `head_matches` and the type registry's canonicaliser all move together.
+  🔒 **SOUNDNESS CHECKPOINT — the strongest security argument in this scope.** A `ref_matches` that
+  answers *yes* to a subtype where the spec demands exact is **type confusion**: the guest gets a value
+  of a type it proved it did not have. That is the same shape as **both** soundness defects this port
+  has found — the host-externref/GC-index collision (closed 2026-08-20) and cross-instance GC object
+  substitution. **Every cast arm needs a targeted WRONG-ANSWER test, not an assertion count.** wazmrt
+  found live type confusion *after* its score said D1 was done, because four sub-opcodes read their
+  target through a path that dropped the prefix — and the corpus could not see it, because those files
+  were already failing for other reasons.
+  ⚠️ **Representation:** the bit must come out of `ValType`'s index field (31 = concrete, 30 =
+  nullable, 28–29 = kind, 0–27 = index), which halves the index range. `concrete_ref` **MASKS**, so an
+  over-range index truncates to a smaller *valid* one — the decoder must then enforce
+  `MAX_CONCRETE_INDEX` explicitly, because that bound and the declared-type-count bound stop being the
+  same constraint. wasmrt's `concrete_ref` already carries that warning; D1 is when it comes due.
+  Carries `exact.wast` (17), `exact-func-import` (5), `exact-casts` (3), `array_new_exact` (1).
+* **D2 — `(descriptor $d)` / `(describes $s)`.** 🔒 **THREE type-identity keys, not one**, and all
+  three must learn the links: `module::rec_group_key` (module-local canonicalisation),
+  `interp::TypeRegistry` (store-wide), and the `cross_module_*` matchers (what an IMPORT goes
+  through). *A checklist that names one site is a checklist for one site.* ⚠️ The subtyping rule is
+  **asymmetric** — verify each direction against wasmtime rather than reasoning it out. Carries
+  `descriptors.wast` (6) and `binary-descriptors.wast` (2).
+* **D3/D4 — the `*desc*` instructions**: `struct.new_desc`, `struct.new_default_desc`,
+  `ref.get_desc`, `ref.cast_desc*`, `br_on_cast_desc*`. These are what the four big cascade files
+  (`br_on_cast_desc_eq`, `br_on_cast_desc_eq_fail`, `ref_cast_desc_eq`, `ref_get_desc`) wait on —
+  **~305 of the 451 skips**.
+* 🔒 **Out of scope but do it anyway, as D2 lands:** `struct.new` / `struct.new_default` must REFUSE a
+  type that declares a descriptor, or a half-implemented D2 can build an object D3 says is
+  unconstructable.
+
+###### 🧾 Definition of done for each track
+
+1. The proposal's assertions at **0 failed / 0 skipped** in its files.
+2. A `Feature` member, gated at **both** module entry points, with a test proving the flag refuses it
+   **and** a test proving no false positive on a plain MVP module (X3).
+3. For any track touching casts or type identity: a **by-construction wrong-answer test** per arm.
+4. Output handed to an outside reader — `wasmtime compile out.wasm` — for anything format-level
+   (§3.8b). Two wire divergences this week say this is not optional.
+5. `scripts/conformance-diff.sh` green, or the commit names which of the two predicted movements it is.
+
+---
+
 ##### ✅ DAY 2 (2026-08-20) — **F1–F7 CLOSED, S1/S2/S3/S6/S7 CLOSED, and the CORE SUITE is at 0/0**
 
 **63,333 / 172 / 1,024 → 63,807 / 112 / 584.** +474 passes, −60 failures, −440 skips.

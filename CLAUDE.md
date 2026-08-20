@@ -34,10 +34,25 @@ wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed
 **embeddable from C** via `wasmrt.h`. Spec suite **99.8%** (**63,807 / 112 / 584**), **490 workspace
 tests**, Miri 28/28, no file lost a pass in any pass.
 🎯 **THE 257 CORE SPEC FILES ARE AT 0 FAILED / 0 SKIPPED.** Day 2 closed **F1–F7** (58 core failures
-→ 0) and **S1, S2, S3, S6, S7**; 63,333/172/1,024 → 63,807/112/584. Everything that remains is inside
-`proposals/` and is **implementation, not defect repair**: custom-descriptors 64 failures + 451 skips
-(track D), custom-page-sizes 34 + 7 (P), threads 13 + 18 (M/A), wide-arithmetic 1 + 108 (W). That is a
-**scope decision for the owner**, not a bug hunt — see `cmem/roadmap.md`.
+→ 0) and **S1, S2, S3, S6, S7**; 63,333/172/1,024 → 63,807/112/584. Everything that remains is inside the
+four `proposals/` directories.
+🚦 **THE NEXT WORK IS SCOPED AND NOT STARTED (2026-08-20)** — `cmem/roadmap.md`, "THE REMAINING
+WORK, SCOPED". Three cross-cutting items first — **X1** refuse `(pagesize N)`, **X2** the `ModuleBuild`
+field-coverage sweep (T10a's open half), **X3** a proposal's `Feature` gate is a track DELIVERABLE
+(`Feature` has 15 members and **none of the three new proposals**) — then four tracks ranked
+**W** wide-arithmetic (1f/108s, best ratio) → **P** custom-page-sizes (34f/7s, 🔒 the memory-safety
+one) → **M/A** threads (13f/18s, ⚠️ triage before costing) → **D** custom-descriptors (64f/451s,
+largest and riskiest; **D1 `(ref (exact $t))` changes SUBTYPING** and carries a type-confusion
+soundness checkpoint). ⚠️ **436 of D's 451 skips and 99 of W's 108 are CASCADES** — read the skip
+column to RANK, work the roots to FIX. ⚠️ Two predictions are recorded so honest movement is not
+read as regression: **passes go DOWN when `exact` lands** and **skips RISE when X1 lands**.
+🔴 **SCOPING FOUND A LIVE DEFECT — `(memory 1 (pagesize 1))` assembles, validates and RUNS today**,
+emitting bytes byte-identical to `(memory 1)`: the clause is parsed and thrown away, so a guest
+asking for a 1-byte memory silently gets 64 KiB and every access that must trap succeeds. wasmtime
+refuses the same **source**. ⚠️ The first cross-check against wasmtime *agreed*, because it was given
+our emitted bytes rather than the source — 🔒 **when the emitter is the suspect, compare the SOURCE
+across engines.** Fifth instance of the T10a emitter mechanism, and like the first four it was found
+by accident. `cmem/known-issues.md` (top), `cmem/best-practices.md` §5.8.
 ⚠️⚠️ **THE FINDING IS NOT IN THE CONFORMANCE NUMBERS.** Two of the day's fixes were **wire-format
 divergences the spec suite structurally could not see**, because wasmrt's assembler and decoder agreed
 with each other: every **non-null abstract reference type** was emitted as `ValType`'s *internal tag*
