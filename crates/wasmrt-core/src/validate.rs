@@ -1268,7 +1268,12 @@ impl<'a> FuncValidator<'a> {
                     return Err(ValidateError::TypeMismatch);
                 }
                 self.match_types(&ft.params, &lt[..ft.params.len()])?;
-                if !subtype_of(self.module, V::EXNREF, lt[lt.len() - 1]) {
+                // ⚠️ The handler pushes a **non-null** `(ref exn)` — an exception always exists —
+                // so the label must ACCEPT one. Asking `exnref <: lt.last()` demanded a nullable
+                // label and refused `(result … (ref exn))`, which is the spelling `try_table.wast`
+                // uses for `catch_ref1`; `catch_ref2` writes `(ref null exn)` and both are valid,
+                // so the relation has to run this way round.
+                if !subtype_of(self.module, V::EXNREF_NN, lt[lt.len() - 1]) {
                     return Err(ValidateError::TypeMismatch);
                 }
                 Ok(())
@@ -1281,7 +1286,7 @@ impl<'a> FuncValidator<'a> {
                 }
             }
             opcode::CatchKind::CatchAllRef => {
-                if lt.len() == 1 && subtype_of(self.module, V::EXNREF, lt[0]) {
+                if lt.len() == 1 && subtype_of(self.module, V::EXNREF_NN, lt[0]) {
                     Ok(())
                 } else {
                     Err(ValidateError::TypeMismatch)

@@ -510,6 +510,22 @@ pub enum DecodeError {
     /// A *malformed* encoding, distinct from the validator's `TooManyLocals` resource ceiling:
     /// this says "these bytes cannot mean anything", that one says "we decline to allocate it".
     TooManyLocals,
+    /// An `end` (or a legacy `delegate`) closed an expression that was already complete, or
+    /// instructions followed the expression's terminating `end` (§5.4.9: `expr ::= instr* 0x0B`).
+    ///
+    /// The mirror of [`DecodeError::MissingEnd`]. Both are *malformed*: an expression whose
+    /// control structures do not balance is not a program the validator gets to have an opinion
+    /// about, and reporting it as the validator's `ControlUnderflow` is the right verdict at the
+    /// wrong stage (`binary.wast`).
+    UnbalancedEnd,
+    /// A memarg's flags field has a bit set above the multi-memory flag (`0x40`).
+    ///
+    /// The field holds an alignment **exponent** in the low bits plus `0x40` to say a memory index
+    /// follows; nothing else is defined, so `align="2**128"` is not a large alignment — it is a
+    /// byte sequence that means nothing. ⚠️ Reading it as an alignment and letting the *validator*
+    /// say "larger than natural" is the right verdict at the wrong STAGE, which
+    /// `align.wast` distinguishes: those two cases are `assert_malformed`, not `assert_invalid`.
+    MalformedMemopFlags,
 }
 
 impl fmt::Display for DecodeError {
@@ -537,6 +553,8 @@ impl fmt::Display for DecodeError {
             DecodeError::DataCountRequired => "data count section required",
             DecodeError::TooManyLocals => "too many locals",
             DecodeError::MissingEnd => "unexpected end of section or function (missing END)",
+            DecodeError::MalformedMemopFlags => "malformed memop flags",
+            DecodeError::UnbalancedEnd => "END opcode outside a matching control structure",
         };
         f.write_str(s)
     }

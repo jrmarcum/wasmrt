@@ -737,14 +737,11 @@ fn read_val_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<ValType> {
         0x71 => ValType::NULLREF, // none
         0x69 => ValType::EXNREF,
         0x74 => ValType::NULLREF, // nullexnref — closest modelled bottom
-        0x68 => ValType::FUNCREF_NN,
-        0x67 => ValType::EXTERNREF_NN,
-        0x66 => ValType::ANYREF_NN,
-        0x65 => ValType::EQREF_NN,
-        0x62 => ValType::I31REF_NN,
-        0x61 => ValType::STRUCTREF_NN,
-        0x59 => ValType::ARRAYREF_NN,
-        0x58 => ValType::NULLREF_NN,
+        // ⚠️ `0x57`–`0x68` are `ValType`'s INTERNAL tags for the non-null abstract references and
+        // were accepted here as if they were value-type bytes. They are not: §5.3.5 spells
+        // `(ref ht)` as `0x64 ht`, and nothing else. Accepting them let wasmrt read a binary no
+        // other engine can — the mirror of the assembler emitting one (see `emit_val_type`), and
+        // the pair is what kept the round trip green.
         0x63 => read_heap_type_ref(r, true, kinds)?, // (ref null ht)
         0x64 => read_heap_type_ref(r, false, kinds)?, // (ref ht) — non-nullable
         _ => return Err(DecodeError::BadValType),

@@ -333,6 +333,13 @@ pub struct Table {
     /// The element type, for import matching (§4.5.9). The matching **minimum** is the table's
     /// *current* length, not a stored declared value — see [`table_import_matches`].
     pub element: crate::types::ValType,
+    /// The table's **index type**: `i64` (table64) or `i32`. Recorded for import matching, where
+    /// it must be EQUAL, not merely compatible — it decides what type every `table.get`/`set`/
+    /// `grow`/`fill` operand has, so neither direction substitutes for the other.
+    ///
+    /// ⚠️ [`Memory`] carried this from the start and `Table` did not, so a 64-bit table satisfied
+    /// a 32-bit import and vice versa — four `assert_unlinkable`s in `memory64-imports.wast`.
+    pub is64: bool,
 }
 
 /// The mutable runtime state of an instance, threaded as `&mut` through execution so a
@@ -838,7 +845,8 @@ fn table_import_matches(actual: &Table, declared: &crate::module::TableType) -> 
     // wasmrt got this wrong for **memories** first, storing the declared minimum and asserting that
     // in a test; no memory case in the suite contradicted it, and the table case did. Both now read
     // the current size, which equals the declared minimum until something grows.
-    actual.element == declared.element
+    actual.is64 == declared.limits.is64
+        && actual.element == declared.element
         && actual.entries.len() as u64 >= declared.limits.min
         && match declared.limits.max {
             Some(m) => actual.max.is_some_and(|a| u64::from(a) <= m),
@@ -1610,6 +1618,7 @@ impl Store {
                 entries: vec![fill; min],
                 max: tt.limits.max.and_then(|m| u32::try_from(m).ok()),
                 element: tt.element,
+                is64: tt.limits.is64,
             });
         }
 

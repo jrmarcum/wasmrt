@@ -146,19 +146,45 @@ fn name_bytes(out: &mut Vec<u8>, name: &[u8]) {
     out.extend_from_slice(name);
 }
 
-/// Emit a value type: a concrete `(ref null? $t)` as `0x63`/`0x64` + a signed type index,
-/// anything else as its single valtype byte.
+/// Emit a value type (§5.3.5).
+///
+/// Three shapes: a concrete `(ref null? $t)` is `0x63`/`0x64` + a signed type index; a **non-null
+/// abstract** reference is `0x64` + the head's `absheaptype` byte; everything else — the numeric
+/// types and the nullable abstract shorthands — is one byte.
+///
+/// ⚠️⚠️ **The middle case wrote an INTERNAL TAG into the binary.** [`ValType`] keeps non-null
+/// abstract references as synthetic bytes in an unused range (`0x57`–`0x68`), and this function
+/// pushed `v.bits()` straight out — so `(ref any)` was emitted as `0x66`, `(ref func)` as `0x68`,
+/// `(ref exn)` as `0x57`. Our own decoder read them back, so every round-trip test passed and the
+/// spec suite was green, but **wasmtime 47 refuses the output**: `invalid value type (at offset
+/// 0xd)`. No module wasmrt assembled with a non-null abstract reference type was WebAssembly.
+///
+/// 🎓 *An internal representation that resembles the wire format will eventually be mistaken for
+/// it.* The nullable shorthands genuinely ARE their valtype bytes, which is what made the shortcut
+/// look total; the non-null tags were invented, and nothing in the round trip could tell the two
+/// apart. §3.8 again: the only reader that can is one that did not write it.
 fn emit_val_type(out: &mut Vec<u8>, v: V) -> Result<()> {
     if v.is_concrete() {
         out.push(if v.is_non_null_ref() { 0x64 } else { 0x63 });
         sleb(out, i64::from(v.concrete_index()));
-    } else {
-        let bits = v.bits();
-        if bits > 0xff {
+        return Ok(());
+    }
+    if v.is_non_null_ref() {
+        // `(ref ht)`: the prefix, then the head's own `absheaptype` byte — which is exactly the
+        // NULLABLE shorthand's byte, since that shorthand is defined as `(ref null ht)`.
+        let head = v.ref_heap().val_type(true).bits();
+        if head > 0xff {
             return Err(Error::BadValType);
         }
-        out.push(bits as u8);
+        out.push(0x64);
+        out.push(head as u8);
+        return Ok(());
     }
+    let bits = v.bits();
+    if bits > 0xff {
+        return Err(Error::BadValType);
+    }
+    out.push(bits as u8);
     Ok(())
 }
 
@@ -1596,12 +1622,6 @@ fn zero_offset_of(is64: bool) -> Vec<Sexpr> {
     ])]
 }
 
-/// The 32-bit case, which is every table shorthand (an inline `(elem …)` on a 64-bit table is
-/// not expressible — the shorthand carries no index type).
-fn zero_offset() -> Vec<Sexpr> {
-    zero_offset_of(false)
-}
-
 fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let mut j = 1;
     let name = opt_name(items, &mut j);
@@ -1928,14 +1948,27 @@ fn parse_global_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 /// funcref)` failed with `BadNumber` — **63 modules across the corpus, and the single largest
 /// cause of the whole skip total.** The error named the symptom (“a number that does not fit”);
 /// the cause was one missing feature.
-fn parse_table_limits(items: &[Sexpr], j: &mut usize) -> Result<(u64, Option<u64>, bool)> {
-    let mut is64 = false;
+/// Consume a table's optional **index type** (`i64` / `i32`, table64), returning whether it is
+/// 64-bit. Defaults to `i32`, which is what a table written without one is.
+///
+/// ⚠️ Its own function because the index type precedes the element type in **every** table form,
+/// and the inline-`(elem …)` form did not consume it: `(table $t i64 funcref (elem $f))` read
+/// `i64` AS the element type and emitted `0x7e` where a reftype belongs — a table section no
+/// decoder accepts, ours included, which is how `call_indirect64.wast` read "byte is not a
+/// defined value type" and never built.
+fn parse_table_index_type(items: &[Sexpr], j: &mut usize) -> bool {
     if items.get(*j).is_some_and(|s| eq_atom(s, "i64")) {
-        is64 = true;
         *j += 1;
-    } else if items.get(*j).is_some_and(|s| eq_atom(s, "i32")) {
+        return true;
+    }
+    if items.get(*j).is_some_and(|s| eq_atom(s, "i32")) {
         *j += 1;
     }
+    false
+}
+
+fn parse_table_limits(items: &[Sexpr], j: &mut usize) -> Result<(u64, Option<u64>, bool)> {
+    let is64 = parse_table_index_type(items, j);
     let min = parse_u64_str(want_atom(nth(items, *j)?)?)?;
     *j += 1;
     let mut max = None;
@@ -1964,8 +1997,11 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 
     // `(table $t funcref (elem $f …))` — an inline element segment sizes the table.
     if let Some(pos) = items[j..].iter().position(|s| eq_kw(s, "elem")) {
+        // Absolute, because `parse_table_index_type` may advance `j` past an `i64`/`i32`.
+        let elem_at = j + pos;
+        let is64 = parse_table_index_type(items, &mut j);
         let elem_type = parse_val_type(nth(items, j)?, &b.type_names)?;
-        let entries: Vec<Vec<Sexpr>> = want_list(&items[j + pos])?[1..]
+        let entries: Vec<Vec<Sexpr>> = want_list(&items[elem_at])?[1..]
             .iter()
             .map(|s| {
                 if s.as_list().is_some() {
@@ -1981,7 +2017,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         // Whether every entry is expressible as a bare function INDEX, which is all the
         // funcidx shorthand can encode. An entry written as an atom always is; a list is only
         // if it is exactly `(ref.func …)`.
-        let all_plain_ref_func = want_list(&items[j + pos])?[1..].iter().all(|s| {
+        let all_plain_ref_func = want_list(&items[elem_at])?[1..].iter().all(|s| {
             s.as_atom().is_some()
                 || s.as_list()
                     .is_some_and(|l| matches!(l.first().and_then(Sexpr::as_atom), Some("ref.func")))
@@ -1990,14 +2026,20 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         b.tables.push(TableDef {
             min: u64::from(n),
             max: Some(u64::from(n)),
-            is64: false,
+            is64,
             elem: elem_type,
             init: None, // the inline `(elem …)` fills it instead
         });
         b.table_names.push(name);
         b.elems.push(ElemDef {
             table_index: ti,
-            offset: Some(zero_offset()),
+            // ⚠️ The offset takes the TABLE's index type. This was hardcoded 32-bit behind a note
+            // saying an inline `(elem …)` on a 64-bit table "is not expressible — the shorthand
+            // carries no index type". `call_indirect64.wast` opens with
+            // `(table $t64 i64 funcref (elem $const-i32))`, so it is expressible and was written;
+            // the synthesized `i32.const 0` then failed validation and the file never built.
+            // 🎓 A scope note is a hypothesis about a cause, and it is the one nobody re-measures.
+            offset: Some(zero_offset_of(is64)),
             elem_type,
             items: entries,
             declarative: false,
@@ -5344,6 +5386,43 @@ mod tests {
                   (throw $e)))))"#;
         let r = run(src, "f", &[]);
         assert_eq!(crate::interp::as_i32(r[0]), 42);
+    }
+
+    /// ⚠️⚠️ **The bytes, not the answer — the second time.** A non-null abstract reference type is
+    /// `0x64` + the head's `absheaptype` byte (§5.3.5). `ValType` stores those types as synthetic
+    /// internal tags (`0x57`–`0x68`) in an unused valtype-byte range, and `emit_val_type` pushed
+    /// `v.bits()` straight into the binary — so `(ref any)` was emitted as the single byte `0x66`.
+    /// Our decoder read it back, so every round trip passed; **wasmtime 47 refuses it** with
+    /// `invalid value type`, which means no module wasmrt assembled containing one was
+    /// WebAssembly at all.
+    ///
+    /// 🎓 The nullable shorthands genuinely ARE their valtype bytes, so the shortcut looked total.
+    /// *An internal representation that resembles the wire format will eventually be mistaken for
+    /// it*, and only a reader that did not write the bytes can tell the two apart.
+    #[test]
+    fn a_non_null_abstract_reference_is_encoded_as_0x64_plus_its_heap_type() {
+        // The head byte a `(ref X)` must be spelled with — identical to the NULLABLE shorthand's,
+        // because that shorthand is defined as `(ref null X)`.
+        for (text, head) in [
+            ("(ref any)", 0x6e),
+            ("(ref func)", 0x70),
+            ("(ref extern)", 0x6f),
+            ("(ref eq)", 0x6d),
+            ("(ref i31)", 0x6c),
+            ("(ref struct)", 0x6b),
+            ("(ref array)", 0x6a),
+            ("(ref exn)", 0x69),
+            ("(ref none)", 0x71),
+        ] {
+            let src = format!("(module (func (export \"f\") (param {text})))");
+            let bytes = asm(&src).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+            // Type section: … 0x60 (func) 0x01 (one param) then the param's encoding.
+            let at = bytes
+                .windows(3)
+                .position(|w| w == [0x60, 0x01, 0x64])
+                .unwrap_or_else(|| panic!("{text} was not emitted as `0x64 <heaptype>`: {bytes:02x?}"));
+            assert_eq!(bytes[at + 3], head, "{text} used the wrong heap-type byte");
+        }
     }
 
     /// ⚠️⚠️ **The bytes, not the answer.** A `try_table` catch label counts from the scope

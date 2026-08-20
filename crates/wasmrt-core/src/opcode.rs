@@ -783,6 +783,14 @@ fn read_br_cast(r: &mut Reader) -> DecodeResult<Imm> {
 /// `u64` (the 32-bit-memory ceiling is a validation rule, not a decode one).
 fn read_mem_arg(r: &mut Reader) -> DecodeResult<MemArg> {
     let mut alignment = r.read_var_u32()?;
+    // §5.4.7 + multi-memory: the flags field is an alignment **exponent** plus `0x40` for "a memory
+    // index follows". Nothing above that bit is defined, so a larger value is MALFORMED — not a
+    // large alignment for the validator to reject. `align.wast` asserts exactly that distinction
+    // for the flags bytes `0x80 0x01` (2**128) and `0x80 0x02` (2**256), and reading them as
+    // alignments gave the right verdict at the wrong stage.
+    if alignment >= 0x80 {
+        return Err(DecodeError::MalformedMemopFlags);
+    }
     let mut memory = 0u32;
     if alignment & 0x40 != 0 {
         alignment &= !0x40u32;
@@ -911,8 +919,15 @@ fn read_try_table(r: &mut Reader) -> DecodeResult<Imm> {
 pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
     let mut r = Reader::new(body);
     let mut list: Vec<Instr> = Vec::new();
+    // Open control structures, counting the expression itself. `end` (and the legacy `delegate`,
+    // which terminates a `try` in place of one) closes one; reaching zero ends the expression.
+    let mut depth: usize = 1;
 
     while !r.at_end() {
+        // The expression's own terminator has already been read, so nothing may follow it.
+        if depth == 0 {
+            return Err(DecodeError::UnbalancedEnd);
+        }
         // Where this instruction starts, for trap backtraces. Captured before the opcode byte is
         // consumed, so it points at the instruction rather than its first immediate.
         let at = u32::try_from(r.pos()).unwrap_or(u32::MAX);
@@ -1141,24 +1156,39 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
         };
 
         let op = Op::from_u8(b0).ok_or(DecodeError::UnsupportedOpcode)?;
+        depth = control_depth(depth, op)?;
         list.push(Instr { op, offset: at, imm });
     }
 
-    // An `expr` is terminated by its matching `end` (§5.4.9), so the last instruction must be one.
-    // Both callers decode a complete expression — a function body or a constant expression — and a
-    // body that simply runs out of bytes was previously accepted here and only refused later, by
-    // the validator's control-stack underflow.
+    // An `expr` is terminated by its matching `end` (§5.4.9). `depth` is 0 only when that `end`
+    // has been read, so this covers both "ran out of bytes" and "an opener was never closed".
     //
-    // Deliberately a **terminator** check, not a nesting one: full balance (which `end` closes
-    // which opener, and the legacy-EH `delegate` that terminates a `try` without one) is
-    // `precompute_control_flow`'s job, and duplicating that here would be two authorities on the
-    // same rule. Every well-formed expression ends in `end` regardless of what it contains, so this
-    // much is provable in one line.
-    if list.last().map(|i| i.op) != Some(Op::End) {
+    // ⚠️ This was a **terminator** check — "the last instruction is an `end`" — on the reasoning
+    // that full balance is `precompute_control_flow`'s job and two authorities on one rule is
+    // worse than none. The reasoning holds for *which* `end` closes *which* opener, which is what
+    // that pass computes; it does not hold for whether they balance at all, and the difference is
+    // a whole STAGE. `binary.wast`'s `br_table` fixture — one target declared, two given, so the
+    // extra byte decodes as a `block` that is never closed — still ends in an `end`, passed here,
+    // and was refused by the validator as `ControlUnderflow`: an `assert_malformed` answered with
+    // an `assert_invalid` verdict. A counter is not a second authority on nesting; it is the
+    // weaker property the decoder is entitled to check on its own.
+    if depth != 0 {
         return Err(DecodeError::MissingEnd);
     }
 
     Ok(list)
+}
+
+/// Track open control structures across one instruction. `Err` means the expression's `end` has
+/// already been matched, so this instruction is outside any control structure.
+fn control_depth(depth: usize, op: Op) -> DecodeResult<usize> {
+    Ok(match op {
+        // `else` and the legacy `catch`/`catch_all` divide a structure; they do not open or close.
+        Op::Block | Op::Loop | Op::If | Op::TryLegacy | Op::TryTable => depth + 1,
+        // `delegate` terminates a legacy `try` in place of its `end`.
+        Op::End | Op::Delegate => depth.checked_sub(1).ok_or(DecodeError::UnbalancedEnd)?,
+        _ => depth,
+    })
 }
 
 #[cfg(test)]
@@ -1180,10 +1210,12 @@ mod tests {
 
     #[test]
     fn immediates_block_const_load() {
-        // block (result i32) ; i32.const -3 ; i32.load align=2 offset=8 ; end
-        let body = [0x02, 0x7f, 0x41, 0x7d, 0x28, 0x02, 0x08, 0x0b];
+        // block (result i32) ; i32.const -3 ; i32.load align=2 offset=8 ; end ; end
+        // ⚠️ TWO `end`s: the block's and the body's. The fixture had one and decoded anyway until
+        // the decoder started counting — an unbalanced body the test itself was asserting on.
+        let body = [0x02, 0x7f, 0x41, 0x7d, 0x28, 0x02, 0x08, 0x0b, 0x0b];
         let instrs = decode_body(&body).unwrap();
-        assert_eq!(instrs.len(), 4);
+        assert_eq!(instrs.len(), 5);
         assert_eq!(instrs[0].imm, Imm::BlockType(BlockType::Value(ValType::I32)));
         assert_eq!(instrs[1].imm, Imm::I32(-3));
         assert_eq!(
@@ -1286,9 +1318,10 @@ mod tests {
         assert_eq!(decode_body(&[0xff]), Err(DecodeError::UnsupportedOpcode));
     }
 
-    /// An expression must be terminated by its matching `end` (§5.4.9). Without this, a body that
-    /// simply ran out of bytes decoded fine and was only refused later by the validator's control
-    /// stack — the wrong stage for a malformed encoding.
+    /// An expression's control structures must BALANCE, and its last `end` is the expression's own
+    /// (§5.4.9). Without this, a body that ran out of bytes — or one with an opener nobody closed —
+    /// decoded fine and was only refused later by the validator's control stack, as
+    /// `ControlUnderflow`: an `assert_malformed` answered with an `assert_invalid` verdict.
     #[test]
     fn rejects_an_expression_with_no_terminating_end() {
         // i32.const 1 ; drop — and then nothing.
@@ -1302,13 +1335,18 @@ mod tests {
         assert!(decode_body(&[0x41, 0x01, 0x1a, 0x0b]).is_ok());
         assert!(decode_body(&[0x02, 0x40, 0x0b, 0x0b]).is_ok()); // block … end, then the body's end
 
-        // **The boundary, asserted rather than assumed.** `block … end` with the function's own
-        // `end` missing still *ends* in an `end`, so this check passes it — the check is a
-        // terminator check, not a nesting one. That imbalance is caught later, by
-        // `precompute_control_flow` at instantiation and by the validator's control stack. Pinned
-        // here so the limitation is visible in the tests instead of being discovered by someone
-        // trusting the name of the error.
-        assert!(decode_body(&[0x02, 0x40, 0x0b]).is_ok());
+        // **The boundary this test used to concede.** `block … end` with the function's own `end`
+        // missing still *ends* in an `end`, so a terminator check passed it and the imbalance was
+        // left to `precompute_control_flow` at instantiation and to the validator. The decoder
+        // counts now, so it is refused here — where a malformed encoding belongs.
+        assert_eq!(decode_body(&[0x02, 0x40, 0x0b]), Err(DecodeError::MissingEnd));
+        // …and the mirror: an `end` past the expression's own terminator.
+        assert_eq!(
+            decode_body(&[0x41, 0x01, 0x1a, 0x0b, 0x0b]),
+            Err(DecodeError::UnbalancedEnd)
+        );
+        // `delegate` terminates a legacy `try` in place of an `end`, so it closes one too.
+        assert!(decode_body(&[0x06, 0x40, 0x18, 0x00, 0x0b]).is_ok());
     }
 
     #[test]

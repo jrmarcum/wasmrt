@@ -26,7 +26,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::interp::{externalize, host_ref, HostFunc, Imports, InstanceId, Store, Trap, Value};
+use crate::interp::{externalize, host_ref, Imports, InstanceId, Store, Trap, Value};
 use crate::linker::Linker;
 use crate::module::Module;
 use crate::sexpr::{self, Sexpr};
@@ -142,14 +142,22 @@ struct Runner {
     summary: Summary,
 }
 
-/// The spec suite's standard `spectest` host module.
+/// The functions the spec suite's `spectest` host module exports (§ the suite's own README).
 ///
-/// Its `print*` functions exist only to be callable — the suite asserts nothing about what
-/// they emit — and its globals have values the suite checks, so those must be exact.
-fn spectest_func(_name: &str) -> HostFunc {
-    // Every `print*` variant takes its arguments and returns nothing.
-    HostFunc::new(|_caller, _args, _results| Ok(()))
-}
+/// ⚠️ **A closed set, not a namespace.** These were installed with `define_namespace`, which makes
+/// EVERY name under `spectest` resolvable — so `(import "spectest" "unknown" (func))` linked, and
+/// `imports.wast` asserts it must not. A catch-all is the right tool for an embedder that wants
+/// unsatisfied imports to trap when called; it is the wrong one for a module whose exports are
+/// written down.
+const SPECTEST_FUNCS: &[&str] = &[
+    "print",
+    "print_i32",
+    "print_i64",
+    "print_f32",
+    "print_f64",
+    "print_i32_f32",
+    "print_f64_f64",
+];
 
 /// Why an action could not run.
 enum ActionErr {
@@ -258,7 +266,11 @@ impl Runner {
     /// a namespace between two builds and the linker must see it.
     fn linker(&self) -> Linker {
         let mut l = Linker::new();
-        l.define_namespace("spectest", spectest_func);
+        // The `print*` functions exist only to be callable — the suite asserts nothing about what
+        // they emit — so one empty body serves all of them; the NAMES are what matter.
+        for name in SPECTEST_FUNCS {
+            l.define_func("spectest", name, |_caller, _args, _results| Ok(()));
+        }
         // The suite checks these values, so they must be exact. Named explicitly rather
         // than produced by a factory: it is a closed, known set.
         for (name, v) in [
@@ -272,6 +284,9 @@ impl Runner {
         if let Some(id) = self.spectest_mem {
             l.define_memory("spectest", "memory", id, 0);
             l.define_table("spectest", "table", id, 0);
+            // `table64` is the 64-bit twin the memory64 proposal's spectest adds; `table64.wast`
+            // imports it and, without it, the whole file failed at link.
+            l.define_table("spectest", "table64", id, 1);
         }
         for (name, id) in &self.registered {
             l.define_instance(name, *id);
@@ -296,7 +311,7 @@ impl Runner {
         // *wider* type is unlinkable. Both live in one owner module because a memory's and a table's
         // identity in this engine is a store slot, so something must own them.
         let Ok(bytes) = crate::wat::assemble(
-            b"(module (memory (export \"memory\") 1 2) (table (export \"table\") 10 20 funcref))",
+            b"(module (memory (export \"memory\") 1 2) (table (export \"table\") 10 20 funcref)               (table (export \"table64\") i64 10 20 funcref))",
         ) else {
             return;
         };
