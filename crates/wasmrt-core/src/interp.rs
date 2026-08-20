@@ -746,6 +746,16 @@ pub struct Imports {
     /// each to the right slot.
     funcs: Vec<ImportedFunc>,
     pub globals: Vec<Value>,
+    /// Where each global import came from, parallel to `globals`: `Some((instance, index))` when it
+    /// is another instance's export, `None` for a host-supplied value.
+    ///
+    /// ⚠️⚠️ **An imported global is SHARED, not copied.** A global is a store address; importing one
+    /// binds the address, so a `global.set` through the import is visible to the exporter and to
+    /// every other importer. This was documented as a deliberate by-value simplification — and
+    /// `instance.wast`'s "Import is not generative" section imports `I1.glob` TWICE into one module,
+    /// writes through the first and reads the second, and requires the write to be seen. The same
+    /// argument the owner made for memories at T9a#4, one resource over.
+    global_sources: Vec<Option<(InstanceId, u32)>>,
     /// Memory backings **in declaration order**. A memory is never copied in: the backing
     /// names another instance's memory, and instantiation resolves it to that instance's
     /// store slot, so both instances index the same bytes.
@@ -753,6 +763,13 @@ pub struct Imports {
     /// Table backings **in declaration order**, each naming another instance's table. Like a memory,
     /// never copied — and correct only because a `funcref` now carries its owning instance.
     tables: Vec<TableImport>,
+    /// Tag backings **in declaration order**, each naming another instance's tag.
+    ///
+    /// A tag has no contents; what an import shares is its **identity**, so the backing is nothing
+    /// but a pointer at the exporter's tag slot. That is the whole of S3, and it was refused
+    /// outright until an exception carried a store-wide tag rather than a module-local index —
+    /// linking one before that would have made two modules' unrelated tags catch each other.
+    tags: Vec<TagImport>,
 }
 
 impl fmt::Debug for Imports {
@@ -764,6 +781,7 @@ impl fmt::Debug for Imports {
             .field("globals", &self.globals.len())
             .field("memories", &self.memories.len())
             .field("tables", &self.tables.len())
+            .field("tags", &self.tags.len())
             .finish()
     }
 }
@@ -797,6 +815,13 @@ struct TableImport {
     index: u32,
 }
 
+/// One tag import's backing: another instance's tag, by that instance's own tag index.
+#[derive(Clone, Copy)]
+struct TagImport {
+    instance: InstanceId,
+    index: u32,
+}
+
 impl Imports {
     #[must_use]
     pub fn new() -> Imports {
@@ -825,6 +850,7 @@ impl Imports {
     #[must_use]
     pub fn with_global(mut self, v: Value) -> Imports {
         self.globals.push(v);
+        self.global_sources.push(None);
         self
     }
 
@@ -859,6 +885,23 @@ impl Imports {
     #[must_use]
     pub fn with_instance_table(mut self, instance: InstanceId, index: u32) -> Imports {
         self.tables.push(TableImport { instance, index });
+        self
+    }
+
+    /// Append a global import bound to another instance's exported global — **shared**, so a
+    /// `global.set` through it is visible to the exporter. `value` is the exporter's current value,
+    /// used only for constant expressions evaluated during this instantiation.
+    #[must_use]
+    pub fn with_instance_global(mut self, instance: InstanceId, index: u32, value: Value) -> Imports {
+        self.globals.push(value);
+        self.global_sources.push(Some((instance, index)));
+        self
+    }
+
+    /// Append a tag import, naming another instance's tag by that instance's tag index.
+    #[must_use]
+    pub fn with_instance_tag(mut self, instance: InstanceId, index: u32) -> Imports {
+        self.tags.push(TagImport { instance, index });
         self
     }
 }
@@ -1565,15 +1608,15 @@ impl Store {
 
         // Count the declared imports per kind. Each kind's imports occupy the low indices of
         // its space, so these are also the offsets between an index and its defined slot.
-        let (mut n_funcs, mut n_globals, mut n_mems, mut n_tables) = (0usize, 0, 0, 0);
+        let (mut n_funcs, mut n_globals, mut n_mems, mut n_tables, mut n_tags) =
+            (0usize, 0, 0, 0, 0);
         for imp in &module.imports {
             match imp.ty.kind() {
                 crate::types::ExternKind::Func => n_funcs += 1,
                 crate::types::ExternKind::Global => n_globals += 1,
                 crate::types::ExternKind::Memory => n_mems += 1,
                 crate::types::ExternKind::Table => n_tables += 1,
-                // A tag import needs no host backing — its type is all the engine uses.
-                crate::types::ExternKind::Tag => {}
+                crate::types::ExternKind::Tag => n_tags += 1,
             }
         }
         // Imported tables are LINKABLE as of T9a#4's second half. They were refused until a `funcref`
@@ -1585,6 +1628,7 @@ impl Store {
             || imports.globals.len() != n_globals
             || imports.memories.len() != n_mems
             || imports.tables.len() != n_tables
+            || imports.tags.len() != n_tags
         {
             return Err(Trap::MissingImport);
         }
@@ -1670,12 +1714,39 @@ impl Store {
             return Err(Trap::TableLimitExceeded);
         }
 
+        // ⚠️ An imported global is a store ADDRESS, shared with the exporter — only a
+        // host-supplied one gets a fresh slot of its own. `globals` below carries the *values*,
+        // because a constant expression evaluated during this instantiation needs them; the map
+        // built later is what makes the sharing real.
+        let mut imported_globals: Vec<usize> = Vec::with_capacity(n_globals);
+        let mut host_globals: Vec<Value> = Vec::new();
+        for (i, src) in imports.global_sources.iter().enumerate() {
+            match src {
+                Some((inst, index)) => {
+                    let exporter = self.slot(*inst).ok_or(Trap::MissingImport)?;
+                    let slot = IndexMaps::get(&self.code[exporter].maps.globals, *index as usize);
+                    if slot >= self.pools.globals.len() {
+                        return Err(Trap::MissingImport);
+                    }
+                    imported_globals.push(slot);
+                }
+                // A host value has no owner to share with, so it takes a slot after the defined
+                // ones — appended in a second pass below, once their count is known.
+                None => {
+                    host_globals.push(*imports.globals.get(i).ok_or(Trap::MissingImport)?);
+                    imported_globals.push(usize::MAX);
+                }
+            }
+        }
+
         let mut globals: Vec<Value> = imports.globals;
         globals.reserve(module.global_inits.len());
         for init in &module.global_inits {
             let v = eval_const_expr(init, &globals, self_inst, Some((&module, &mut self.pools)))?;
             globals.push(v);
         }
+        // The values of this module's DEFINED globals — the imported prefix stays where it is.
+        let defined_globals: Vec<Value> = globals[n_globals..].to_vec();
 
         // Imported memories occupy the LOW memory indices, so resolve them first — each to the
         // exporting instance's existing store slot, never to a fresh allocation. `maps.mem`
@@ -1720,6 +1791,37 @@ impl Store {
             });
         }
 
+
+        // Imported tags occupy the LOW tag indices, resolved to the exporter's tag slot — which is
+        // the tag's IDENTITY, and the only thing an import of one shares. §4.5.9 matches a tag by
+        // its type, and a tag type is a function type with no results, so the comparison is the
+        // same cross-module signature check a function import uses.
+        let mut imported_tags: Vec<usize> = Vec::with_capacity(n_tags);
+        {
+            for (declared_index, it) in (0u32..).zip(&imports.tags) {
+                let exporter = self.slot(it.instance).ok_or(Trap::MissingImport)?;
+                // ⚠️ Matched on the tag's TYPE INDEX, resolved to store-wide ids — not on its
+                // signature. `tag.wast` exports a tag of `$t1` from `(rec (type $t1 (func))
+                // (type $t2 (func)))` and asserts that importing it as `$t2` is unlinkable: the
+                // two have identical signatures and are different types, because position within
+                // a rec group is part of identity. Comparing SIGNATURES can never answer an
+                // IDENTITY question — the T9h finding, in a fourth place.
+                let want = module
+                    .tag_type_index(declared_index)
+                    .and_then(|ti| type_ids.get(ti as usize).copied())
+                    .ok_or(Trap::UndefinedTag)?;
+                let got = self.code[exporter]
+                    .module
+                    .tag_type_index(it.index)
+                    .and_then(|ti| self.code[exporter].type_ids.get(ti as usize).copied())
+                    .ok_or(Trap::MissingImport)?;
+                if want != got {
+                    return Err(Trap::IncompatibleImport);
+                }
+                imported_tags
+                    .push(IndexMaps::get(&self.code[exporter].maps.tags, it.index as usize));
+            }
+        }
 
         // Imported tables occupy the LOW table indices — resolved, like memories, to the exporting
         // instance's existing store slot. Correct only because a `funcref` now carries its owning
@@ -1868,25 +1970,42 @@ impl Store {
                     .chain(tbl_base..tbl_base + tables.len())
                     .collect()
             },
-            globals: base(self.pools.globals.len(), globals.len()),
+            // Imported globals keep the exporter's slots; a host-supplied one and every defined
+            // one take fresh slots after them, so index order matches the module's own global
+            // index space.
+            globals: {
+                let g_base = self.pools.globals.len();
+                let mut next = g_base + defined_globals.len();
+                imported_globals
+                    .iter()
+                    .map(|&slot| {
+                        if slot == usize::MAX {
+                            next += 1;
+                            next - 1 // a host value: its own slot, appended after the defined ones
+                        } else {
+                            slot
+                        }
+                    })
+                    .chain(g_base..g_base + defined_globals.len())
+                    .collect()
+            },
             data: base(self.pools.data_dropped.len(), data_dropped.len()),
             elems: base(self.pools.elem_values.len(), elem_values.len()),
-            // Imported tags occupy the low indices and cannot link yet, so they map to no slot.
+            // Imported tags keep the exporter's slots; defined ones take fresh slots after them,
+            // so index order matches the module's own tag index space.
             tags: {
-                let imported = module
-                    .imports
-                    .iter()
-                    .filter(|i| matches!(i.ty, crate::module::Extern::Tag(_)))
-                    .count();
                 let tag_base = self.pools.tags.len();
-                core::iter::repeat_n(usize::MAX, imported)
+                imported_tags
+                    .iter()
+                    .copied()
                     .chain(tag_base..tag_base + module.tags.len())
                     .collect()
             },
         };
         self.pools.memories.extend(memories);
         self.pools.tables.extend(tables);
-        self.pools.globals.extend(globals);
+        self.pools.globals.extend(defined_globals);
+        self.pools.globals.extend(host_globals);
         self.pools.data_dropped.extend(data_dropped);
         self.pools.elem_values.extend(elem_values);
         self.pools.elem_dropped.extend(elem_dropped);

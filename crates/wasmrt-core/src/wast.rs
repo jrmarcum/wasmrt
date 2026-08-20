@@ -197,6 +197,7 @@ impl Runner {
             "assert_return" => self.assert_return(list),
             "assert_trap" => self.assert_trap(list),
             "assert_exhaustion" => self.assert_exhaustion(list),
+            "assert_exception" => self.assert_exception(list),
             "assert_invalid" => self.assert_rejected(list, Rejection::Invalid),
             "assert_malformed" => self.assert_rejected(list, Rejection::Malformed),
             "assert_unlinkable" => self.assert_unlinkable(list),
@@ -622,6 +623,39 @@ impl Runner {
             Err(ActionErr::Trap(t)) => self.fail(format!("assert_exhaustion: got {t}")),
             Err(ActionErr::NoTarget) => {
                 self.skip(String::from("assert_exhaustion: no target instance"));
+            }
+            Err(ActionErr::Bad(m)) => self.fail(m),
+        }
+    }
+
+    /// `assert_exception action` — the action must raise an exception that **nothing catches**
+    /// (EH).
+    ///
+    /// ⚠️ Distinguished from a plain trap on purpose. An uncaught exception and a division by zero
+    /// both end a call, and scoring either as "it stopped, so it passed" would let a handler bug
+    /// hide behind an unrelated trap — `try_table.wast` asserts both against the same exports.
+    /// [`Trap::UncaughtException`] is the one outcome this command accepts.
+    ///
+    /// 41 assertions, all of them skipped as an `unhandled command` until 2026-08-20: the runner
+    /// simply had no arm for it, and the skip census is what surfaced that it was a whole command
+    /// rather than a scatter of unrelated gaps.
+    fn assert_exception(&mut self, form: &[Sexpr]) {
+        let Some(action) = form.get(1) else {
+            self.fail("assert_exception: missing action".to_string());
+            return;
+        };
+        match self.run_action(action) {
+            Ok(_) => self.fail(format!(
+                "assert_exception {}: expected an uncaught exception, got a result",
+                render(action)
+            )),
+            Err(ActionErr::Trap(Trap::UncaughtException)) => self.summary.passed += 1,
+            Err(ActionErr::Trap(t)) => self.fail(format!(
+                "assert_exception {}: expected an uncaught exception, got {t}",
+                render(action)
+            )),
+            Err(ActionErr::NoTarget) => {
+                self.skip(String::from("assert_exception: no target instance"));
             }
             Err(ActionErr::Bad(m)) => self.fail(m),
         }
@@ -1356,7 +1390,7 @@ mod tests {
             // is `i64.add128` (wide-arithmetic) now. **Swap it the day wide-arithmetic lands** —
             // and when nothing is left unimplemented, delete this arm rather than fake it: at
             // that point there is no "module: unsupported" skip left to record a reason for.
-            br#"(assert_exception (invoke "nope"))
+            br#"(assert_flurb (invoke "nope"))
                 (module (func (export "f") (result i64)
                   (i64.add128 (i64.const 1) (i64.const 0) (i64.const 1) (i64.const 0))))
                 (assert_return (invoke "f") (i64.const 1))
@@ -1412,8 +1446,36 @@ mod tests {
 
     #[test]
     fn unknown_commands_are_skipped() {
-        let s = run(r#"(assert_exception (invoke "f"))"#);
+        let s = run(r#"(assert_flurb (invoke "f"))"#);
         assert_eq!(s.skipped, 1);
         assert_eq!(s.passed + s.failed, 0);
+    }
+
+    /// `assert_exception` accepts ONE outcome: an exception nothing caught. A plain trap is not
+    /// it — scoring "the call ended" as a pass would let a handler bug hide behind an unrelated
+    /// trap, and the same exports carry both kinds of assertion in `try_table.wast`.
+    #[test]
+    fn assert_exception_distinguishes_an_exception_from_a_trap() {
+        let s = run(
+            r#"(module
+                 (tag $e)
+                 (func (export "throws") (throw $e))
+                 (func (export "traps") (unreachable))
+                 (func (export "caught") (block $h (try_table (catch_all $h) (throw $e)))))
+               (assert_exception (invoke "throws"))"#,
+        );
+        assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
+
+        for bad in ["traps", "caught"] {
+            let s = run(&format!(
+                r#"(module
+                     (tag $e)
+                     (func (export "throws") (throw $e))
+                     (func (export "traps") (unreachable))
+                     (func (export "caught") (block $h (try_table (catch_all $h) (throw $e)))))
+                   (assert_exception (invoke "{bad}"))"#
+            ));
+            assert_eq!((s.passed, s.failed), (0, 1), "{bad} must not satisfy it");
+        }
     }
 }

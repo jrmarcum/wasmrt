@@ -158,7 +158,8 @@ pub struct Import {
     pub module: String,
     pub name: String,
     pub ty: Extern,
-    /// For a **function** import, the type **index** it was declared with; `None` for other kinds.
+    /// For a **function** or **tag** import, the type **index** it was declared with; `None` for
+    /// the other kinds.
     ///
     /// `ty` resolves that index to a `FuncType` structure, which is what the engine runs on — but a
     /// structure cannot answer *which type* this is, and for import matching that is the question.
@@ -321,6 +322,12 @@ impl Module {
         self.imports.iter().filter(|i| matches!(i.ty, Extern::Func(_))).count() as u32
     }
 
+    /// Number of imported exception tags.
+    #[must_use]
+    pub fn imported_tag_count(&self) -> u32 {
+        self.imports.iter().filter(|i| matches!(i.ty, Extern::Tag(_))).count() as u32
+    }
+
     /// Number of imported tables.
     #[must_use]
     pub fn imported_table_count(&self) -> u32 {
@@ -370,6 +377,22 @@ impl Module {
             CompType::Func(f) => Some(f.clone()),
             _ => None,
         }
+    }
+
+    /// The **type index** an exception tag names (imports first, then defined), which is the tag's
+    /// identity for §4.5.9 matching — [`Self::tag_type`] gives only its shape.
+    #[must_use]
+    pub fn tag_type_index(&self, tag_index: u32) -> Option<u32> {
+        let mut i: u32 = 0;
+        for imp in &self.imports {
+            if matches!(imp.ty, Extern::Tag(_)) {
+                if i == tag_index {
+                    return imp.func_type_index;
+                }
+                i += 1;
+            }
+        }
+        self.tags.get((tag_index - i) as usize).copied()
     }
 
     /// The function type an exception `tag` names (imports first, then defined).
@@ -1327,6 +1350,11 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
                 let ti = r.read_var_u32()?;
                 let ft = func_type_at(d, ti)?;
                 d.tag_space.push(ft.clone());
+                // ⚠️ Keep the INDEX as well as the structure, for the same reason a function import
+                // does: §4.5.9 matches a tag by its defined TYPE, and two tags can both be `(func)`
+                // and still be different types — rec-group membership is part of identity and only
+                // the index carries it. `tag.wast`'s link-time typing section is exactly that case.
+                func_type_index = Some(ti);
                 Extern::Tag(ft)
             }
         };

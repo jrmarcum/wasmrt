@@ -307,9 +307,15 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
         }
     }
 
-    // Tag types (§3.2, EH): a tag's type must be `[t1*] → []`.
-    for &ti in &module.tags {
-        let ft = module.func_sig(ti).ok_or(ValidateError::UndefinedType)?;
+    // Tag types (§3.2, EH): a tag's type must be `[t1*] -> []`.
+    //
+    // ⚠️ IMPORTED tags too. `module.tags` holds only the DEFINED ones, so
+    // `(import "" "" (tag (result i32)))` was never checked here — `tag.wast` asserts it is
+    // invalid, and while imported tags could not link at all the module failed later, at the link:
+    // the right verdict from the wrong stage.
+    let n_tags = module.imported_tag_count() + module.tags.len() as u32;
+    for i in 0..n_tags {
+        let ft = module.tag_type(i).ok_or(ValidateError::UndefinedType)?;
         if !ft.results.is_empty() {
             return Err(ValidateError::InvalidTag);
         }

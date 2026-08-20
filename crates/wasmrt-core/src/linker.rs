@@ -294,11 +294,15 @@ impl Linker {
                         Some(Def::Func(_) | Def::Memory { .. } | Def::Table { .. }) => return Err(mismatch()),
                         Some(_) => unreachable!("not stored in `defs`"),
                         None => match self.namespace(&imp.module) {
-                            // A registered instance's exported global links by value — so this
-                            // is the only place its declared TYPE is still known. Checking it
-                            // here rather than at instantiation is not a split authority but a
-                            // consequence of that: `Imports` carries a bare `Value`, which
-                            // cannot say `i32` from `f32`, let alone mutable from not.
+                            // A registered instance's exported global is bound by REFERENCE —
+                            // an imported global is a store address, so a `global.set` through it
+                            // is visible to the exporter (`instance.wast`, "Import is not
+                            // generative"). The value travels alongside only so that a constant
+                            // expression evaluated during instantiation can read it.
+                            //
+                            // The declared TYPE is checked here because this is the last place it
+                            // is known: `Imports` carries a bare `Value`, which cannot say `i32`
+                            // from `f32`, let alone mutable from not.
                             Some(Def::Instance(id)) => {
                                 let declared = match &imp.ty {
                                     crate::module::Extern::Global(gt) => *gt,
@@ -310,7 +314,12 @@ impl Linker {
                                         name: imp.name.clone(),
                                     });
                                 }
-                                store.export_global(*id, &imp.name).ok_or_else(unknown)?
+                                let index = store
+                                    .export_index(*id, &imp.name, ExternKind::Global)
+                                    .ok_or_else(unknown)?;
+                                let v = store.export_global(*id, &imp.name).ok_or_else(unknown)?;
+                                imports = imports.with_instance_global(*id, index, v);
+                                continue;
                             }
                             _ => return Err(unknown()),
                         },
@@ -360,9 +369,28 @@ impl Linker {
                     };
                     imports = imports.with_instance_table(inst, index);
                 }
-                // A tag import needs no backing at all, but nothing publishes one by name yet —
-                // refused loudly rather than half-linked.
-                other => return Err(LinkError::UnsupportedImportKind(other)),
+                ExternKind::Tag => {
+                    // A tag import shares the exporter's tag IDENTITY, which is a store slot —
+                    // so it resolves exactly as a table does, to (instance, that instance's tag
+                    // index). Refused outright until an exception carried a store-wide tag: before
+                    // that, two modules' unrelated tags would have caught each other's throws.
+                    let (inst, index) = match self.exact(&imp.module, &imp.name) {
+                        Some(
+                            Def::Func(_) | Def::Global(_) | Def::Memory { .. } | Def::Table { .. },
+                        ) => return Err(mismatch()),
+                        Some(_) => unreachable!("not stored in `defs`"),
+                        None => match self.namespace(&imp.module) {
+                            Some(Def::Instance(id)) => {
+                                let index = store
+                                    .export_index(*id, &imp.name, ExternKind::Tag)
+                                    .ok_or_else(unknown)?;
+                                (*id, index)
+                            }
+                            _ => return Err(unknown()),
+                        },
+                    };
+                    imports = imports.with_instance_tag(inst, index);
+                }
             }
         }
         Ok(imports)
