@@ -439,7 +439,19 @@ fn run_wast(rest: &[String]) -> ExitCode {
                     let key = r.split_once(" (").map_or(r.as_str(), |(h, _)| h).to_string();
                     *skip_census.entry(key).or_default() += 1;
                 }
-                if verbose || s.failed > 0 || s.skipped > 0 {
+                // ⚠️⚠️ **EVERY file prints a row, including a clean one.** The condition here
+                // was `verbose || s.failed > 0 || s.skipped > 0`, and that left the per-file gate
+                // (`scripts/conformance-diff.sh`) structurally blind in one direction: a clean
+                // file is absent from the baseline, so it has no recorded pass count, so passes
+                // it later loses to SKIPS cannot be detected. The gate's own header records two
+                // earlier holes of this family; this is the third, and X1 landed in it —
+                // `custom-page-sizes/memory_max.wast` went 2 passed -> 0 passed / 6 skipped and
+                // the gate printed "no file lost a pass".
+                //
+                // 🎓 The rule the project already had: *a gate that cannot fail is decoration.*
+                // Here it could fail, but only for files that were already failing. 288 rows is
+                // a cheap price for a join with no missing side.
+                {
                     println!("{name}: {s}");
                     if verbose {
                         // All recorded failures, not a sample: triaging a file means seeing

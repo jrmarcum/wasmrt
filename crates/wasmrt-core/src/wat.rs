@@ -1661,6 +1661,32 @@ fn find_exports(items: &[Sexpr]) -> Result<Vec<Vec<u8>>> {
     Ok(out)
 }
 
+/// Refuse a `(pagesize N)` clause on a memory type — the **custom-page-sizes** proposal, which
+/// this build does not implement (Track P).
+///
+/// ⚠️⚠️ **Until 2026-09-17 the clause was parsed and SILENTLY THROWN AWAY.** Neither memory-type
+/// parser looked past the limits, so `(memory 1 (pagesize 1))` assembled to bytes
+/// **byte-identical to `(memory 1)`**: a guest asking for a one-byte memory got 64 KiB, and every
+/// access that had to trap succeeded instead. That is the silent-wrong-output class this port
+/// ranks worst, and it was reachable from plain text input. wasmtime refuses the same source.
+///
+/// 🔒 **Refusing is the safe direction** — a module wasmrt will not run cannot answer wrongly —
+/// and it is what the sibling runtime did before implementing the proposal. When Track P lands,
+/// this guard is *replaced* by real page-size plumbing, not merely deleted: every bounds check
+/// that compares against `pages × 65536` has to learn the declared page size first.
+///
+/// ⚠️ **Called from BOTH memory-type parsers**, because a memory type is read in two places —
+/// `parse_memory_field` and the `"memory"` arm of [`parse_import_field`] — and a guard that sits
+/// in only one of them refuses only half the forms the corpus spells. The clause travels in two
+/// positions (after the limits, and before an inline `(data …)`), so this scans the whole form
+/// rather than one index.
+fn check_no_page_size(items: &[Sexpr]) -> Result<()> {
+    if items.iter().any(|s| eq_kw(s, "pagesize")) {
+        return Err(Error::Unsupported("custom-page-sizes"));
+    }
+    Ok(())
+}
+
 /// Skip over inline `(import …)` / `(export …)` clauses.
 fn skip_inline_clauses(items: &[Sexpr], j: &mut usize) {
     while items
@@ -1885,6 +1911,7 @@ fn consume_matching_label(ctx: &Ctx, items: &[Sexpr], at: usize) -> Result<usize
 }
 
 fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
+    check_no_page_size(items)?;
     let mut j = 1;
     let name = opt_name(items, &mut j);
     let import = find_import(items)?;
@@ -2216,6 +2243,7 @@ fn parse_import_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             b.func_names.push(name);
         }
         "memory" => {
+            check_no_page_size(desc)?;
             let mut is64 = false;
             if desc.get(j).is_some_and(|s| eq_atom(s, "i64")) {
                 is64 = true;
@@ -6593,5 +6621,57 @@ mod emitter_coverage_tests {
         .expect("must assemble");
         let md = crate::module::decode(&m).expect("must decode");
         crate::validate::validate(&md).expect("must validate");
+    }
+
+    /// X1 — every text spelling of a `(pagesize N)` memory must be REFUSED, not silently
+    /// stripped.
+    ///
+    /// ⚠️⚠️ **This is a wrong-ANSWER test, not a conformance test.** Until 2026-09-17
+    /// `(memory 1 (pagesize 1))` assembled to bytes byte-identical to `(memory 1)`, so a guest
+    /// asking for a one-byte memory got 64 KiB and every access that had to trap returned 0.
+    /// The spec suite could not see it: our assembler and our decoder agreed, and the corpus
+    /// asserts *behaviour* of a proposal we do not implement, so the module simply "worked".
+    ///
+    /// 🔒 **The clause travels in two positions and through two parsers.** After the limits, and
+    /// before an inline `(data …)`; via `(memory …)` and via `(import … (memory …))`. All four
+    /// combinations are pinned, because the first guard written covered only one parser.
+    #[test]
+    fn a_page_size_clause_is_refused_in_every_position() {
+        for src in [
+            br#"(module (memory 1 (pagesize 1)))"#.as_slice(),
+            br#"(module (memory $m 1 2 (pagesize 65536)))"#.as_slice(),
+            br#"(module (memory (pagesize 1) (data "xyz")))"#.as_slice(),
+            br#"(module (memory (export "m") 0 (pagesize 1)))"#.as_slice(),
+            br#"(module (memory i64 1 (pagesize 65536)))"#.as_slice(),
+            br#"(module (import "a" "b" (memory 1 (pagesize 1))))"#.as_slice(),
+            br#"(module (memory (import "m" "x") 0 (pagesize 65536)))"#.as_slice(),
+        ] {
+            assert_eq!(
+                assemble(src).err(),
+                Some(Error::Unsupported("custom-page-sizes")),
+                "a page-size clause must be refused by name: {}",
+                core::str::from_utf8(src).unwrap()
+            );
+        }
+    }
+
+    /// The other half, and the half a guard gets wrong: a plain memory must still assemble.
+    /// A refusal that also refuses MVP memories is not a fix, and X3 demands this test shape for
+    /// every gated proposal — the flag refuses its own feature and nothing else.
+    #[test]
+    fn a_plain_memory_still_assembles() {
+        for src in [
+            br#"(module (memory 1))"#.as_slice(),
+            br#"(module (memory 1 2))"#.as_slice(),
+            br#"(module (memory 1 2 shared))"#.as_slice(),
+            br#"(module (memory i64 1))"#.as_slice(),
+            br#"(module (memory (data "xyz")))"#.as_slice(),
+            br#"(module (import "a" "b" (memory 1)))"#.as_slice(),
+            br#"(module (memory (import "m" "x") 0))"#.as_slice(),
+        ] {
+            let m = assemble(src)
+                .unwrap_or_else(|e| panic!("{} must assemble: {e}", core::str::from_utf8(src).unwrap()));
+            crate::module::decode(&m).expect("and decode");
+        }
     }
 }
