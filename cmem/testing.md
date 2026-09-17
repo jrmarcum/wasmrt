@@ -82,7 +82,8 @@ adjudicated 64,142 → 64,134, passes unchanged because the removed assertions w
 `assert_invalid` stage fix, the bare-index segment spellings, `spectest.shared_memory`, X2's clause
 sweep, and **Track W complete** (`wide-arithmetic.wast` **0/1/108 → 107/0/0**). No file lost a pass at
 any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **528/532** ⚠️ *(not 530 — the corpus loop keyed on the CLI's exit status, which is 0 even when validation fails; reading the verdict instead exposed two pre-existing failures. All four are corpus defects wasmtime also refuses.)*.
-⚠️ **Miri NOT RUN** — not installed on this host; the 28/28 on record is not re-verified.
+✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
+Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
 ### 🔬 2026-09-17 — A THIRD HOLE IN THE PER-FILE GATE: a clean file has no row
 

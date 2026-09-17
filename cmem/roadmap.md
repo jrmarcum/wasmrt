@@ -189,7 +189,7 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 ##### 🚦 HANDOFF — where to pick up (2026-09-17, end of day 3)
 
 **State: 64,068 / 66 / 549 over 288 files, 503 workspace tests, C-ABI gate PASSED, `.wat` corpus
-528/532, everything committed and pushed.** ⚠️ **Miri NOT RUN all day** — not installed on this host.
+528/532, Miri **31/31**, everything committed and pushed.**
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -208,6 +208,11 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
   of `exact.wast`'s passes are false.
 * The `custom/` work will **convert skips into verdicts**, and some will be failures.
 
+✅ **Every gate is green and re-verified on this host**: 503 workspace tests, C-ABI gate (74 symbols),
+Miri **31/31**, `conformance-diff.sh` per file, `.wat` corpus 528/532. ⚠️ **Miri needs
+`rustup component add miri` on a fresh machine** — it is a rustup component, not a separate install,
+and `rust-toolchain.toml` already pins the nightly it requires. `bash scripts/miri-gate.sh`, ~28s.
+
 🎓 **Three things to carry into tomorrow, all paid for today:**
 1. **Re-measure the corpus before trusting a delta.** wasmtk syncs it; the file count is part of the
    measurement (§1.7). Day 3 opened on numbers that were four files stale and a failure total that
@@ -222,8 +227,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 ##### ✅ DAY 3 (2026-09-17) — X1, X2, X3, the M/A residue, **TRACK W**, the threads patch and the **`Op`→u16** move. `[x]`
 
 **64,068 / 66 / 549 over 288 files**, 503 workspace tests, C-ABI gate PASSED, gate green at every step.
-⚠️ **Miri NOT RUN** — not installed on this host; the 28/28 on record is from an earlier session and is
-not re-verified.
+✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 
 🔻 **FIRST: THE BASELINE MOVED UNDER US, and the totals hid it.** wasmtk synced the vendored testsuite to
 upstream `65a43d2e` on **2026-08-20 at 18:34**, after day 2's numbers were recorded. Re-measured rather

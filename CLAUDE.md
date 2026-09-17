@@ -33,8 +33,8 @@ CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 3 landed 2026-09-17, all
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,068 / 66 / 549** of 64,134 over **288**
 files), **503 workspace tests**, C-ABI gate PASSED, `.wat` corpus **528/532** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a pass in any
-pass. ⚠️ **Miri NOT RUN on day 3** — not installed on this host, so the 28/28 on record is not
-re-verified.
+pass. ✅ **Miri 31/31 PASSED on day 3** — ⚠️ 31, not the 28 on record; the crate gained tests and
+nobody re-counted.
 🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
 **0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; and **`proposals/threads/` is at
 497 / 0 / 0** after the owner-directed vendored patch. **custom-descriptors is now 65/451 — 98% of

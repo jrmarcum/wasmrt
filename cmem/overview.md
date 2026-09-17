@@ -99,7 +99,7 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   **X1/X2/X3**, the whole M/A residue, and **track W — wide arithmetic** (`wide-arithmetic.wast`
   0/1/108 → **107/0/0**). **623 assertions remain, and 516 of them are custom-descriptors.**
   ⚠️ **Track D is blocked on a representation decision**: `Op` is `#[repr(u8)]` and track W's four tags
-  took the last four free bytes. ⚠️ **Miri not re-verified on day 3** (not installed on this host).
+  took the last four free bytes. ✅ **Miri 31/31 on day 3** (2026-09-17) — ⚠️ 31, not the 28 on record; the crate gained tests.
   🔻 The vendored corpus moved on 2026-08-20 (upstream sync, +4 files), so every figure before that has a
   denominator that no longer exists — re-measure, never quote (`best-practices.md` §1.7).
 
