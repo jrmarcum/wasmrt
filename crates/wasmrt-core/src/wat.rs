@@ -1923,10 +1923,10 @@ fn classify_unknown_mnemonic(name: &str) -> Error {
     if name.contains("desc") {
         return Error::UnimplementedInstr;
     }
-    // wide-arithmetic.
-    if matches!(name, "i64.add128" | "i64.sub128" | "i64.mul_wide_s" | "i64.mul_wide_u") {
-        return Error::UnimplementedInstr;
-    }
+    // ⚠️ wide-arithmetic's four mnemonics were listed here until 2026-09-17. Track W implemented
+    // them, so the entry came out the same day — leaving it would make the assembler refuse four
+    // instructions the decoder, validator and interpreter all handle, and score that refusal as
+    // OUR gap, which is how a finished feature comes to look unfinished.
     // ⚠️ `any.convert_extern` / `extern.convert_any` were listed here until 2026-08-20. They are
     // implemented now (S1 — the tagged `Value` representation), so leaving them would have made
     // the assembler refuse an instruction the rest of the engine handles, and score it as OUR gap.
@@ -2365,7 +2365,7 @@ fn parse_import_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let mut j = 1;
     let name = opt_name(items, &mut j);
-    let mut table_index = 0u32;
+    let table_index;
     let mut offset: Option<Vec<Sexpr>> = None;
     let mut declarative = false;
     let mut elem_type = V::FUNCREF;
@@ -2438,7 +2438,7 @@ fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 fn parse_data_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let mut j = 1;
     let name = opt_name(items, &mut j);
-    let mut mem_index = 0u32;
+    let mem_index;
     let mut offset: Option<Vec<Sexpr>> = None;
     if let Some(s) = items.get(j).filter(|s| eq_kw(s, "memory")) {
         mem_index = resolve_by_name(&b.mem_names, nth(want_list(s)?, 1)?)?;
@@ -3531,6 +3531,16 @@ fn emit_op_with_immediates(
                 O::DataDrop => 9,
                 O::MemoryCopy => 10,
                 _ => 11,
+            };
+            uleb(&mut ctx.out, sub);
+        }
+        O::I64Add128 | O::I64Sub128 | O::I64MulWideS | O::I64MulWideU => {
+            ctx.out.push(0xfc);
+            let sub: u64 = match op {
+                O::I64Add128 => 19,
+                O::I64Sub128 => 20,
+                O::I64MulWideS => 21,
+                _ => 22,
             };
             uleb(&mut ctx.out, sub);
         }

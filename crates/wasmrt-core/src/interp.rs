@@ -3064,6 +3064,46 @@ fn run(
                     exec_memory_fill(frame, store, ctx.maps, instr)?;
                     pc += 1;
                 }
+
+                // --- wide arithmetic ---
+                //
+                // A 128-bit value travels as a PAIR of i64s, low half pushed first, and each of
+                // these returns two. 🔒 **Transposing a pair type-checks perfectly and returns
+                // wrong numbers** — every operand and every result here is an `i64`, so neither
+                // the validator nor the conformance score can see the mistake. The order is
+                // pinned by wrong-answer tests: a carry out of the low half, a borrow into it,
+                // and a signed/unsigned pair that differs ONLY in the high half.
+                Op::I64Add128 | Op::I64Sub128 => {
+                    let b_hi = frame.pop_i64();
+                    let b_lo = frame.pop_i64();
+                    let a_hi = frame.pop_i64();
+                    let a_lo = frame.pop_i64();
+                    let a = u128::from(a_lo as u64) | (u128::from(a_hi as u64) << 64);
+                    let b = u128::from(b_lo as u64) | (u128::from(b_hi as u64) << 64);
+                    let r = if instr.op == Op::I64Add128 {
+                        a.wrapping_add(b)
+                    } else {
+                        a.wrapping_sub(b)
+                    };
+                    frame.push_i64(r as u64 as i64);
+                    frame.push_i64((r >> 64) as u64 as i64);
+                    pc += 1;
+                }
+                Op::I64MulWideS | Op::I64MulWideU => {
+                    let b = frame.pop_i64();
+                    let a = frame.pop_i64();
+                    // ⚠️ The two differ only in the HIGH half: `mul_wide_u(-1, 1)` is
+                    // `(lo -1, hi 0)` while `mul_wide_s(-1, 1)` is `(lo -1, hi -1)`. A
+                    // sign-extension slip here is invisible in the low result.
+                    let r: u128 = if instr.op == Op::I64MulWideS {
+                        (i128::from(a).wrapping_mul(i128::from(b))) as u128
+                    } else {
+                        u128::from(a as u64).wrapping_mul(u128::from(b as u64))
+                    };
+                    frame.push_i64(r as u64 as i64);
+                    frame.push_i64((r >> 64) as u64 as i64);
+                    pc += 1;
+                }
                 Op::MemoryInit => {
                     exec_memory_init(frame, ctx, store, instr)?;
                     pc += 1;
@@ -8593,5 +8633,60 @@ mod start_tests {
         let b = store.instantiate(build(src), Imports::default()).unwrap();
         assert_eq!(store.invoke(a, "get", &[]), Ok(vec![1]));
         assert_eq!(store.invoke(b, "get", &[]), Ok(vec![1]), "each instance has its own global");
+    }
+
+    /// **Track W's soundness checkpoint.** A 128-bit value travels as a PAIR of i64 halves, so
+    /// transposing a pair type-checks perfectly — every operand and every result is an `i64` —
+    /// and returns wrong numbers. Neither the validator nor a conformance score can see it.
+    ///
+    /// 🔒 So the pairing is pinned by cases that are WRONG under a transposition, which the
+    /// track's scope named in advance: **a carry** out of the low half, **a borrow** into it,
+    /// and a **signed/unsigned pair that differs only in the HIGH half**. A symmetric case like
+    /// `1 + 1` would pass under any of those mistakes, which is why none is used here.
+    #[test]
+    fn wide_arithmetic_keeps_its_halves_in_order() {
+        let bytes = crate::wat::assemble(
+            br#"(module
+                  (func (export "add128") (param i64 i64 i64 i64) (result i64 i64)
+                    (i64.add128 (local.get 0) (local.get 1) (local.get 2) (local.get 3)))
+                  (func (export "sub128") (param i64 i64 i64 i64) (result i64 i64)
+                    (i64.sub128 (local.get 0) (local.get 1) (local.get 2) (local.get 3)))
+                  (func (export "mul_s") (param i64 i64) (result i64 i64)
+                    (i64.mul_wide_s (local.get 0) (local.get 1)))
+                  (func (export "mul_u") (param i64 i64) (result i64 i64)
+                    (i64.mul_wide_u (local.get 0) (local.get 1))))"#,
+        )
+        .expect("must assemble");
+        let md = crate::module::decode(&bytes).expect("must decode");
+        crate::validate::validate(&md).expect("must validate");
+        let mut store = Store::new();
+        let id = store.instantiate(md, Imports::new()).expect("must instantiate");
+
+        let call = |store: &mut Store, name: &str, args: &[i64]| -> (i64, i64) {
+            let vals: Vec<Value> = args.iter().map(|a| i64_value(*a)).collect();
+            let out = store.invoke(id, name, &vals).expect("must not trap");
+            assert_eq!(out.len(), 2, "{name} returns two i64s");
+            (as_i64(out[0]), as_i64(out[1]))
+        };
+
+        // A CARRY out of the low half: (lo=-1, hi=0) + (lo=1, hi=0) = 2^64, i.e. (lo 0, hi 1).
+        // Transposed, this would answer (lo 0, hi 0) or carry into the wrong place.
+        assert_eq!(call(&mut store, "add128", &[-1, 0, 1, 0]), (0, 1), "carry out of the low half");
+        // The results are ordered LOW first: 1 + 2^64 = (lo 1, hi 1) is symmetric and would not
+        // detect an ordering slip, so use an asymmetric one — (lo 0, hi 1) + (lo 2, hi 0).
+        assert_eq!(call(&mut store, "add128", &[0, 1, 2, 0]), (2, 1), "results are low-half first");
+
+        // A BORROW into the low half: (lo=0, hi=1) − (lo=1, hi=0) = 2^64 − 1 = (lo -1, hi 0).
+        assert_eq!(call(&mut store, "sub128", &[0, 1, 1, 0]), (-1, 0), "borrow into the low half");
+        // And the operands are NOT commutative: a − b, never b − a.
+        assert_eq!(call(&mut store, "sub128", &[0, 0, 1, 0]), (-1, -1), "a - b, in that order");
+
+        // The signed/unsigned pair that differs ONLY in the high half — a sign-extension slip is
+        // invisible in the low result, so the high half is the whole test.
+        assert_eq!(call(&mut store, "mul_s", &[-1, 1]), (-1, -1), "signed: high half sign-extends");
+        assert_eq!(call(&mut store, "mul_u", &[-1, 1]), (-1, 0), "unsigned: high half is zero");
+        // (-1) * (-1) = 1 signed, but 2^128 - 2^65 + 1 unsigned: both halves differ.
+        assert_eq!(call(&mut store, "mul_s", &[-1, -1]), (1, 0), "signed: (-1)*(-1) = 1");
+        assert_eq!(call(&mut store, "mul_u", &[-1, -1]), (1, -2), "unsigned: the same bits, widened");
     }
 }

@@ -77,6 +77,13 @@ pub enum Feature {
     /// it. Moving it here would change what an existing embedder's config rejects for no safety
     /// gain — both flags default on, and disabling function-references already removes it.
     TailCall,
+    /// Wide arithmetic: `i64.add128`, `i64.sub128`, `i64.mul_wide_s`, `i64.mul_wide_u`
+    /// (`0xFC 0x13`–`0x16`). Each carries a 128-bit value as a pair of i64 halves and returns
+    /// two results, so it also needs [`Feature::MultiValue`] to be *usable* — but not to be
+    /// *defined*, and the two are gated separately: a function type with two results is
+    /// already refused by the multi-value gate, and adding a dependency here would refuse the
+    /// instruction for a reason that is not about this proposal.
+    WideArithmetic,
 }
 
 impl Feature {
@@ -100,6 +107,7 @@ impl Feature {
             Feature::Gc => "gc",
             Feature::Exceptions => "exception-handling",
             Feature::TailCall => "tail-call",
+            Feature::WideArithmetic => "wide-arithmetic",
         }
     }
 }
@@ -130,6 +138,7 @@ pub struct Features {
     pub gc: bool,
     pub exceptions: bool,
     pub tail_call: bool,
+    pub wide_arithmetic: bool,
 }
 
 impl Default for Features {
@@ -178,6 +187,7 @@ impl Features {
             gc: true,
             exceptions: true,
             tail_call: true,
+            wide_arithmetic: true,
         }
     }
 
@@ -200,6 +210,7 @@ impl Features {
             gc: false,
             exceptions: false,
             tail_call: false,
+            wide_arithmetic: false,
         }
     }
 
@@ -222,6 +233,7 @@ impl Features {
             Feature::Gc => self.gc,
             Feature::Exceptions => self.exceptions,
             Feature::TailCall => self.tail_call,
+            Feature::WideArithmetic => self.wide_arithmetic,
         }
     }
 
@@ -243,6 +255,7 @@ impl Features {
             Feature::Gc => self.gc = on,
             Feature::Exceptions => self.exceptions = on,
             Feature::TailCall => self.tail_call = on,
+            Feature::WideArithmetic => self.wide_arithmetic = on,
         }
     }
 
@@ -323,6 +336,9 @@ pub const fn op_feature(op: Op) -> Option<Feature> {
             Feature::SignExtension
         }
 
+        // --- wide arithmetic ---
+        I64Add128 | I64Sub128 | I64MulWideS | I64MulWideU => Feature::WideArithmetic,
+
         // --- non-trapping float→int ---
         I32TruncSatF32S | I32TruncSatF32U | I32TruncSatF64S | I32TruncSatF64U
         | I64TruncSatF32S | I64TruncSatF32U | I64TruncSatF64S | I64TruncSatF64U => {
@@ -333,6 +349,24 @@ pub const fn op_feature(op: Op) -> Option<Feature> {
         _ => return None,
     })
 }
+
+/// The ops [`op_feature`] deliberately leaves ungated, by internal tag byte — WebAssembly 1.0,
+/// which no flag can switch off.
+///
+/// ⚠️⚠️ **`op_feature`'s doc comment used to claim the match was "exhaustive over `Op`", so that
+/// "a new opcode shows up here as an explicit decision rather than silently defaulting to
+/// 'always allowed'". IT IS NOT — it ends in `_ => return None`**, and the four wide-arithmetic
+/// ops landed ungated because of it: added to the enum, wired through decoder, assembler,
+/// validator and interpreter, and refusable by no flag at all. That is X3's failure mode
+/// exactly — *a proposal that ships without a gate is not "enabled by default", it is
+/// UNREFUSABLE* — and the comment asserting the protection is the reason nobody would look.
+///
+/// 🔒 So the property is pinned by DATA instead of by a claim. Adding an op now either gives it
+/// a feature (this list does not move) or shows up here as a visible, deliberate diff.
+/// `best-practices.md`: a gate that cannot fail is decoration — and a gate that exists only in
+/// a doc comment is not even that.
+#[cfg(test)]
+const UNGATED_CORE_OPS: usize = 178;
 
 /// Lowest relaxed-SIMD sub-opcode in the `0xFD` space (`i8x16.relaxed_swizzle`).
 pub const RELAXED_SIMD_FIRST: u32 = 0x100;
@@ -592,6 +626,85 @@ mod tests {
         assert!(
             crate::validate::validate_with_features(&module, &no_funcrefs).is_ok(),
             "return_call must not be gated by function-references"
+        );
+    }
+
+    /// Every `Op` is either gated by a proposal or deliberately listed as WebAssembly 1.0.
+    ///
+    /// ⚠️⚠️ **This exists because the property it checks was ASSERTED IN A DOC COMMENT and was
+    /// false.** [`op_feature`] said the match was "exhaustive over `Op`", so "a new opcode shows
+    /// up here as an explicit decision rather than silently defaulting to 'always allowed'". It
+    /// ends in `_ => return None`. The four wide-arithmetic ops were added to the enum, wired
+    /// through the decoder, the assembler, the validator and the interpreter — and were
+    /// refusable by no flag, because the catch-all quietly classified them as core 1.0. That is
+    /// X3's failure mode word for word: *a proposal that ships without a gate is not "enabled by
+    /// default", it is UNREFUSABLE.*
+    ///
+    /// 🔒 The count is the pin. Add an op and either it carries a feature (this number does not
+    /// move) or the number changes and the diff asks why.
+    #[test]
+    fn every_op_is_gated_or_deliberately_core() {
+        let ungated: Vec<&str> = Op::ALL
+            .iter()
+            .filter(|op| op_feature(**op).is_none())
+            .map(|op| op.text_name())
+            .collect();
+        assert_eq!(
+            ungated.len(),
+            UNGATED_CORE_OPS,
+            "the set of UNGATED ops moved. Every entry here is refusable by no flag at all, so \
+             a proposal instruction among them is unrefusable. Gate it, or update the count \
+             deliberately.\n{ungated:?}"
+        );
+        // And the four that were the reason for this test, by name, since a count alone would
+        // also be satisfied by gating one op and ungating another.
+        for op in [Op::I64Add128, Op::I64Sub128, Op::I64MulWideS, Op::I64MulWideU] {
+            assert_eq!(
+                op_feature(op),
+                Some(Feature::WideArithmetic),
+                "{} must be gated by wide-arithmetic",
+                op.text_name()
+            );
+        }
+    }
+
+    /// X3 for track W: the flag refuses its own proposal, and refuses nothing else.
+    #[test]
+    fn the_wide_arithmetic_flag_refuses_wide_arithmetic_and_nothing_else() {
+        let module = crate::module::decode(
+            &crate::wat::assemble(
+                br#"(module (func (param i64 i64) (result i64 i64)
+                      (i64.mul_wide_u (local.get 0) (local.get 1))))"#,
+            )
+            .expect("must assemble"),
+        )
+        .expect("must decode");
+
+        assert!(
+            crate::validate::validate_with_features(&module, &Features::all()).is_ok(),
+            "enabled: wide arithmetic must validate"
+        );
+
+        let mut off = Features::all();
+        off.wide_arithmetic = false;
+        assert_eq!(
+            crate::validate::validate_with_features(&module, &off),
+            Err(crate::validate::ValidateError::FeatureDisabled(Feature::WideArithmetic)),
+            "disabled: the module must be refused, naming wide-arithmetic"
+        );
+
+        // The no-false-positive half: a plain MVP module must not care about this flag.
+        let plain = crate::module::decode(
+            &crate::wat::assemble(
+                br#"(module (func (param i64 i64) (result i64)
+                      (i64.add (local.get 0) (local.get 1))))"#,
+            )
+            .expect("must assemble"),
+        )
+        .expect("must decode");
+        assert!(
+            crate::validate::validate_with_features(&plain, &off).is_ok(),
+            "a flag that rejects more than it claims is its own kind of wrong"
         );
     }
 }

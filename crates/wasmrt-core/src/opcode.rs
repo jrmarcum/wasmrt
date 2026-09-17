@@ -48,6 +48,14 @@ macro_rules! define_ops {
         }
 
         impl Op {
+            /// Every op, wire and internal, in table order.
+            ///
+            /// Exists so a test can walk the **whole** enum. [`crate::features::op_feature`]
+            /// ends in a catch-all, so an op that nobody gated does not fail the build — it
+            /// silently becomes "WebAssembly 1.0, cannot be gated", which for a proposal
+            /// instruction means UNREFUSABLE. Nothing but an enumeration can notice that.
+            pub const ALL: &'static [Op] = &[$(Op::$w,)* $(Op::$i,)*];
+
             /// The op for a real **single-byte** opcode `b`, or `None` if `b` is not a
             /// defined single-byte op (prefix bytes `0xFB`–`0xFE` and the internal-tag
             /// ranges `0x16`–`0x17` / `0xD7`–`0xFA` return `None`).
@@ -239,6 +247,19 @@ define_ops! {
         // `0x16`/`0x17` are unassigned in the single-byte space, and the guard covers them.
         AnyConvertExtern = 0x16 => "any.convert_extern",
         ExternConvertAny = 0x17 => "extern.convert_any",
+        // Wide arithmetic (`0xFC 0x13..0x16`): 128-bit add/sub over a pair of i64 halves, and
+        // the full 128-bit product of two i64s. Each returns TWO i64s, low half first.
+        //
+        // ⚠️⚠️ **THESE FOUR TAGS EXHAUST THE `Op` SPACE.** `Op` is `#[repr(u8)]`, and with
+        // `0x1d`/`0x1e`/`0x27`/`0xff` taken there are **zero** unassigned bytes left: everything
+        // else is either a real single-byte opcode, a `0xFB`–`0xFE` prefix, or an internal tag.
+        // The next proposal that adds instructions — custom-descriptors needs at least eight
+        // `*desc*` ops — **cannot be tagged this way at all**, and has to either widen `Op` to
+        // `u16` (which moves `Instr`, whose size is pinned by `instr_is_sixteen_bytes`) or adopt
+        // the FAMILY pattern `Simd`/`Atomic` already use: one tag, the sub-opcode in the
+        // immediate. Recorded here rather than left to be discovered mid-track.
+        I64Add128 = 0x1d => "i64.add128", I64Sub128 = 0x1e => "i64.sub128",
+        I64MulWideS = 0x27 => "i64.mul_wide_s", I64MulWideU = 0xff => "i64.mul_wide_u",
     }
 }
 
@@ -1061,6 +1082,18 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                 0x0f => Instr { offset: 0, op: Op::TableGrow, imm: Imm::Table(r.read_var_u32()?) },
                 0x10 => Instr { offset: 0, op: Op::TableSize, imm: Imm::Table(r.read_var_u32()?) },
                 0x11 => Instr { offset: 0, op: Op::TableFill, imm: Imm::Table(r.read_var_u32()?) },
+                // Wide arithmetic. ⚠️ The sub-opcode is read as a **var_u32** (as every `0xFC`
+                // sub-opcode is), which is what makes the testsuite's deliberately OVERLONG
+                // LEBs decode: `wide-arithmetic.wast`'s `(module binary …)` spells these as
+                // `fc 93 80 00`, `fc 94 00`, `fc 95 80 80 80 00` and `fc 96 80 80 00`. Those
+                // encodings exist in the file precisely to pin that, and the wire format was
+                // taken from them rather than guessed — had it been guessed wrong, every TEXT
+                // assertion would still have passed, because our assembler and decoder would
+                // have agreed with each other (§3.8b).
+                0x13 => Instr { offset: 0, op: Op::I64Add128, imm: Imm::None },
+                0x14 => Instr { offset: 0, op: Op::I64Sub128, imm: Imm::None },
+                0x15 => Instr { offset: 0, op: Op::I64MulWideS, imm: Imm::None },
+                0x16 => Instr { offset: 0, op: Op::I64MulWideU, imm: Imm::None },
                 _ => return Err(DecodeError::UnsupportedOpcode),
             };
             list.push(Instr { offset: at, ..instr });
@@ -1094,7 +1127,13 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
         // space eventually means something else" defect recorded in `best-practices.md` §3A.2 the
         // same morning. **Whenever an internal tag is added, this range moves with it**; the test
         // `raw_internal_tag_bytes_are_refused` pins every one of them.
-        if (0x16..=0x17).contains(&b0) || (0xcd..=0xcf).contains(&b0) || (0xd7..=0xfa).contains(&b0) {
+        if (0x16..=0x17).contains(&b0)
+            || (0x1d..=0x1e).contains(&b0)
+            || b0 == 0x27
+            || (0xcd..=0xcf).contains(&b0)
+            || (0xd7..=0xfa).contains(&b0)
+            || b0 == 0xff
+        {
             return Err(DecodeError::UnsupportedOpcode);
         }
 

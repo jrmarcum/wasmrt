@@ -2546,6 +2546,8 @@ const I32_1: &[V] = &[V::I32];
 const I32_2: &[V] = &[V::I32, V::I32];
 const I64_1: &[V] = &[V::I64];
 const I64_2: &[V] = &[V::I64, V::I64];
+/// Four i64 halves: the two 128-bit operands of `i64.add128` / `i64.sub128`.
+const I64_4: &[V] = &[V::I64, V::I64, V::I64, V::I64];
 const F32_1: &[V] = &[V::F32];
 const F32_2: &[V] = &[V::F32, V::F32];
 const F64_1: &[V] = &[V::F64];
@@ -2689,6 +2691,14 @@ fn simple_sig(op: Op) -> Option<Sig> {
         // Sign extension
         0xc0 | 0xc1 => sig(I32_1, I32_1),
         0xc2..=0xc4 => sig(I64_1, I64_1),
+        // Wide arithmetic (internal tags for 0xFC 0x13–0x16). A 128-bit value is a PAIR of
+        // i64s, so `add128`/`sub128` take four and return two, and `mul_wide_*` take two and
+        // return two. `wide-arithmetic.wast` asserts each wrong arity invalid, which is the
+        // only thing the score can see here — the halves being TRANSPOSED type-checks
+        // perfectly and returns wrong numbers, so that is pinned by a wrong-answer test
+        // instead.
+        0x1d | 0x1e => sig(I64_4, I64_2),
+        0x27 | 0xff => sig(I64_2, I64_2),
         // Constants
         0x41 => sig(EMPTY, I32_1),
         0x42 => sig(EMPTY, I64_1),

@@ -1380,7 +1380,7 @@ mod tests {
         // real instruction wasmrt has not built.
         let s = run(
             r#"(assert_invalid
-                 (module (func (i64.add128)))
+                 (module (func (struct.new_desc)))
                  "some reason")"#,
         );
         assert_eq!((s.passed, s.failed, s.skipped), (0, 0, 1), "our gap must SKIP");
@@ -1527,13 +1527,18 @@ mod tests {
     fn every_skip_records_a_reason() {
         let s = run_script(
             // ⚠️ The unbuildable module must use a construct `wat::classify_unknown_mnemonic`
-            // still reports as OUR gap. It was `any.convert_extern` until that landed (S1) and
-            // is `i64.add128` (wide-arithmetic) now. **Swap it the day wide-arithmetic lands** —
-            // and when nothing is left unimplemented, delete this arm rather than fake it: at
-            // that point there is no "module: unsupported" skip left to record a reason for.
+            // still reports as OUR gap. It was `any.convert_extern` until that landed (S1), then
+            // `i64.add128` until Track W landed it (2026-09-17), and is `struct.new_desc`
+            // (custom-descriptors, Track D) now. **Swap it the day Track D lands** — and when
+            // nothing is left unimplemented, delete this arm rather than fake it: at that point
+            // there is no "module: unsupported" skip left to record a reason for.
+            //
+            // 🎓 Third rotation of the same example. *A test that fails because its example was
+            // reclassified is STALE, not broken* — and this one names its own successor, which is
+            // why the rotation costs a line instead of a debugging session.
             br#"(assert_flurb (invoke "nope"))
                 (module (func (export "f") (result i64)
-                  (i64.add128 (i64.const 1) (i64.const 0) (i64.const 1) (i64.const 0))))
+                  (struct.new_desc (i64.const 1) (i64.const 0) (i64.const 1) (i64.const 0))))
                 (assert_return (invoke "f") (i64.const 1))
                 (assert_trap (invoke "f") "x")
                 (invoke "f")"#,
