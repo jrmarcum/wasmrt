@@ -2649,9 +2649,25 @@ fn atomic_val_type(sub: u32) -> V {
 /// Fixed value-type signature for the numeric / comparison / conversion / const / load /
 /// store / memory opcodes. `None` for opcodes handled specially in [`FuncValidator::step`].
 fn simple_sig(op: Op) -> Option<Sig> {
-    // `as u16`: `Op` is `#[repr(u16)]` and several arms below are INTERNAL tags (saturating
-    // truncation, wide arithmetic), which may sit above `0xff` — a `u8` cast would truncate
-    // one op's signature onto another's.
+    // 🔒 **The INTERNAL tags first, matched by VARIANT.** Their values are above `0xff` and are
+    // an implementation detail — writing them as literals in the numeric table below would couple
+    // this to a number that is free to move, which is how they came to sit inside the wire byte
+    // space in the first place.
+    match op {
+        // Saturating truncation — real encoding `0xFC 0x00`–`0x07`.
+        Op::I32TruncSatF32S | Op::I32TruncSatF32U => return Some(sig(F32_1, I32_1)),
+        Op::I32TruncSatF64S | Op::I32TruncSatF64U => return Some(sig(F64_1, I32_1)),
+        Op::I64TruncSatF32S | Op::I64TruncSatF32U => return Some(sig(F32_1, I64_1)),
+        Op::I64TruncSatF64S | Op::I64TruncSatF64U => return Some(sig(F64_1, I64_1)),
+        // Wide arithmetic — `0xFC 0x13`–`0x16`. A 128-bit value is a PAIR of i64s, so
+        // `add128`/`sub128` take four and return two, and `mul_wide_*` take two and return two.
+        // ⚠️ Arity is all the score can see here: the halves being TRANSPOSED type-checks
+        // perfectly and returns wrong numbers, which is pinned by a wrong-answer test instead.
+        Op::I64Add128 | Op::I64Sub128 => return Some(sig(I64_4, I64_2)),
+        Op::I64MulWideS | Op::I64MulWideU => return Some(sig(I64_2, I64_2)),
+        _ => {}
+    }
+    // Everything below is a real single-byte opcode, keyed by its wire byte.
     Some(match op as u16 {
         // Comparisons
         0x45 => sig(I32_1, I32_1),        // i32.eqz
@@ -2676,11 +2692,6 @@ fn simple_sig(op: Op) -> Option<Sig> {
         0xac | 0xad => sig(I32_1, I64_1),
         0xae | 0xaf => sig(F32_1, I64_1),
         0xb0 | 0xb1 => sig(F64_1, I64_1),
-        // Saturating truncation (internal tags for 0xFC 0x00–0x07).
-        0xc5 | 0xc6 => sig(F32_1, I32_1),
-        0xc7 | 0xc8 => sig(F64_1, I32_1),
-        0xc9 | 0xca => sig(F32_1, I64_1),
-        0xcb | 0xcc => sig(F64_1, I64_1),
         0xb2 | 0xb3 => sig(I32_1, F32_1),
         0xb4 | 0xb5 => sig(I64_1, F32_1),
         0xb6 => sig(F64_1, F32_1),
@@ -2694,14 +2705,6 @@ fn simple_sig(op: Op) -> Option<Sig> {
         // Sign extension
         0xc0 | 0xc1 => sig(I32_1, I32_1),
         0xc2..=0xc4 => sig(I64_1, I64_1),
-        // Wide arithmetic (internal tags for 0xFC 0x13–0x16). A 128-bit value is a PAIR of
-        // i64s, so `add128`/`sub128` take four and return two, and `mul_wide_*` take two and
-        // return two. `wide-arithmetic.wast` asserts each wrong arity invalid, which is the
-        // only thing the score can see here — the halves being TRANSPOSED type-checks
-        // perfectly and returns wrong numbers, so that is pinned by a wrong-answer test
-        // instead.
-        0x1d | 0x1e => sig(I64_4, I64_2),
-        0x27 | 0xff => sig(I64_2, I64_2),
         // Constants
         0x41 => sig(EMPTY, I32_1),
         0x42 => sig(EMPTY, I64_1),

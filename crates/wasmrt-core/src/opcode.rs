@@ -213,12 +213,6 @@ define_ops! {
         I32Extend8S = 0xc0 => "i32.extend8_s", I32Extend16S = 0xc1 => "i32.extend16_s",
         I64Extend8S = 0xc2 => "i64.extend8_s", I64Extend16S = 0xc3 => "i64.extend16_s",
         I64Extend32S = 0xc4 => "i64.extend32_s",
-        // Saturating (non-trapping) float→int truncation. Real wire form is `0xFC 0x00..0x07`;
-        // these bytes are also accepted as raw single-byte forms, mirroring the wazmrt oracle.
-        I32TruncSatF32S = 0xc5 => "i32.trunc_sat_f32_s", I32TruncSatF32U = 0xc6 => "i32.trunc_sat_f32_u",
-        I32TruncSatF64S = 0xc7 => "i32.trunc_sat_f64_s", I32TruncSatF64U = 0xc8 => "i32.trunc_sat_f64_u",
-        I64TruncSatF32S = 0xc9 => "i64.trunc_sat_f32_s", I64TruncSatF32U = 0xca => "i64.trunc_sat_f32_u",
-        I64TruncSatF64S = 0xcb => "i64.trunc_sat_f64_s", I64TruncSatF64U = 0xcc => "i64.trunc_sat_f64_u",
         // Reference.
         RefNull = 0xd0 => "ref.null", RefIsNull = 0xd1 => "ref.is_null",
         RefFunc = 0xd2 => "ref.func", RefEq = 0xd3 => "ref.eq",
@@ -226,41 +220,50 @@ define_ops! {
         BrOnNonNull = 0xd6 => "br_on_non_null",
     }
     internal {
+        // ⚠️⚠️ **EVERY TAG HERE IS >= 0x100, AND THAT IS THE POINT.** These are synthetic tags for
+        // ops whose real encoding is a `0xFB`–`0xFE` prefix plus a sub-opcode; they are not wire
+        // bytes and never were. While they lived *inside* the single-byte space they collided with
+        // it, which is why `decode_body` needed a hand-maintained guard listing five disjoint byte
+        // ranges — and why a raw `0xcd` byte was once accepted as `array.copy`. Above `0xff` the
+        // collision is impossible by construction: `Op::from_u8` takes a `u8` and can only ever
+        // return a WIRE op, so the guard is gone and cannot rot.
+        // 🎓 `best-practices.md` §3A.2 — *a synthetic tag placed in a real encoding space
+        // eventually means something else.* The fix is to stop placing it there.
         // Bulk memory (`0xFC 0x08..0x0b`) + the SIMD / atomic family tags. The two family
         // tags have no text name of their own — their members are named per sub-opcode.
-        MemoryInit = 0xd7 => "memory.init", DataDrop = 0xd8 => "data.drop",
-        MemoryCopy = 0xd9 => "memory.copy", MemoryFill = 0xda => "memory.fill",
-        Simd = 0xdb => "", Atomic = 0xdc => "",
+        MemoryInit = 0x100 => "memory.init", DataDrop = 0x101 => "data.drop",
+        MemoryCopy = 0x102 => "memory.copy", MemoryFill = 0x103 => "memory.fill",
+        Simd = 0x104 => "", Atomic = 0x105 => "",
         // Table ops (`0xFC 0x0c..0x11`).
-        TableInit = 0xe0 => "table.init", ElemDrop = 0xe1 => "elem.drop",
-        TableCopy = 0xe2 => "table.copy", TableGrow = 0xe3 => "table.grow",
-        TableSize = 0xe4 => "table.size", TableFill = 0xe5 => "table.fill",
+        TableInit = 0x106 => "table.init", ElemDrop = 0x107 => "elem.drop",
+        TableCopy = 0x108 => "table.copy", TableGrow = 0x109 => "table.grow",
+        TableSize = 0x10a => "table.size", TableFill = 0x10b => "table.fill",
         // GC array ops (`0xFB` prefix).
-        ArrayNew = 0xe6 => "array.new", ArrayNewDefault = 0xe7 => "array.new_default",
-        ArrayNewFixed = 0xe8 => "array.new_fixed", ArrayGet = 0xe9 => "array.get",
-        ArrayGetS = 0xea => "array.get_s", ArrayGetU = 0xeb => "array.get_u",
-        ArraySet = 0xec => "array.set", ArrayLen = 0xed => "array.len",
+        ArrayNew = 0x10c => "array.new", ArrayNewDefault = 0x10d => "array.new_default",
+        ArrayNewFixed = 0x10e => "array.new_fixed", ArrayGet = 0x10f => "array.get",
+        ArrayGetS = 0x110 => "array.get_s", ArrayGetU = 0x111 => "array.get_u",
+        ArraySet = 0x112 => "array.set", ArrayLen = 0x113 => "array.len",
         // GC array bulk ops (`0xFB 0x09/0x0a/0x10..0x13`). Added 2026-08-19: they were absent
         // from the table entirely, so `.wat` using them would not assemble and the binary form
         // had no opcode to decode — a gap that produced only SKIPS, never failures.
-        ArrayNewData = 0xdd => "array.new_data", ArrayNewElem = 0xde => "array.new_elem",
-        ArrayFill = 0xdf => "array.fill", ArrayCopy = 0xcd => "array.copy",
-        ArrayInitData = 0xce => "array.init_data", ArrayInitElem = 0xcf => "array.init_elem",
+        ArrayNewData = 0x114 => "array.new_data", ArrayNewElem = 0x115 => "array.new_elem",
+        ArrayFill = 0x116 => "array.fill", ArrayCopy = 0x117 => "array.copy",
+        ArrayInitData = 0x118 => "array.init_data", ArrayInitElem = 0x119 => "array.init_elem",
         // GC casts (`0xFB` prefix).
-        RefTest = 0xee => "ref.test", RefCastOp = 0xef => "ref.cast",
+        RefTest = 0x11a => "ref.test", RefCastOp = 0x11b => "ref.cast",
         // GC i31 / struct ops (`0xFB` prefix) + cast branches.
-        RefI31 = 0xf0 => "ref.i31", I31GetS = 0xf1 => "i31.get_s", I31GetU = 0xf2 => "i31.get_u",
-        StructNew = 0xf3 => "struct.new", StructNewDefault = 0xf4 => "struct.new_default",
-        StructGet = 0xf5 => "struct.get", StructGetS = 0xf6 => "struct.get_s",
-        StructGetU = 0xf7 => "struct.get_u", StructSet = 0xf8 => "struct.set",
-        BrOnCast = 0xf9 => "br_on_cast", BrOnCastFail = 0xfa => "br_on_cast_fail",
+        RefI31 = 0x11c => "ref.i31", I31GetS = 0x11d => "i31.get_s", I31GetU = 0x11e => "i31.get_u",
+        StructNew = 0x11f => "struct.new", StructNewDefault = 0x120 => "struct.new_default",
+        StructGet = 0x121 => "struct.get", StructGetS = 0x122 => "struct.get_s",
+        StructGetU = 0x123 => "struct.get_u", StructSet = 0x124 => "struct.set",
+        BrOnCast = 0x125 => "br_on_cast", BrOnCastFail = 0x126 => "br_on_cast_fail",
         // The externref bridge (`0xFB 0x1a/0x1b`). ⚠️ Their internal tags are `0x16`/`0x17`
         // rather than the usual `0xd7..` block because that block is full and the two bytes
         // either side of it (`0xfb`, `0xfc`) are *prefix* bytes — tagging with one of those
         // would force `decode_body`'s internal-tag guard to reject the prefix it must accept.
         // `0x16`/`0x17` are unassigned in the single-byte space, and the guard covers them.
-        AnyConvertExtern = 0x16 => "any.convert_extern",
-        ExternConvertAny = 0x17 => "extern.convert_any",
+        AnyConvertExtern = 0x127 => "any.convert_extern",
+        ExternConvertAny = 0x128 => "extern.convert_any",
         // Wide arithmetic (`0xFC 0x13..0x16`): 128-bit add/sub over a pair of i64 halves, and
         // the full 128-bit product of two i64s. Each returns TWO i64s, low half first.
         //
@@ -272,8 +275,23 @@ define_ops! {
         // `u16` (which moves `Instr`, whose size is pinned by `instr_is_sixteen_bytes`) or adopt
         // the FAMILY pattern `Simd`/`Atomic` already use: one tag, the sub-opcode in the
         // immediate. Recorded here rather than left to be discovered mid-track.
-        I64Add128 = 0x1d => "i64.add128", I64Sub128 = 0x1e => "i64.sub128",
-        I64MulWideS = 0x27 => "i64.mul_wide_s", I64MulWideU = 0xff => "i64.mul_wide_u",
+        I64Add128 = 0x129 => "i64.add128", I64Sub128 = 0x12a => "i64.sub128",
+        I64MulWideS = 0x12b => "i64.mul_wide_s", I64MulWideU = 0x12c => "i64.mul_wide_u",
+        // Saturating (non-trapping) float→int truncation — real wire form `0xFC 0x00`–`0x07`.
+        //
+        // 🔴 **These were WIRE entries at `0xc5`–`0xcc` until 2026-09-17, and that was an
+        // accept-invalid AND a wire divergence.** `0xc5`–`0xcc` are unassigned single-byte opcodes:
+        // wasmrt decoded a raw `0xc5` byte as `i32.trunc_sat_f32_s` (wasmtime: *"illegal opcode:
+        // 0xc5"*), and — worse — the assembler EMITTED that byte, so **every module wasmrt
+        // assembled containing a saturating truncation was not WebAssembly**. The comment that
+        // stood here said the raw forms were accepted "mirroring the wazmrt oracle"; the oracle
+        // retired on 2026-08-11 and the deviation outlived its reason by five weeks.
+        // 🎓 Our decoder and our assembler agreed with each other, so no round trip could see it
+        // (`best-practices.md` §3.8b) — `wasmtime compile` on our output found it in one command.
+        I32TruncSatF32S = 0x12d => "i32.trunc_sat_f32_s", I32TruncSatF32U = 0x12e => "i32.trunc_sat_f32_u",
+        I32TruncSatF64S = 0x12f => "i32.trunc_sat_f64_s", I32TruncSatF64U = 0x130 => "i32.trunc_sat_f64_u",
+        I64TruncSatF32S = 0x131 => "i64.trunc_sat_f32_s", I64TruncSatF32U = 0x132 => "i64.trunc_sat_f32_u",
+        I64TruncSatF64S = 0x133 => "i64.trunc_sat_f64_s", I64TruncSatF64U = 0x134 => "i64.trunc_sat_f64_u",
     }
 }
 
@@ -521,8 +539,16 @@ enum ImmKind {
     Unsupported,
 }
 
-/// Classify an opcode's immediate by its binary byte (§5.4). Mirrors wazmrt
-/// `immediateKind` exactly.
+/// Classify a **wire** opcode's immediate by its binary byte (§5.4).
+///
+/// 🔒 **WIRE BYTES ONLY.** Every prefixed op (`0xFB`–`0xFE` + sub-opcode) is decoded by its own
+/// arm in [`decode_body`] and never reaches here. This table used to carry entries for the
+/// *internal tags* as well — `0xe3` for `table.grow`, `0xd7` for `memory.init`, `0x45..=0xcc`
+/// covering the saturating truncations — because those tags sat inside the byte space. They do
+/// not any more (all are `>= 0x100`), so those entries described bytes that are not opcodes, and
+/// a raw `0xe3` byte was read as *"table op, now consume a table index"*: the decoder ran off the
+/// end and answered `UnexpectedEof` instead of `UnsupportedOpcode` — the right refusal with the
+/// wrong reason, which is the §5.6b failure mode.
 fn immediate_kind(b: u8) -> ImmKind {
     match b {
         0x02 | 0x03 | 0x04 | 0x06 => ImmKind::BlockType, // block/loop/if + legacy `try`
@@ -538,14 +564,7 @@ fn immediate_kind(b: u8) -> ImmKind {
         0xd5 | 0xd6 => ImmKind::Label, // br_on_null / br_on_non_null
         0x20..=0x22 => ImmKind::Local,
         0x23 | 0x24 => ImmKind::Global,
-        0x25 | 0x26 | 0xe3 | 0xe4 | 0xe5 => ImmKind::Table, // table.get/set + grow/size/fill
-        0xe0 => ImmKind::TableInit,
-        0xe1 => ImmKind::Elem, // elem.drop
-        0xe2 => ImmKind::TableCopy,
-        0xd7 => ImmKind::DataInit,   // memory.init
-        0xd8 => ImmKind::Data,       // data.drop
-        0xd9 => ImmKind::MemCopy,    // memory.copy
-        0xda => ImmKind::MemReserved, // memory.fill (raw tag byte, rejected at decode)
+        0x25 | 0x26 => ImmKind::Table, // table.get / table.set
         0x28..=0x3e => ImmKind::Mem,
         0x3f | 0x40 => ImmKind::MemIndex, // memory.size / memory.grow
         0x41 => ImmKind::I32c,
@@ -555,29 +574,12 @@ fn immediate_kind(b: u8) -> ImmKind {
         0x1c => ImmKind::SelectTypes,
         0xd0 => ImmKind::RefType, // ref.null <heaptype>
         0xd2 => ImmKind::Func,    // ref.func <funcidx>
-        // Core-MVP range with no immediate (`0xc5..=0xcc` are the sat-trunc tags).
-        0x00 | 0x01 | 0x05 | 0x0b | 0x0f | 0x1a | 0x1b | 0xd1 | 0xd3 | 0xd4 | 0x45..=0xcc => {
+        // The single-byte numeric/comparison/conversion block, none of which take an immediate.
+        // ⚠️ Ends at `0xc4` (`i64.extend32_s`). It read `0xc5..=0xcc` until 2026-09-17, which is
+        // how a raw saturating-truncation byte became executable.
+        0x00 | 0x01 | 0x05 | 0x0b | 0x0f | 0x1a | 0x1b | 0xd1 | 0xd3 | 0xd4 | 0x45..=0xc4 => {
             ImmKind::None
         }
-        // GC ops with no immediate: ref.i31 / i31.get_s / i31.get_u, array.len, and the
-        // externref bridge (internal tags `0x16`/`0x17`).
-        0xf0 | 0xf1 | 0xf2 | 0xed | 0x16 | 0x17 => ImmKind::None,
-        // GC ops with a single type index.
-        0xe6 | 0xe7 | 0xe9 | 0xea | 0xeb | 0xec | 0xf3 | 0xf4 => ImmKind::GcType,
-        // GC struct ops with a type index + field index.
-        0xf5..=0xf8 => ImmKind::GcField,
-        // array.new_fixed: type index + element count.
-        0xe8 => ImmKind::GcTypeN,
-        // array.fill: a single array type index.
-        0xdf => ImmKind::GcType,
-        // array.new_data / new_elem / init_data / init_elem: type index + segment index.
-        0xdd | 0xde | 0xce | 0xcf => ImmKind::GcTypeSeg,
-        // array.copy: destination + source array type indices.
-        0xcd => ImmKind::GcArrayCopy,
-        // ref.test / ref.cast: a target reference type.
-        0xee | 0xef => ImmKind::RefCast,
-        // br_on_cast / br_on_cast_fail: a label + source & destination ref types.
-        0xf9 | 0xfa => ImmKind::BrCast,
         _ => ImmKind::Unsupported,
     }
 }
@@ -1126,30 +1128,14 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
             continue;
         }
 
-        // `0xcd..=0xcf` and `0xd7..=0xfa` are internal tags whose real wire form is a
-        // `0xFB`/`0xFC` prefix + sub-opcode (handled above). A raw byte in either range is not a
-        // valid single-byte opcode. (`0xd0..=0xd6` are real ops; `0xfb..=0xfe` are prefixes.)
-        //
-        // `0x16..=0x17` joined them with the externref bridge (`any.convert_extern` /
-        // `extern.convert_any`); both bytes are unassigned in the single-byte space.
-        //
-        // ⚠️⚠️ **The `0xcd..=0xcf` half was added with the array bulk ops on 2026-08-19, and
-        // extending this guard is not optional.** Those three tags name `array.copy` /
-        // `array.init_data` / `array.init_elem` internally; without the guard a raw `0xcd` byte in
-        // a function body falls through to `immediate_kind` and **decodes as `array.copy`** — an
-        // accept-invalid, and precisely the "a synthetic internal tag placed in a real encoding
-        // space eventually means something else" defect recorded in `best-practices.md` §3A.2 the
-        // same morning. **Whenever an internal tag is added, this range moves with it**; the test
-        // `raw_internal_tag_bytes_are_refused` pins every one of them.
-        if (0x16..=0x17).contains(&b0)
-            || (0x1d..=0x1e).contains(&b0)
-            || b0 == 0x27
-            || (0xcd..=0xcf).contains(&b0)
-            || (0xd7..=0xfa).contains(&b0)
-            || b0 == 0xff
-        {
-            return Err(DecodeError::UnsupportedOpcode);
-        }
+        // ✅ **THE RAW-INTERNAL-TAG GUARD IS GONE, and it cannot come back.** It listed five
+        // disjoint byte ranges by hand and had to be extended every time an internal tag was
+        // added — the GC array ops needed it in 2026-08-19, the externref bridge in 2026-08-20,
+        // wide arithmetic on 2026-09-17. Every internal tag now sits at `0x100+`, so
+        // `Op::from_u8` — which takes a `u8` — *cannot* return one, and a raw synthetic-tag byte
+        // is refused below by the plain "not a single-byte opcode" path. The invariant is
+        // structural instead of maintained. `rejects_raw_internal_tag_bytes` still pins the
+        // behaviour; only the mechanism changed.
 
         let imm = match immediate_kind(b0) {
             ImmKind::None => Imm::None,
@@ -1410,11 +1396,30 @@ mod tests {
 
     #[test]
     fn rejects_raw_internal_tag_bytes() {
-        // `0x16..=0x17` and `0xd7..=0xfa` are internal Op tags whose real wire form is a
-        // prefix + sub-opcode.
-        for b in [0xe3u8, 0xe4, 0xe5, 0xed, 0xf0, 0xf1, 0xf2, 0xd7, 0xdb, 0xfa, 0x16, 0x17] {
-            assert_eq!(decode_body(&[b]), Err(DecodeError::UnsupportedOpcode));
+        // Every byte that once WAS an internal tag, plus the prefix bytes. Their real wire form
+        // is a prefix + sub-opcode, so as a bare byte each is simply not an opcode.
+        //
+        // 🔒 **The property outlived its mechanism.** These used to be refused by a hand-listed
+        // guard over five byte ranges; they are refused now because the tags moved to `0x100+`
+        // and `Op::from_u8` cannot produce one. The test does not care which — it pins the
+        // ANSWER, which is why it survived the change that deleted the guard.
+        for b in [
+            0xe3u8, 0xe4, 0xe5, 0xed, 0xf0, 0xf1, 0xf2, 0xd7, 0xdb, 0xfa, 0x16, 0x17, 0x1d, 0x1e,
+            0x27, 0xcd, 0xce, 0xcf, 0xff,
+            // 🔴 `0xc5`–`0xcc` — the saturating truncations. These were ACCEPTED as raw bytes
+            // until 2026-09-17 ("mirroring the wazmrt oracle", a rationale that retired on
+            // 2026-08-11). wasmtime: *"illegal opcode: 0xc5"*. They are unassigned in the
+            // single-byte space; the real encoding is `0xFC 0x00`–`0x07`.
+            0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc,
+        ] {
+            assert_eq!(
+                decode_body(&[b]),
+                Err(DecodeError::UnsupportedOpcode),
+                "raw byte {b:#04x} must not be an opcode"
+            );
         }
+        // …and the real form of one of them still decodes.
+        assert!(decode_body(&[0xfc, 0x00, 0x0b]).is_ok()); // i32.trunc_sat_f32_s
         // The real single-byte ops just below the range must still decode.
         assert!(decode_body(&[0xd1, 0x0b]).is_ok()); // ref.is_null
         assert!(decode_body(&[0xd4, 0x0b]).is_ok()); // ref.as_non_null
@@ -1432,6 +1437,21 @@ mod tests {
         assert_eq!(Op::from_u8(0xe3), None); // table.grow internal tag
         assert_eq!(Op::from_u8(0x16), None); // any.convert_extern internal tag
         assert_eq!(Op::from_u8(0x17), None); // extern.convert_any internal tag
+        assert_eq!(Op::from_u8(0xc5), None); // i32.trunc_sat_f32_s — NOT a single-byte opcode
+        assert_eq!(Op::from_u8(0xcc), None); // i64.trunc_sat_f64_u — likewise
+        // 🔒 The structural version of the same claim: `from_u8` takes a `u8`, and every internal
+        // tag is `>= 0x100`, so no byte can map to one. Checked over the whole space rather than
+        // by example, because an example only covers the tag someone remembered.
+        for b in 0u8..=0xff {
+            if let Some(op) = Op::from_u8(b) {
+                assert!(
+                    (op as u16) <= 0xff,
+                    "{} is an internal tag and must not be reachable from a wire byte",
+                    op.text_name()
+                );
+                assert_eq!(op as u16, u16::from(b), "from_u8 must map a byte to its own tag");
+            }
+        }
     }
 
     #[test]

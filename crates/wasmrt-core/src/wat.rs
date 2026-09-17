@@ -3534,6 +3534,33 @@ fn emit_op_with_immediates(
             };
             uleb(&mut ctx.out, sub);
         }
+        // 🔴 **These had NO emitter arm until 2026-09-17, and fell through to the single-byte
+        // catch-all — so the assembler wrote the raw tag byte `0xc5`–`0xcc`.** Those bytes are
+        // unassigned in the single-byte space, so **every module wasmrt assembled containing a
+        // saturating truncation was not WebAssembly**: wasmtime answers *"illegal opcode: 0xc5"*.
+        // Our own decoder read them back (it accepted the raw bytes too), so the round trip was
+        // green — `best-practices.md` §3.8b, the third wire divergence found this way.
+        O::I32TruncSatF32S
+        | O::I32TruncSatF32U
+        | O::I32TruncSatF64S
+        | O::I32TruncSatF64U
+        | O::I64TruncSatF32S
+        | O::I64TruncSatF32U
+        | O::I64TruncSatF64S
+        | O::I64TruncSatF64U => {
+            ctx.out.push(0xfc);
+            let sub: u64 = match op {
+                O::I32TruncSatF32S => 0,
+                O::I32TruncSatF32U => 1,
+                O::I32TruncSatF64S => 2,
+                O::I32TruncSatF64U => 3,
+                O::I64TruncSatF32S => 4,
+                O::I64TruncSatF32U => 5,
+                O::I64TruncSatF64S => 6,
+                _ => 7,
+            };
+            uleb(&mut ctx.out, sub);
+        }
         O::I64Add128 | O::I64Sub128 | O::I64MulWideS | O::I64MulWideU => {
             ctx.out.push(0xfc);
             let sub: u64 = match op {

@@ -4715,40 +4715,49 @@ fn exec_float(frame: &mut Frame, op: Op) -> Result<()> {
         0xbc..=0xbf => {}
 
         // Float → int, saturating (Rust's `as` matches wasm: NaN→0, saturates).
-        0xc5 => {
-            let v = frame.pop_f32();
-            frame.push_i32(v as i32);
+        //
+        // 🔒 **Matched by VARIANT, not by a literal tag value.** These are internal tags — their
+        // real encoding is `0xFC 0x00`–`0x07` — and they live above `0xff` now, so writing them
+        // as numbers here would couple this arm to a value that is deliberately an implementation
+        // detail. They sat at `0xc5`–`0xcc` until 2026-09-17 *inside the wire byte space*, which
+        // is exactly the mistake that made a raw `0xc5` byte executable.
+        _ => {
+            match op {
+                Op::I32TruncSatF32S => {
+                    let v = frame.pop_f32();
+                    frame.push_i32(v as i32);
+                }
+                Op::I32TruncSatF32U => {
+                    let v = frame.pop_f32();
+                    frame.push_i32(v as u32 as i32);
+                }
+                Op::I32TruncSatF64S => {
+                    let v = frame.pop_f64();
+                    frame.push_i32(v as i32);
+                }
+                Op::I32TruncSatF64U => {
+                    let v = frame.pop_f64();
+                    frame.push_i32(v as u32 as i32);
+                }
+                Op::I64TruncSatF32S => {
+                    let v = frame.pop_f32();
+                    frame.push_i64(v as i64);
+                }
+                Op::I64TruncSatF32U => {
+                    let v = frame.pop_f32();
+                    frame.push_i64(v as u64 as i64);
+                }
+                Op::I64TruncSatF64S => {
+                    let v = frame.pop_f64();
+                    frame.push_i64(v as i64);
+                }
+                Op::I64TruncSatF64U => {
+                    let v = frame.pop_f64();
+                    frame.push_i64(v as u64 as i64);
+                }
+                _ => return Err(Trap::UnsupportedInstruction),
+            }
         }
-        0xc6 => {
-            let v = frame.pop_f32();
-            frame.push_i32(v as u32 as i32);
-        }
-        0xc7 => {
-            let v = frame.pop_f64();
-            frame.push_i32(v as i32);
-        }
-        0xc8 => {
-            let v = frame.pop_f64();
-            frame.push_i32(v as u32 as i32);
-        }
-        0xc9 => {
-            let v = frame.pop_f32();
-            frame.push_i64(v as i64);
-        }
-        0xca => {
-            let v = frame.pop_f32();
-            frame.push_i64(v as u64 as i64);
-        }
-        0xcb => {
-            let v = frame.pop_f64();
-            frame.push_i64(v as i64);
-        }
-        0xcc => {
-            let v = frame.pop_f64();
-            frame.push_i64(v as u64 as i64);
-        }
-
-        _ => return Err(Trap::UnsupportedInstruction),
     }
     Ok(())
 }
