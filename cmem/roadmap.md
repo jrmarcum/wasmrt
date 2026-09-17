@@ -31,10 +31,15 @@ security model — the WASI sandbox — is built and unaffected.
 
 ---
 
-### T13 — the CONFORMANCE CLEAR-OUT. `1.0.0` `[ ]`
+### T13 — the CONFORMANCE CLEAR-OUT. `1.0.0` `[◐]` — **day 3 landed 2026-09-17: 64,068 / 74 / 549**
 
 **Target: 0 failed / 0 skipped / 0 files unrun, and an EMPTY baseline.** The starting position was
 **62,238 / 378 / 2,038** — **2,416 assertions not passing**, and the second number was the smaller one.
+
+📍 **AFTER DAY 3 (2026-09-17): 64,068 / 74 / 549 — 99.9% of 64,142 adjudicated, 288 files, 503 tests.**
+Track W is done; `custom-descriptors` is 65f/451s of the 74/549 that remain, and **8 of the 74 failures
+are era-pinned assertions a modern engine must fail.** ⚠️ The denominator moved on 2026-08-20 when wasmtk
+synced the corpus to upstream — see day 3 below; re-measure, never quote.
 
 📍 **AFTER DAY 1 (2026-08-19): 63,333 / 172 / 1,024 — 99.7% of 63,505 adjudicated, 484 tests.**
 +1,095 passes, −206 failures, −1,014 skips, **no file lost a pass**. **1,196 assertions remain.**
@@ -180,7 +185,74 @@ Produced after the **skip census** (`testing.md`) made the skip column attributa
 ⚠️ **The track table was ranked on numbers that could not distinguish a root from its shadow;** these
 are ranked on *assertions unblocked*, which is what the ranking rule above actually asks for.
 
-##### 📐 THE REMAINING WORK, SCOPED 2026-08-20. `[ ]` **Not started — this is tomorrow's list.**
+##### ✅ DAY 3 (2026-09-17) — X1, X2, X3, the M/A residue and **TRACK W** all landed. `[x]`
+
+**64,068 / 74 / 549 over 288 files**, 503 workspace tests, C-ABI gate PASSED, gate green at every step.
+⚠️ **Miri NOT RUN** — not installed on this host; the 28/28 on record is from an earlier session and is
+not re-verified.
+
+🔻 **FIRST: THE BASELINE MOVED UNDER US, and the totals hid it.** wasmtk synced the vendored testsuite to
+upstream `65a43d2e` on **2026-08-20 at 18:34**, after day 2's numbers were recorded. Re-measured rather
+than quoted, the starting position was **63,963 / 112 / 604 over 288 files**, not the 63,807 / 112 / 584
+over 284 on record: **+4 files** (`custom/` ×3 and `custom-page-sizes/binary.wast`), **+156 passes**,
+**+20 skips**. ⚠️⚠️ **The failure total was 112 on both sides BY COINCIDENCE** — custom-descriptors +1,
+custom-page-sizes −2, the new `custom/` dir +1. 🎓 *When the corpus itself can move, the denominator is
+a measurement too* — and an unchanged total is not evidence that nothing changed.
+
+| item | result |
+| --- | --- |
+| **X1** refuse `(pagesize N)` | ✅ custom-page-sizes **34 failures → 0**. Logged at 16; **12 of the 34 were wrong ANSWERS**, not over-acceptance. Prediction 2 landed exactly (skips rose). **20 passes lost, none of them a verdict.** |
+| **the instrument** | 🔬 **a THIRD hole in the per-file gate**: a clean file carried no recorded pass count, so passes lost to SKIPS were invisible. `memory_max.wast` went 2 passed → 0 and the gate said "no file lost a pass". Every file prints a row now; the same gate then reported **four** affected files instead of two. |
+| **M/A instrument fix** | ✅ `assert_invalid` / `assert_malformed` stop at **validation** instead of building through to link. Numbers byte-identical — the point is that the report stopped blaming the engine for a stage the runner chose. |
+| **M/A text-format gap** | ✅ the bare-index `(data 0 …)` / `(elem 0 …)` spellings. Logged at 4; **delivered 18**. ⚠️ the `elem` half was **not a refusal — it assembled a different segment** (active→passive, 3 items). |
+| **`spectest.shared_memory`** | ✅ defined. ⚠️ the `assert_unlinkable` beside it **was already passing while the export did not exist** — an unresolvable import is a link failure, so it was right for the wrong reason and could never have tested the `shared` flag. |
+| **X2** the coverage sweep | ✅ **39 rows, and it is CLAUSE coverage, not field coverage** — see the correction below. Mutation-tested at three emitter sites. |
+| **X3 / T10b** | ✅ `Feature::WideArithmetic`, gated at both entry points — **after** the gate table was found not to work. See below. |
+| **TRACK W** wide-arithmetic | ✅ **`wide-arithmetic.wast` 0/1/108 → 107/0/0.** Wire format taken from the testsuite's `(module binary …)`; emitted bytes handed to wasmtime 48, which accepts them with `-W wide-arithmetic` and refuses them without. |
+
+🔴 **X2's SPECIFICATION WAS WRONG, and this is the useful part.** T10a asked for a **`ModuleBuild`
+FIELD-coverage sweep** and `known-issues.md` said it "is exactly what would have caught" X1. **It would
+not have caught either of the two most recent instances.** `(pagesize N)` was parsed and never stored —
+there was no field to find uncovered. The bare `tableidx` was not stored either; it was re-read as an
+element item. Both are *clauses the parser accepts and the module does not carry*. 🎓 **A field can only
+be covered once it exists**, so the sweep has to be over the GRAMMAR, not the struct — every row is a
+text clause set to a non-default value, and a row fails however the clause is lost.
+
+🔴 **X3's FAILURE MODE HAPPENED, IN THE COMMIT THAT IMPLEMENTS X3.** `op_feature`'s doc comment claimed
+the match was "exhaustive over `Op`", so "a new opcode shows up here as an explicit decision rather than
+silently defaulting to 'always allowed'". **It ends in `_ => return None`.** The four wide ops went in
+fully wired — decoder, assembler, validator, interpreter — and **refusable by no flag at all**; measured
+as 182 ungated ops without the gate arm and 178 with it. Then T10b's own miss: `WideArithmetic` reached
+the Rust enum and the struct but **not** `wasmrt_feature_t`, so it was switchable in-process and not
+through the C ABI — *gated at one entry point of two*. Both are pinned by data now (`Op::ALL` + a count;
+a three-list comparison). 🎓 **A gate that cannot fail is decoration; a gate that exists only in a doc
+comment is not even that** — and the comment asserting the protection is the reason nobody looked.
+
+⚠️⚠️ **TRACK D IS NOW BLOCKED ON A REPRESENTATION DECISION, and it is not the one D1 names.** `Op` is
+`#[repr(u8)]`, and Track W's four tags took `0x1d`/`0x1e`/`0x27`/`0xff` — **the last four free bytes.
+There are ZERO left.** Custom-descriptors needs at least eight `*desc*` instructions, so it **cannot be
+tagged this way at all.** Two routes, and it is a real decision rather than a detail:
+1. **Widen `Op` to `u16`** — moves `Instr`, whose size is pinned by `instr_is_sixteen_bytes`, and `Instr`
+   is the hot path. That makes it a **T11 (size/perf) question landing inside T13**.
+2. **Adopt the FAMILY pattern** `Simd` (`0xdb`) and `Atomic` (`0xdc`) already use: one tag, sub-opcode in
+   the immediate. Costs no tag space, adds one dispatch, and is the existing precedent for a prefixed
+   family. ⚠️ Note the codebase's convention cuts the other way for SMALL groups — bulk memory (4), table
+   ops (6) and the GC array ops (8) each took individual tags — so this is a change of convention, not
+   just a mechanism.
+**Route 2 looks right and costs nothing measurable, but it is D's call, not W's.** Recorded in
+`opcode.rs` beside the tags as well.
+
+📊 **What is left — all of it, measured:**
+
+| track | proposal | fails | skips | note |
+| --- | --- | --- | --- | --- |
+| **D** | custom-descriptors | **65** | **451** | 🚦 essentially the whole remainder. Blocked on the `Op`-space decision above before D1 starts. |
+| **A** | custom-annotations (`custom/`) | 1 | 20 | 🆕 **NEW — arrived with the 2026-08-20 corpus sync and no track covered it.** 19 skips are the unhandled `assert_malformed_custom` command and 1 is `assert_invalid_custom`: **runner work, no engine risk**, the same shape as S2. Do it before D. |
+| **M/A** | threads | 8 | 0 | 🔴 **all 8 are era-pinned** and the recorded fix (refresh the snapshot) is a **NO-OP** — see `known-issues.md`. Needs an owner decision, no code. |
+| **P** | custom-page-sizes | 0 | **78** | every module now honestly refused. The implementation work is untouched and unchanged in size. |
+| **W** | wide-arithmetic | 0 | 0 | ✅ **DONE.** |
+
+##### 📐 THE REMAINING WORK, SCOPED 2026-08-20. `[x]` **Superseded by day 3 above; kept as the scoping record.**
 
 **63,807 / 112 / 584.** Core is at 0/0; all 112 failures and 584 skips are in four `proposals/`
 directories. Scoped the way wazmrt scoped its equivalent tracks — **method borrowed, design not**
@@ -219,7 +291,7 @@ two above is *evidence the work is landing*, and the commit must say which.
 | --- | --- | --- |
 | **X1** | **Refuse `(pagesize N)` honestly** until Track P lands | ⚠️ P0. A live silent-wrong-module defect *today*. One clause, and it converts a wrong answer into a refusal. Expected: `custom-page-sizes-invalid.wast`'s 16 *"module was accepted"* failures resolve; some `custom-page-sizes.wast` failures become honest skips. |
 | **X2** | **The `ModuleBuild` field-coverage sweep** — T10a's still-open half | 🎯 **X1 IS the fifth instance of the mechanism T10a named**, and the first four were all found by accident. The opcode half shipped 2026-08-08; the module-field half never did, and it is exactly what would have caught this. A spot-probe of ten clauses found one real drop — a real sweep is the deliverable. ⚠️ `(sub final (func))` emitting the bare form is **correct**, not a drop: a bare composite type *is* `sub final ϵ`. Verified before reporting. |
-| **X3** | **A proposal's `Feature` gate is a DELIVERABLE of its track, not a follow-up** | 🔒 `Feature` has **15 members and none of the three new proposals**. wazmrt shipped custom-page-sizes with no gate and it became **unrefusable** — every switch off, still accepted. T13's own gate already demands "a `Feature` flag **and a test that the flag refuses it**"; this makes it a line item, because it is the one question a per-proposal checklist cannot ask itself. |
+| **X3** | **A proposal's `Feature` gate is a DELIVERABLE of its track, not a follow-up** | 🔒 `Feature` had **15 members and none of the three new proposals** when this was written; it has **16** now — wide-arithmetic landed gated on 2026-09-17, and doing so exposed that `op_feature` was not exhaustive and that the C ABI is a third spelling nothing compared (see day 3). wazmrt shipped custom-page-sizes with no gate and it became **unrefusable** — every switch off, still accepted. T13's own gate already demands "a `Feature` flag **and a test that the flag refuses it**"; this makes it a line item, because it is the one question a per-proposal checklist cannot ask itself. |
 
 ###### 📊 THE FOUR TRACKS, ranked
 

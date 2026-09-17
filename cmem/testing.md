@@ -33,7 +33,7 @@ leads produced by that arrangement** ("the oracle runs this, so our type-checker
 running an entry point that skipped validation, `best-practices.md` §2.3a). Retiring the oracle removes
 the class; do not reintroduce it by reasoning about what wazmrt would do.
 
-## Spec-suite conformance — current (2026-08-20, T13 clear-out day 2) — **99.8%**
+## Spec-suite conformance — superseded (2026-08-20, T13 day 2) — **99.8%.** ⚠️ Its 284-file denominator no longer exists; see day 3 below.
 
 🎯 **63,807 passed / 112 failed / 584 skipped** over 284 files. **The 257 CORE spec files are at
 0 failed and 0 skipped**; every remaining number is inside `proposals/`:
@@ -54,6 +54,60 @@ wasmrt's assembler and decoder agreed with each other: every non-null abstract r
 emitted as `ValType`'s internal tag rather than `0x64 <heaptype>`, and `try_table`'s catch label was
 off by one. **wasmtime 47 rejects both.** `wasmtime compile out.wasm` is now part of how a
 format-level change is checked — see §3.8b.
+
+## Spec-suite conformance — day 3 (2026-09-17) — **99.9%: 64,068 / 74 / 549 over 288 files**
+
+`wasmrt wast <testsuite>` over the **288** vendored files (284 until the corpus sync below).
+
+| | T13 day 1 (08-19) | T13 day 2 (08-20) | corpus sync re-measure (09-17) | **T13 day 3 (09-17)** |
+| --- | --- | --- | --- | --- |
+| **passed** | 63,333 | 63,807 | 63,963 | **64,068** |
+| failed | 172 | 112 | 112 | **74** |
+| skipped | 1,024 | 584 | 604 | **549** |
+| files | 284 | 284 | 288 | **288** |
+| **pass rate** | 99.7% of 63,505 | 99.8% of 64,503 | 99.8% of 64,075 | **99.9% of 64,142** |
+
+🔻 **THE CORPUS MOVED, AND THE TOTALS HID IT.** wasmtk synced the vendored testsuite to upstream
+`65a43d2e` on **2026-08-20 at 18:34**, after day 2's numbers were recorded. Re-measuring rather than
+quoting gave **63,963 / 112 / 604 over 288 files** as day 3's true starting point: **+4 files** (a new
+`custom/` directory with three files, plus `custom-page-sizes/binary.wast`), **+156 passes**, **+20
+skips** (the unhandled `assert_malformed_custom` / `assert_invalid_custom` commands those new files use).
+⚠️⚠️ **The failure count was 112 on both sides BY COINCIDENCE** — custom-descriptors +1,
+custom-page-sizes −2, `custom/` +1. 🎓 *An unchanged total is not evidence that nothing changed*
+(`best-practices.md` §1.7), and it is one more reason the gate reads per file.
+
+**Day 3's own movement: 63,963 / 112 / 604 → 64,068 / 74 / 549.** X1 (refuse `(pagesize N)`), the
+`assert_invalid` stage fix, the bare-index segment spellings, `spectest.shared_memory`, X2's clause
+sweep, and **Track W complete** (`wide-arithmetic.wast` **0/1/108 → 107/0/0**). No file lost a pass at
+any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **530/532**.
+⚠️ **Miri NOT RUN** — not installed on this host; the 28/28 on record is not re-verified.
+
+### 🔬 2026-09-17 — A THIRD HOLE IN THE PER-FILE GATE: a clean file has no row
+
+`scripts/conformance-diff.sh` enforces *no file lost a pass*, and its header already records two holes
+closed the hard way. **The third:** the runner printed a file's row only when `failed > 0 || skipped > 0`,
+so a **clean** file carried **no recorded pass count** — and passes it later lost to **skips** could not
+be detected.
+
+X1 landed in it. `custom-page-sizes/memory_max.wast` went **2 passed → 0 passed / 6 skipped** and the
+gate printed *"no file lost a pass"*. Two files were reported; **four** were affected. Every file prints
+a row now (288 rows), which makes the join total, and the same gate immediately found all four.
+
+🎓 The two earlier holes were about comparing rows badly; this one was about a row that was never
+written. **All three had the same symptom: a green verdict.** Ask what the instrument omits, not only
+what it gets wrong.
+
+### 🔬 2026-09-17 — X2, and the sweep T10a specified was the weaker half
+
+T10a asked for a **`ModuleBuild` field-coverage** sweep. It would not have caught either of the two most
+recent instances of the mechanism it was written for: `(pagesize N)` was parsed and **never stored** (no
+field to find uncovered), and the bare `tableidx` was not stored either — it was **re-read as an element
+item**. 🎓 **A field can only be covered once it exists**, so the sweep that shipped is over the
+**GRAMMAR**: 39 rows, each a text clause set to a non-default value, each checked against the **decoded**
+module rather than against `ModuleBuild` (asserting against the builder compares the parser with itself —
+§3.8b). It passed on the first run, so it was mutation-tested at three emitter sites: dropping `shared`
+from the limits flag, dropping `is64`, and dropping a memory's `max` — caught as 1, 2 and 1 lost clauses,
+the `is64` probe catching **two** because the sweep distinguishes table64 from memory64.
 
 ## Spec-suite conformance — day 1 (2026-08-19) — **99.7%**
 

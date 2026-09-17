@@ -29,17 +29,46 @@ than the thing the consumer uses.
 ## Where the port actually is (keep this line current)
 
 **T0–T8 DONE (published through v0.9.0); T9's eighteen passes landed 2026-08-14; 🆕 T13 — the
-CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 2 landed 2026-08-20, all unreleased.**
+CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 3 landed 2026-09-17, all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.8%** (**63,807 / 112 / 584**), **490 workspace
-tests**, Miri 28/28, no file lost a pass in any pass.
-🎯 **THE 257 CORE SPEC FILES ARE AT 0 FAILED / 0 SKIPPED.** Day 2 closed **F1–F7** (58 core failures
-→ 0) and **S1, S2, S3, S6, S7**; 63,333/172/1,024 → 63,807/112/584. Everything that remains is inside the
-four `proposals/` directories.
-🚦 **THE NEXT WORK IS SCOPED AND NOT STARTED (2026-08-20)** — `cmem/roadmap.md`, "THE REMAINING
+**embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,068 / 74 / 549** of 64,142 over **288**
+files), **503 workspace tests**, C-ABI gate PASSED, `.wat` corpus 530/532, no file lost a pass in any
+pass. ⚠️ **Miri NOT RUN on day 3** — not installed on this host, so the 28/28 on record is not
+re-verified.
+🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A RESIDUE AND TRACK W.** `wide-arithmetic.wast`
+**0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; `proposals/threads/imports.wast`
+**89/11/18 → 107/6/0**. What remains: **custom-descriptors 65/451** (track D), **`custom/` 1/20**
+(track A, new), **threads 8/0** (all era-pinned, an owner call) and **custom-page-sizes 0/78** (track P).
+🔻 **THE CORPUS MOVED AND THE TOTALS HID IT** — wasmtk synced the vendored testsuite to upstream on
+2026-08-20 at 18:34, so day 3's real starting point was **63,963 / 112 / 604 over 288 files**, not
+63,807/112/584 over 284: +4 files, +156 passes, +20 skips, and ⚠️⚠️ **the failure count matched on both
+sides by COINCIDENCE**. 🎓 *When the corpus can move, the denominator is a measurement*
+(`cmem/best-practices.md` §1.7).
+🔴 **TWO GATE FINDINGS, both the same shape.** `op_feature`'s doc comment claimed its match was
+"exhaustive over `Op`" so a new opcode could not silently default to allowed — **it ends in
+`_ => return None`**, and Track W's four ops shipped **refusable by no flag at all** (measured: 182
+ungated ops without the gate arm, 178 with). Then `WideArithmetic` reached the Rust enum and the struct
+but **not `wasmrt_feature_t`**, so it was gated at one entry point of two — exactly what X3 exists to
+prevent, and what T10b had predicted. Both are pinned by DATA now. 🎓 **A gate that cannot fail is
+decoration; a gate that exists only in a doc comment is not even that** (§4.4).
+🔬 **A THIRD HOLE IN THE PER-FILE GATE**: a clean file carried no row, so passes it lost to **skips**
+were invisible — `memory_max.wast` went 2 passed → 0 and `conformance-diff.sh` printed *"no file lost a
+pass"*. Every file prints a row now, and the same gate then reported four affected files instead of two.
+⚠️⚠️ **TRACK D IS BLOCKED ON A REPRESENTATION DECISION, and it is not the one D1 names.** `Op` is
+`#[repr(u8)]` and W's four tags took the **last four free bytes — zero remain**. Custom-descriptors
+needs ≥8 `*desc*` ops, so it must either widen `Op` to `u16` (moving `Instr`, whose size is pinned, on
+the hot path — a T11 question landing inside T13) or adopt the `Simd`/`Atomic` **family** pattern.
+🔴 **AND A RECORDED DECISION TURNED OUT TO BE A NO-OP**: the era-pinned `proposals/threads/` fix
+("refresh the vendored snapshot") cannot be executed — the 08-20 sync **did not touch
+`proposals/threads/`**, so the vendored copy already IS upstream and upstream is the stale one.
+🎓 *Verifying the premise of an option is not verifying the option* (§8.4) — "the snapshot is behind
+CORE" was proved; "a newer snapshot exists" was assumed. Needs an owner decision again.
+🚦 **NEXT: track A (the `custom/` runner commands, 20 skips, no engine risk) → the two owner decisions
+above → track P → track D.** The 2026-08-20 scoping below is now the record of how it was planned; its
+cross-cutting items and track W are done. *(Superseded scoping follows.)* — `cmem/roadmap.md`, "THE REMAINING
 WORK, SCOPED". Three cross-cutting items first — **X1** refuse `(pagesize N)`, **X2** the `ModuleBuild`
 field-coverage sweep (T10a's open half), **X3** a proposal's `Feature` gate is a track DELIVERABLE
-(`Feature` has 15 members and **none of the three new proposals**) — then four tracks ranked
+(`Feature` had 15 members and **none of the three new proposals**; it has **16** now, with wide-arithmetic gated at both entry points) — then four tracks ranked
 **W** wide-arithmetic (1f/108s, best ratio) → **P** custom-page-sizes (34f/7s, 🔒 the memory-safety
 one) → **M/A** threads (13f/18s, ⚠️ triage before costing) → **D** custom-descriptors (64f/451s,
 largest and riskiest; **D1 `(ref (exact $t))` changes SUBTYPING** and carries a type-confusion

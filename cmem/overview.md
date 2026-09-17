@@ -86,16 +86,22 @@ the text toolchain assembles `.wat`, runs `.wast`, and scored 98.4% on the offic
   names, so wasmrt is embeddable from C. The wasm-c-api refcount object model is **designed out** in
   favour of **checked value handles** that carry the identity of the store that issued them, so a stale
   or foreign handle is refused rather than followed. All raw-pointer work is confined to one audited
-  module, and the whole surface runs under **Miri**. Also: **proposal gating** (14 flags, enforced at
+  module, and the whole surface runs under **Miri**. Also: **proposal gating** (16 flags, enforced at
   validation) and **configurable resource ceilings**, plus a **`Linker` in core** shared by the C ABI,
   the native crate, WASI and the `.wast` runner — whose arrival surfaced and fixed **two
   silent-wrong-output defects** (dropped table initializer expressions; element-segment form 4 silently
   rewriting a segment's type). Suite **61,033 / 738 / 3,075 — 98.8%**.
 
-- **T13 (`1.0.0`, IN PROGRESS)** — the **conformance clear-out**, day 1 landed 2026-08-19: suite
-  **62,238 / 378 / 2,038 → 63,333 / 172 / 1,024 — 99.7%** of 63,505, **484 tests**, no file lost a pass.
-  ~20 fixes plus the **skip census**, which showed 91% of the remaining skips are cascades and cut the
-  work-list to **F1–F7 + S1–S7** (see `roadmap.md`). **1,196 assertions remain.**
+- **T13 (`1.0.0`, IN PROGRESS)** — the **conformance clear-out**. **Day 3 landed 2026-09-17: suite
+  64,068 / 74 / 549 — 99.9%** of 64,142 over **288** files, **503 tests**, no file lost a pass at any
+  step. Day 1 (08-19) was the ~20 fixes plus the **skip census** that cut the work-list to F1–F7 + S1–S7;
+  day 2 (08-20) took the 257 CORE files to **0 failed / 0 skipped**; day 3 closed the cross-cutting items
+  **X1/X2/X3**, the whole M/A residue, and **track W — wide arithmetic** (`wide-arithmetic.wast`
+  0/1/108 → **107/0/0**). **623 assertions remain, and 516 of them are custom-descriptors.**
+  ⚠️ **Track D is blocked on a representation decision**: `Op` is `#[repr(u8)]` and track W's four tags
+  took the last four free bytes. ⚠️ **Miri not re-verified on day 3** (not installed on this host).
+  🔻 The vendored corpus moved on 2026-08-20 (upstream sync, +4 files), so every figure before that has a
+  denominator that no longer exists — re-measure, never quote (`best-practices.md` §1.7).
 
 - **T9 (now `1.0.1`, IN PROGRESS)** 🆕 *(the ladder was re-cut 2026-08-19: `1.0.0` is the conformance clear-out, T13, and it runs first)* — **eighteen passes landed 2026-08-07/14**, unreleased. Suite at the time
   **62,238 / 378 / 2,038 — 99.4%** of 62,616, **458 tests** (420 core + 28 capi + 10 CLI), Miri 28/28,

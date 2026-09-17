@@ -1,6 +1,6 @@
 # Known Issues
 
-## 🔴 OPEN — `(pagesize N)` is PARSED AND SILENTLY DROPPED. A wrong module, not a missing feature.
+## ✅ CLOSED 2026-09-17 — `(pagesize N)` was PARSED AND SILENTLY DROPPED. Refused by name now.
 
 **Found 2026-08-20 while SCOPING the proposal work, not by a test.** Priority X1 in `roadmap.md`.
 
@@ -31,11 +31,32 @@ the general rule; this is the sharp edge of it).
 addresses that must trap silently succeed. It is in the silent-wrong-output class this port ranks
 worst, and it is reachable from plain text input today.
 
-**The honest immediate fix (X1):** refuse the clause — `Error::Unsupported("custom-page-sizes")` —
-until Track P implements it. That converts a wrong answer into a refusal, which is the safe direction,
-and it is what wazmrt did (it refused by name as `UnsupportedProposal` before implementing).
-⚠️ Expect skips to RISE and `custom-page-sizes-invalid.wast`'s 16 *"module was accepted"* failures to
-resolve; both are honest movement, not regression.
+✅ **FIXED (X1, 2026-09-17):** refused by name — `Error::Unsupported("custom-page-sizes")` — until
+Track P implements it. A wrong answer became a refusal, which is the safe direction, and it is what
+wazmrt did before implementing.
+
+⚠️ **TWO memory-type parsers, so two guard sites.** `parse_memory_field` and the `"memory"` arm of
+`parse_import_field` each read a memory type, and the clause travels in two POSITIONS (after the
+limits, and before an inline `(data …)`). A guard in one parser refuses half the spellings the corpus
+uses. Both sites are mutation-verified independently — the same "one rule, N copies" shape T9's
+seventh and eighth passes hit three times.
+
+📊 **Measured, guards off then on, same instrument both sides:** `custom-page-sizes` **34 failures → 0**
+(the prediction said 16; 20 were *"module was accepted"* / *"module linked"* and **12 were WRONG
+ANSWERS** — `(memory 65536 (pagesize 1))` was built as 65,536 × 64 KiB, so `grow` returned −1, `size`
+returned 0, and loads *inside* a 64 KiB memory trapped out of bounds). Skips rose 604 → 675, which is
+prediction 2 landing. **20 passes were lost and not one was a verdict**: every module in all four
+affected files declares a pagesize, so each of those passes was an answer about a module wasmrt should
+never have accepted — mostly `(pagesize 65536)` modules that agreed only because 65536 is the default,
+plus two `(register …)` bookkeeping commands whose target no longer builds.
+
+🔬 **AND IT EXPOSED A THIRD HOLE IN THE PER-FILE GATE, which is the more durable finding.** The runner
+listed a file only when it had failures or skips, so a CLEAN file carried no recorded pass count — and
+passes it later lost to SKIPS were invisible to "no file lost a pass".
+`custom-page-sizes/memory_max.wast` went **2 passed → 0 passed / 6 skipped** and
+`scripts/conformance-diff.sh` printed *"no file lost a pass"*. Every file prints a row now, and the same
+gate reports **four** affected files instead of two. The gate's own header records two earlier holes of
+this family; this is the third. 🎓 *It could fail — but only for files that were already failing.*
 
 🎯 **It is the FIFTH instance of the T10a emitter mechanism** — *the emitter reconstructs a form from a
 subset of the parser's facts* — and, like the first four, it was found by accident rather than by the
@@ -45,7 +66,7 @@ field-coverage half never did** (X2). A ten-clause spot probe found this one; `s
 collapsing to the bare form is **correct** — a bare composite type *is* `sub final ϵ` — which was
 checked before reporting rather than counted as a sixth.
 
-## 🔒 DECIDED — the era-pinned `proposals/threads/` assertions: REFRESH THE SNAPSHOT (owner, 2026-08-20)
+## 🔴 REOPENED 2026-09-17 — the era-pinned `proposals/threads/` assertions. **THE DECIDED FIX IS A NO-OP.**
 
 8 of the 13 `proposals/threads/` failures are assertions that a **modern engine must fail**: the
 snapshot predates multi-memory and multi-table, so it asserts `(memory 0) (memory 0)` invalid, and
@@ -63,11 +84,36 @@ number, worst precedent — a file removed for failing is the failure mode the b
 to prevent).
 
 🔒🔒 **It is a wasmtk change.** The corpus is not ours; do not edit it from a wasmrt session unless the
-owner directs it that time. **Expected effect: threads 13 → 5**, and the remaining 5 are wasmrt's own —
-4 bare-memidx segment spellings (see the entry above) and 1 missing `spectest.shared_memory`.
-⚠️ A newer snapshot may also *add* assertions; measure after, do not predict.
+owner directs it that time.
 
-## 🔴 OPEN — the bare-memidx SEGMENT spellings are refused, and they are valid
+🔴 **BUT THE DECISION CANNOT BE EXECUTED AS WRITTEN, measured 2026-09-17.** wasmtk **already synced the
+vendored testsuite to upstream `65a43d2e`** on 2026-08-20 at 18:34 — hours after the decision was
+recorded — and **that sync did not touch `proposals/threads/` at all** (its last change in wasmtk is the
+folder-regrouping refactor). So the vendored snapshot *is* upstream's current state, and it still carries
+the 6 era-pinned assertions: `proposals/threads/imports.wast` still has 6 "multiple memories" / "multiple
+tables" assertions while the core `imports.wast` in the same checkout has 0. **There is nothing newer to
+refresh to.** Upstream's threads snapshot is itself stale.
+
+🎓 **The premise was verified and still pointed the wrong way.** "The snapshot is behind" was proved — by
+comparing it with the *core* file in the same checkout — and that proves staleness relative to CORE, not
+that a NEWER SNAPSHOT EXISTS. Those are different claims, and only the second one makes "refresh it"
+available. *Verifying the premise of an option is not the same as verifying the option.*
+
+🚦 **So this needs an owner decision again**, and the surviving routes are the two that were rejected
+plus one that was not considered:
+1. **Patch the vendored snapshot in place** (a deliberate local deviation from upstream, annotated) —
+   keeps T13's *empty baseline* clause, at the cost of the vendored tree no longer matching upstream.
+2. **An explained baseline entry** — honest, contradicts "empty baseline".
+3. **Report it upstream** to the spec repo and carry a temporary entry until it lands. Slowest, and the
+   only route that fixes it for everyone.
+
+📐 **What has already been paid, without any snapshot change:** threads went **13 → 8**. The 4
+bare-memidx segment failures are fixed (a real core-grammar gap of ours), `spectest.shared_memory` is
+defined, and the 4 misreported ones now read honestly. **All 8 that remain are era-pinned assertions a
+modern engine must fail** — 6 in `imports.wast`, 2 in `memory.wast` — and wasmtime accepts the same
+modules. Nothing left in `proposals/threads/` is wasmrt's own work.
+
+## ✅ CLOSED 2026-09-17 — the bare-index SEGMENT spellings. **The `elem` half was not a refusal.**
 
 `(data 0 (i32.const 0) "x")` and `(elem 0 (i32.const 0) $f)` — a segment naming its memory/table by a
 bare index before the offset — are **valid today**. wasmtime accepts both. wasmrt refuses them:
@@ -88,7 +134,47 @@ skipped" is a statement about **directories, not about rules**: this gap was alw
 and simply had no core file to fail in. 🎓 *A milestone scoped by where a test lives is not the same
 as one scoped by what a test checks.*
 
-Found 2026-08-20 by the Track M/A triage. Costs 4 assertions directly.
+Found 2026-08-20 by the Track M/A triage. Logged at 4 assertions directly; **it delivered 18.** Two
+modules that failed to BUILD stranded every assertion after them, so `proposals/threads/imports.wast`
+went **89 / 11 / 18 → 107 / 7 / 0**. *Read the skip column*, for the fourth time.
+
+⚠️⚠️ **THE `elem` HALF WAS NOT A FALSE REJECTION — it assembled a DIFFERENT SEGMENT.** The table above
+recorded it as `TypeMismatch` and called the message misleading; the cause is worse than that. With
+nothing consuming the `0`, the offset branch did not fire either, so an **active** segment writing one
+funcref at index 1 became a **passive** segment of three items: `ref.func 0`, the offset expression
+itself, and `ref.func $f`. It surfaced at all only because an `i32.const` cannot be a `funcref`. A
+passive segment assembles, decodes and validates perfectly well — had the items happened to type-check,
+this would have been a silently wrong module.
+
+🎓 **The lesson, and it generalises past segments: a spelling the parser does not know is not
+automatically REFUSED — it can be silently RE-READ as something else.** That is the T10a emitter
+mechanism arriving from the parser's side, and it is why the regression test asserts the segment's
+MEANING (mode `Active`, exactly one item) rather than that the module assembles.
+
+⚠️ **A disagreement with wasmtime, traced rather than assumed.** The first cut resolved `$name`s too,
+which made wasmrt accept `(data $seg $m (i32.const 0) "x")` — **wasmtime refuses it** ("expected `(`"):
+its parser takes a bare index in that slot but a named one only parenthesised. Nothing in the spec
+testsuite or the wasmtk corpus spells a named bare use-index, so accepting it would be permissiveness
+with nothing behind it. Restricted to an atom starting with a DIGIT, which also excludes `func`,
+`funcref`, `declare` and every reftype keyword **by construction** rather than by a keyword list a
+future spelling could outgrow. All eight spellings now agree with wasmtime in both directions.
+
+## 🟡 OPEN, and it is a CONTRACT SURFACE — `wasmrt <file>` exits **0** on an invalid module
+
+`wasmrt <file>` (summarize + type-check) prints `validation FAILED: …` and **exits 0**. A script using
+that path as a validity gate passes every invalid module.
+
+⚠️⚠️ **Found by falling into it.** A probe table written on 2026-09-17 to compare segment spellings
+against wasmtime used `wasmrt <file> && echo OK` as its oracle, and therefore reported *four* forms as
+accepted that the engine was actually refusing at validation. The table had to be thrown away and
+re-run reading the OUTPUT instead of the status. 🎓 *A gate that cannot fail is decoration* — including
+a gate you build for yourself, in a shell loop, five minutes before trusting it.
+
+🔒 **NOT CHANGED, deliberately: exit codes are `interop.md` §0 contract surface**, and §1's row
+*"summarize + validate, no execution"* is marked ✅ AGREED on behaviour **and exit code** (both `rc=0`).
+That row was measured on a VALID module, so the invalid case is not actually covered by it — but
+`wazmrt` LEADS the contract right now, so this belongs in the annex as a question for that side, not in
+a unilateral change here. **Coordinate before touching it.**
 
 ## ✅ CLOSED 2026-08-20 — the T13 day-2 sweep. **Read this before believing anything below it.**
 
