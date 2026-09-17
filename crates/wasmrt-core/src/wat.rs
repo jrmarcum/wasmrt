@@ -6675,6 +6675,305 @@ mod emitter_coverage_tests {
         crate::validate::validate(&md).expect("must validate");
     }
 
+    /// **X2 — THE CLAUSE-COVERAGE SWEEP.** For every clause the module grammar admits, a module
+    /// that sets it to a NON-DEFAULT value, assembled and decoded, must still carry it.
+    ///
+    /// 🎯 This is the sweep T10a specified on 2026-08-08, after three "the assembler emits a
+    /// different module than the text describes" defects in two passes — **all three found by
+    /// accident**, by some unrelated check reading a field the emitter had dropped. The opcode
+    /// half shipped that day; this is the module half, and by the time it landed the mechanism
+    /// had produced **seven** instances, the last two also found by accident.
+    ///
+    /// ⚠️⚠️ **T10a called this a `ModuleBuild` FIELD-coverage sweep, and that is the weaker
+    /// half — it would not have caught either of the two most recent instances.**
+    /// `(pagesize N)` was parsed and never stored, so there was no field to find uncovered; the
+    /// bare `tableidx` of `(elem 0 …)` was not stored either, it was silently re-read as an
+    /// element ITEM. Both are *clauses the parser accepts and the module does not carry*, which
+    /// is what the mechanism actually produces. **A field can only be covered once it exists**,
+    /// so this sweep is over the GRAMMAR rather than the struct: every row is a text clause, and
+    /// a row fails however the clause is lost — dropped, stored but not emitted, or re-read as
+    /// something else.
+    ///
+    /// 🔒 **Each check reads the DECODED module, never `ModuleBuild`.** Asserting against the
+    /// builder would compare the parser with itself, which is the §3.8b error: agreement between
+    /// two components that learned the convention from each other is not evidence. The decoder is
+    /// a second reader of the same bytes. Where a clause is visible to no reader at all (a struct
+    /// field's *name*, which exists only to resolve `$name` and reaches no section) there is
+    /// nothing to assert, and that row is absent deliberately rather than forgotten.
+    #[test]
+    fn every_module_clause_survives_the_round_trip() {
+        type Check = fn(&crate::module::Module) -> bool;
+        use crate::module::{CompType, ElementMode, Extern};
+
+        let rows: &[(&str, &[u8], Check)] = &[
+            // --- types ---
+            (
+                "(rec …) group boundaries",
+                br#"(module (rec (type $a (struct)) (type $b (struct))))"#,
+                |m| m.rec_groups == [(0, 2)],
+            ),
+            (
+                "(sub …) leaves a type OPEN",
+                br#"(module (type $a (sub (struct))))"#,
+                |m| m.type_finals == [false],
+            ),
+            (
+                "(sub final …) is final",
+                br#"(module (type $a (sub final (struct))))"#,
+                |m| m.type_finals == [true],
+            ),
+            (
+                "a declared supertype",
+                br#"(module (type $a (sub (struct))) (type $b (sub $a (struct))))"#,
+                |m| m.supertypes == [None, Some(0)],
+            ),
+            (
+                "a mutable array field",
+                br#"(module (type (array (mut i32))))"#,
+                |m| matches!(&m.comp_types[0], CompType::Array(f) if f.mutable),
+            ),
+            (
+                "an immutable array field",
+                br#"(module (type (array i32)))"#,
+                |m| matches!(&m.comp_types[0], CompType::Array(f) if !f.mutable),
+            ),
+            (
+                "a struct's fields and their mutability",
+                br#"(module (type (struct (field i32) (field (mut i64)))))"#,
+                |m| {
+                    matches!(&m.comp_types[0], CompType::Struct(f)
+                        if f.len() == 2 && !f[0].mutable && f[1].mutable)
+                },
+            ),
+            (
+                "params and results",
+                br#"(module (func (param i32) (result i64) (i64.const 0)))"#,
+                |m| {
+                    matches!(&m.comp_types[0], CompType::Func(t)
+                        if t.params.len() == 1 && t.results.len() == 1)
+                },
+            ),
+            // --- functions ---
+            (
+                "(type $t) on a func reuses THAT index",
+                br#"(module (type $u (func)) (type $t (func (param i32)))
+                      (func (type $t) (param i32)))"#,
+                |m| m.functions == [1],
+            ),
+            (
+                "declared locals",
+                br#"(module (func (local i64) (local f32)))"#,
+                |m| m.code[0].locals.iter().map(|l| l.count).sum::<u32>() == 2,
+            ),
+            (
+                "(start $f)",
+                br#"(module (func $f) (start $f))"#,
+                |m| m.start == Some(0),
+            ),
+            // --- imports: the ORDER is part of the module ---
+            (
+                "imports keep their declaration order across kinds",
+                br#"(module (import "a" "g" (global i32)) (import "a" "f" (func)))"#,
+                |m| {
+                    matches!(m.imports.as_slice(), [i0, i1]
+                        if matches!(i0.ty, Extern::Global(_)) && matches!(i1.ty, Extern::Func(_)))
+                },
+            ),
+            (
+                "an imported global's mutability",
+                br#"(module (import "a" "b" (global (mut i32))))"#,
+                |m| m.globals[0].mutable,
+            ),
+            // --- tables ---
+            (
+                "table min and max",
+                br#"(module (table 2 5 funcref))"#,
+                |m| m.tables[0].limits.min == 2 && m.tables[0].limits.max == Some(5),
+            ),
+            (
+                "a table's element type",
+                br#"(module (table 1 externref))"#,
+                |m| m.tables[0].element == V::EXTERNREF,
+            ),
+            (
+                "an i64 (table64) index type",
+                br#"(module (table i64 1 funcref))"#,
+                |m| m.tables[0].limits.is64,
+            ),
+            (
+                "a table's initializer expression",
+                br#"(module (func $f) (table 1 funcref (ref.func $f)))"#,
+                |m| m.tables[0].init.is_some(),
+            ),
+            // --- memories ---
+            (
+                "memory min and max",
+                br#"(module (memory 2 5))"#,
+                |m| m.memories[0].limits.min == 2 && m.memories[0].limits.max == Some(5),
+            ),
+            (
+                "a shared memory",
+                br#"(module (memory 1 2 shared))"#,
+                |m| m.memories[0].limits.shared,
+            ),
+            (
+                "an i64 (memory64) index type",
+                br#"(module (memory i64 1))"#,
+                |m| m.memories[0].limits.is64,
+            ),
+            (
+                "an inline (data …) sizes the memory and emits the segment",
+                br#"(module (memory (data "xyz")))"#,
+                |m| m.data.len() == 1 && m.data[0].bytes == b"xyz" && m.data[0].active,
+            ),
+            // --- globals ---
+            (
+                "a mutable global",
+                br#"(module (global (mut i32) (i32.const 1)))"#,
+                |m| m.globals[0].mutable,
+            ),
+            (
+                "an immutable global",
+                br#"(module (global i32 (i32.const 1)))"#,
+                |m| !m.globals[0].mutable,
+            ),
+            (
+                "a global's initializer VALUE",
+                br#"(module (global i32 (i32.const 7)))"#,
+                // `i32.const 7` then `end`. The value has to be in the bytes: an initializer
+                // emitted as a default would still decode and still validate.
+                |m| m.global_inits[0] == [0x41, 0x07, 0x0b],
+            ),
+            // --- tags ---
+            (
+                "a defined tag's type index",
+                br#"(module (type $u (func)) (type $t (func (param i32))) (tag (type $t)))"#,
+                |m| m.tags == [1],
+            ),
+            (
+                "an imported tag",
+                br#"(module (type $t (func)) (import "a" "b" (tag (type $t))))"#,
+                |m| matches!(m.imports[0].ty, Extern::Tag(_)),
+            ),
+            // --- element segments ---
+            (
+                "an elem segment's table index",
+                br#"(module (table 1 funcref) (table 4 funcref) (func $f)
+                      (elem (table 1) (i32.const 0) func $f))"#,
+                |m| m.elements[0].table_index == 1,
+            ),
+            (
+                "a declarative elem segment",
+                br#"(module (func $f) (elem declare func $f))"#,
+                |m| m.elements[0].mode == ElementMode::Declarative,
+            ),
+            (
+                "a passive elem segment with an explicit type",
+                br#"(module (func $f) (elem funcref (ref.func $f)))"#,
+                |m| {
+                    m.elements[0].mode == ElementMode::Passive
+                        && m.elements[0].elem_type == V::FUNCREF
+                },
+            ),
+            (
+                "an (item …) entry forces the expression encoding",
+                br#"(module (func $f) (elem funcref (item (ref.func $f))))"#,
+                |m| m.elements[0].exprs.len() == 1 && m.elements[0].funcs.is_empty(),
+            ),
+            (
+                "an active elem segment carries its offset",
+                br#"(module (table 1 funcref) (func $f) (elem (i32.const 0) $f))"#,
+                |m| {
+                    m.elements[0].mode == ElementMode::Active
+                        && !m.elements[0].offset_expr.is_empty()
+                },
+            ),
+            // --- data segments ---
+            (
+                "a data segment's memory index",
+                br#"(module (memory 1) (memory 1) (data (memory 1) (i32.const 0) "x"))"#,
+                |m| m.data[0].mem_index == 1,
+            ),
+            (
+                "a passive data segment",
+                br#"(module (memory 1) (data "x"))"#,
+                |m| !m.data[0].active,
+            ),
+            (
+                "an active data segment's offset",
+                br#"(module (memory 1) (data (i32.const 4) "x"))"#,
+                |m| m.data[0].active && !m.data[0].offset_expr.is_empty(),
+            ),
+            // --- imports, one row per kind whose TYPE travels with it ---
+            (
+                "an imported table's type",
+                br#"(module (import "a" "b" (table 3 7 externref)))"#,
+                |m| {
+                    m.tables[0].limits.min == 3
+                        && m.tables[0].limits.max == Some(7)
+                        && m.tables[0].element == V::EXTERNREF
+                },
+            ),
+            (
+                "an imported memory's type",
+                br#"(module (import "a" "b" (memory 3 7 shared)))"#,
+                |m| {
+                    m.memories[0].limits.min == 3
+                        && m.memories[0].limits.max == Some(7)
+                        && m.memories[0].limits.shared
+                },
+            ),
+            // --- the data-count section, which exists ONLY because a body can reference a
+            // segment by index (§5.5.13). Emitted conditionally, so both directions are rows.
+            (
+                "memory.init forces the data-count section",
+                br#"(module (memory 1) (data "x")
+                      (func (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 0))))"#,
+                |m| m.section(crate::types::SectionId::DataCount).is_some(),
+            ),
+            (
+                "and a module that cannot reference one does NOT carry it",
+                br#"(module (memory 1) (data (i32.const 0) "x"))"#,
+                |m| m.section(crate::types::SectionId::DataCount).is_none(),
+            ),
+            // --- exports: one row covering every KIND, because the kind byte is per-kind code ---
+            (
+                "every export kind reaches the export section",
+                br#"(module (func (export "f")) (table (export "t") 1 funcref)
+                      (memory (export "m") 1) (global (export "g") i32 (i32.const 0)))"#,
+                |m| {
+                    m.exports.len() == 4
+                        && m.exports.iter().any(|e| e.name == "f" && matches!(e.ty, Extern::Func(_)))
+                        && m.exports.iter().any(|e| e.name == "t" && matches!(e.ty, Extern::Table(_)))
+                        && m.exports.iter().any(|e| e.name == "m" && matches!(e.ty, Extern::Memory(_)))
+                        && m.exports.iter().any(|e| e.name == "g" && matches!(e.ty, Extern::Global(_)))
+                },
+            ),
+        ];
+
+        let mut lost = Vec::new();
+        for (label, src, check) in rows {
+            match assemble(src) {
+                Ok(bytes) => match crate::module::decode(&bytes) {
+                    Ok(md) => {
+                        if !check(&md) {
+                            lost.push(format!("{label}: assembled, but the clause is GONE"));
+                        }
+                    }
+                    Err(e) => lost.push(format!("{label}: emitted bytes do not decode: {e:?}")),
+                },
+                Err(e) => lost.push(format!("{label}: does not assemble: {e}")),
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "the emitter reconstructs a module from a SUBSET of the parser's facts — \
+             {} clause(s) did not survive the round trip:\n  {}",
+            lost.len(),
+            lost.join("\n  ")
+        );
+    }
+
     /// A segment may name its memory or table with a **bare index**, and both spellings must
     /// mean the same thing.
     ///
