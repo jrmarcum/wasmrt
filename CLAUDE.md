@@ -32,7 +32,7 @@ than the thing the consumer uses.
 CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 3 landed 2026-09-17, all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,068 / 66 / 549** of 64,134 over **288**
-files), **503 workspace tests**, C-ABI gate PASSED, `.wat` corpus 530/532, no file lost a pass in any
+files), **503 workspace tests**, C-ABI gate PASSED, `.wat` corpus **528/532** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a pass in any
 pass. ⚠️ **Miri NOT RUN on day 3** — not installed on this host, so the 28/28 on record is not
 re-verified.
 🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
@@ -54,15 +54,21 @@ decoration; a gate that exists only in a doc comment is not even that** (§4.4).
 🔬 **A THIRD HOLE IN THE PER-FILE GATE**: a clean file carried no row, so passes it lost to **skips**
 were invisible — `memory_max.wast` went 2 passed → 0 and `conformance-diff.sh` printed *"no file lost a
 pass"*. Every file prints a row now, and the same gate then reported four affected files instead of two.
-⚠️ **`Op` HAS ZERO FREE TAGS and Track D needs ≥8 — but the decision is MEASURED now, not a
-trade-off.** Widening `Op` to `u16` is **free on size** (`Instr` stays 80 bytes; the second byte lands in
-padding `offset` already used), **cannot change canonical behaviour** (`Op` is an internal tag — the
-288-file suite under `u16` came out **byte-identical**, and `Op` never crosses the C ABI, so the T8
-freeze is untouched), and is **+7–9% faster** on the steady axis (A/B/A/B, non-overlapping groups).
-Cost: 13 `op as u8` sites. ⚠️⚠️ **The mechanism is unexplained** — the number is measured, the cause is
-not — so it goes to **T11 beside the unattributed ~5% regression** rather than being banked.
-🎁 Dividend: under `u16` internal tags can move to `0x100+`, out of the wire byte space, retiring
-`decode_body`'s raw-internal-tag guard and the §3A.2 "synthetic tag in a real space" class.
+✅ **`Op` IS `#[repr(u16)]` WITH ITS TAGS ABOVE `0xff` (owner-directed, 2026-09-17) — TRACK D IS
+UNBLOCKED** with 0xEB free tags. Measured before adopting: **free on size** (`Instr` stays 80 bytes),
+**canonical behaviour unchanged** (the 288-file suite under `u16` was **byte-identical**; `Op` never
+crosses the C ABI, so the T8 freeze holds), **+7–9% faster** on the steady axis. ⚠️⚠️ **That gain has no
+explained mechanism** — the number is measured, the cause is not — so it is a **T11 lead beside the
+unattributed ~5% regression and NOT a figure to quote.** ✅ `decode_body`'s raw-internal-tag guard is
+**deleted and cannot return**: `from_u8` takes a `u8` and no tag fits in one.
+🔴 **The repartition found the SIXTH emitter defect**: `i32.trunc_sat_*` and its seven siblings were
+emitted as the raw byte `0xc5`–`0xcc`, which is an **illegal opcode** — every module wasmrt assembled
+containing a saturating truncation was **not WebAssembly** (LLVM emits these for ordinary float→int
+casts). Our decoder accepted the same bytes, so the round trip was green. `wasmtime compile` on our
+output found it in one command (§3.8b). Now `0xFC 0x00`–`0x07`, verified.
+🚦 **PICKING UP TOMORROW? The handoff list is in `cmem/roadmap.md`, "HANDOFF — where to pick up".**
+Nothing is half-finished. The only work-in-progress anywhere is the threads patch sitting uncommitted
+in the **wasmtk** tree, on purpose, for wasmtk's own session to commit.
 🔴 **A RECORDED DECISION TURNED OUT TO BE A NO-OP, and was then done properly.** The era-pinned
 `proposals/threads/` fix — "refresh the vendored snapshot" — could not be executed: the 08-20 sync
 **did not touch `proposals/threads/`**, so the vendored copy already IS upstream and upstream is the

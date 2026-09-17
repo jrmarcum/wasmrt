@@ -186,7 +186,40 @@ Produced after the **skip census** (`testing.md`) made the skip column attributa
 ⚠️ **The track table was ranked on numbers that could not distinguish a root from its shadow;** these
 are ranked on *assertions unblocked*, which is what the ranking rule above actually asks for.
 
-##### ✅ DAY 3 (2026-09-17) — X1, X2, X3, the M/A residue and **TRACK W** all landed. `[x]`
+##### 🚦 HANDOFF — where to pick up (2026-09-17, end of day 3)
+
+**State: 64,068 / 66 / 549 over 288 files, 503 workspace tests, C-ABI gate PASSED, `.wat` corpus
+528/532, everything committed and pushed.** ⚠️ **Miri NOT RUN all day** — not installed on this host.
+
+**Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
+clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
+
+| # | task | why it is next |
+| --- | --- | --- |
+| **1** | 🔒 **wasmtk commits the threads patch.** Two files modified in the wasmtk tree and nothing else: `proposals/threads/imports.wast`, `proposals/threads/memory.wast`. **Not committed from here on purpose** — the write was owner-authorised, committing in another repo is not. | It is the only work-in-progress anywhere. ⚠️ It is a deliberate deviation from upstream and `update-testsuite.py` WILL overwrite it on the next sync — re-check after every sync. |
+| **2** | 📮 **Report the stale snapshot upstream** (the spec repo's `proposals/threads/` still asserts multi-memory and multi-table invalid). Not filed — needs the owner's account. | The only route that fixes it for everyone; until then the patch carries it. |
+| **3** | **Track A — the `custom/` directory.** `assert_malformed_custom` and `assert_invalid_custom` are unhandled commands: **20 skips + 1 failure, pure runner work, no engine risk.** | Smallest item left, same shape as S2 (41 assertions of runner work). Arrived with the 08-20 corpus sync and no track covered it. |
+| **4** | **The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
+| **5** | **Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
+| **6** | **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
+
+⚠️ **Two predictions still standing, so honest movement is not read as regression:**
+* **Passes go DOWN when `exact` lands** — a parse gap currently scores as a correct rejection, so ~19
+  of `exact.wast`'s passes are false.
+* The `custom/` work will **convert skips into verdicts**, and some will be failures.
+
+🎓 **Three things to carry into tomorrow, all paid for today:**
+1. **Re-measure the corpus before trusting a delta.** wasmtk syncs it; the file count is part of the
+   measurement (§1.7). Day 3 opened on numbers that were four files stale and a failure total that
+   matched the old one by coincidence.
+2. **Hand the output to wasmtime whenever anything format-level moves.** It found the
+   `i32.trunc_sat_*` divergence in one command after the whole port had missed it (§3.8b).
+3. **A gate you build for yourself is still a gate — check it can fail.** Two of today's findings were
+   only visible after fixing the instrument: the per-file gate could not see a clean file lose passes,
+   and the `.wat` corpus loop keyed on an exit status that is always 0.
+
+
+##### ✅ DAY 3 (2026-09-17) — X1, X2, X3, the M/A residue, **TRACK W**, the threads patch and the **`Op`→u16** move. `[x]`
 
 **64,068 / 66 / 549 over 288 files**, 503 workspace tests, C-ABI gate PASSED, gate green at every step.
 ⚠️ **Miri NOT RUN** — not installed on this host; the 28/28 on record is from an earlier session and is
@@ -234,8 +267,10 @@ comment is not even that** — and the comment asserting the protection is the r
 `0x1d`/`0x1e`/`0x27`/`0xff` — the last four free bytes of the `#[repr(u8)]` space. Custom-descriptors
 cannot be tagged this way at all.
 
-✅ **MEASURED 2026-09-17 (owner asked what widening costs, and whether it touches canonical behaviour).
-Widening `Op` to `u16` is FREE on size, NEUTRAL on canonical behaviour, and MEASURABLY FASTER.**
+✅ **DONE 2026-09-17 (owner: "go ahead and make the change"). `Op` IS `#[repr(u16)]` AND THE TAGS
+ARE ABOVE `0xff`.** Track D has **0xEB free tags** instead of zero. Landed as two commits — the
+widening, then the byte-space move — so the mechanical half stays separately bisectable from the
+half that repartitions the byte range. The measurement that justified it, kept as the record:
 
 | question | answer, measured |
 | --- | --- |
@@ -267,8 +302,17 @@ currently have to be kept in sync by hand there.
    tag space and adds one dispatch. ⚠️ It is the precedent for *large* prefixed families only — bulk
    memory (4), table ops (6) and the GC array ops (8) each took individual tags — so for D it is a change
    of convention, and it leaves the internal tags inside the wire space where the guard is still needed.
-**Route 1 now looks strictly better on the evidence.** Still D's call to make, but it is no longer a
-trade-off against size or speed.
+**Route 1 was taken.** ✅ **The guard is deleted and cannot come back** — `Op::from_u8` takes a `u8`
+and every tag is `>= 0x100`, so it cannot return one; a test walks all 256 bytes and asserts it. Internal
+ops are matched **by variant** in `simple_sig` and the interpreter's float dispatch, and `immediate_kind`
+is wire-only. ⚠️ Route 2 (the family pattern) is not needed and was not taken.
+
+🔴 **AND THE REPARTITION FOUND A LIVE WIRE DIVERGENCE — the sixth instance of the emitter mechanism.**
+The eight saturating truncations were WIRE entries at `0xc5`–`0xcc` "mirroring the wazmrt oracle", a
+rationale that retired 2026-08-11. The decoder accepted those raw bytes (accept-invalid) and — worse —
+**the assembler EMITTED them**, so every module wasmrt assembled containing an `i32.trunc_sat_*` was not
+WebAssembly. LLVM emits these for ordinary float→int casts. Now `0xFC 0x00`–`0x07`, verified against
+wasmtime 48. Full entry in `known-issues.md`.
 
 📊 **What is left — all of it, measured:**
 

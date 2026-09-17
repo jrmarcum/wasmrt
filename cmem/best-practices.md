@@ -1343,3 +1343,44 @@ carries the same stale assertions — so there is nothing to refresh to, and the
 fact — that someone upstream had already fixed it — and nobody tested that, because the first check felt
 like it had settled the matter. ⚠️ **A decision recorded as 🔒 DECIDED is exactly the kind that stops
 being re-measured**, which is §5.8's scope-note trap wearing a decision's clothes.
+
+## §3.8c — **A RATIONALE EXPIRES; THE CODE IT JUSTIFIED DOES NOT** (2026-09-17)
+
+Eight opcodes were decoded *and emitted* as raw bytes `0xc5`–`0xcc` under this comment:
+
+> Saturating float→int truncation. Real wire form is `0xFC 0x00`–`0x07`; **these bytes are also
+> accepted as raw single-byte forms, mirroring the wazmrt oracle.**
+
+`0xc5`–`0xcc` are unassigned in the single-byte space. The oracle was retired on **2026-08-11**. The
+deviation survived it by five weeks, and it was not a leniency on *input* only — **the assembler wrote
+those bytes**, so every module wasmrt assembled containing an `i32.trunc_sat_*` was not WebAssembly
+(*"illegal opcode: 0xc5"*, wasmtime 48). LLVM emits these for an ordinary `f32 as i32`.
+
+🎓 **Three failures stacked, and each one alone would have been survivable:**
+1. **The rationale expired and nothing swept for its dependants.** When an anchor is dropped, the
+   things it justified do not announce themselves — *grep for the anchor's name on the day it retires.*
+   `"oracle"` in a comment was the whole search.
+2. **The round trip was green** because our decoder accepted what our assembler wrote (§3.8b again —
+   the third instance in a week).
+3. **The deviation was written down**, which made it look adjudicated. A note saying *why* a rule is
+   bent is evidence someone thought about it **once**, at a time that has passed.
+
+🔒 Practical rule: **a comment that justifies a deviation must name the authority it defers to**, so
+that when the authority changes the comment becomes searchable. "Mirroring the oracle" did exactly
+that — and nobody ran the search.
+
+## §5.9 — **YOUR OWN GATE IS A GATE: CHECK IT CAN FAIL** (2026-09-17)
+
+Two of day 3's findings were invisible until an instrument was fixed, and in both cases the
+instrument was ours and trusted:
+
+* The `.wat` corpus loop asked `wasmrt <file> && ...`. **`wasmrt <file>` exits 0 even when validation
+  fails**, so the loop could not observe a validation failure at all. It had been reporting 530/532;
+  reading the printed verdict instead gives **528/532**, and the two extra failures had been there all
+  along.
+* The per-file conformance gate could not see a clean file lose passes (§4.5).
+
+🎓 The pattern is not "our tests are weak" — it is that **a gate is a measuring instrument, and an
+instrument that cannot register the thing you are looking for returns a confident wrong answer.**
+Before trusting a check, make it fail once on purpose. That is the same discipline as the mutation
+test, applied to the harness instead of the code.

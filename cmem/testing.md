@@ -81,7 +81,7 @@ custom-page-sizes −2, `custom/` +1. 🎓 *An unchanged total is not evidence t
 adjudicated 64,142 → 64,134, passes unchanged because the removed assertions were the failing ones). X1 (refuse `(pagesize N)`), the
 `assert_invalid` stage fix, the bare-index segment spellings, `spectest.shared_memory`, X2's clause
 sweep, and **Track W complete** (`wide-arithmetic.wast` **0/1/108 → 107/0/0**). No file lost a pass at
-any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **530/532**.
+any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **528/532** ⚠️ *(not 530 — the corpus loop keyed on the CLI's exit status, which is 0 even when validation fails; reading the verdict instead exposed two pre-existing failures. All four are corpus defects wasmtime also refuses.)*.
 ⚠️ **Miri NOT RUN** — not installed on this host; the 28/28 on record is not re-verified.
 
 ### 🔬 2026-09-17 — A THIRD HOLE IN THE PER-FILE GATE: a clean file has no row

@@ -1,5 +1,54 @@
 # Known Issues
 
+## ✅ CLOSED 2026-09-17 — `i32.trunc_sat_*` was EMITTED AS AN ILLEGAL OPCODE. Not WebAssembly.
+
+**The sixth instance of the T10a emitter mechanism, and the third wire divergence in a week.**
+Found while repartitioning the opcode byte space for the `Op`→`u16` move — not by a test.
+
+The eight saturating truncations (`i32.trunc_sat_f32_s` … `i64.trunc_sat_f64_u`) were **wire**
+entries at `0xc5`–`0xcc`, with a comment saying the raw bytes were accepted *"mirroring the wazmrt
+oracle"*. **The oracle retired on 2026-08-11; the deviation outlived its reason by five weeks.**
+
+| | wasmrt, before | required |
+| --- | --- | --- |
+| decoding a raw `0xc5` byte | `i32.trunc_sat_f32_s` — executed | **malformed** (unassigned opcode) |
+| assembling `(i32.trunc_sat_f32_s …)` | emits `c5` | **`fc 00`** |
+
+⚠️⚠️ **The emitter half is the serious one: every module wasmrt assembled containing a saturating
+truncation was NOT WebAssembly.** wasmtime 48: *"Invalid input WebAssembly code at offset 36:
+illegal opcode: 0xc5"*. LLVM emits these for ordinary float→int casts, so it is not an exotic
+corner — any Rust or C guest with a `f32 as i32` was affected.
+
+🎓 **Why nothing caught it for the whole port.** There was no emitter arm at all, so the op fell
+through to the single-byte catch-all — and our own decoder *also* accepted the raw byte, so the
+round trip was green. Assembler and decoder agreed with each other and both disagreed with the
+spec: `best-practices.md` §3.8b, exactly. **One `wasmtime compile` on our output found it.**
+
+✅ Fixed: emitted as `0xFC 0x00`–`0x07` (verified `43 00 00 c0 3f fc 00 0b`, accepted by
+wasmtime 48), raw bytes refused at decode, and the ops moved to internal tags above `0xff` so the
+byte space cannot claim them again.
+
+## 🟡 OPEN — a type-use mismatch on an IMPORT is caught 32 KB late, as `StackUnderflow`
+
+`bindgen_fixtures/fnany_50.wat` and `hostfn_50.wat` are **corpus defects** — wasmtime refuses them
+too — but the two engines refuse them for different reasons, and ours is the worse one:
+
+| | verdict |
+| --- | --- |
+| wasmtime 48 | *"inline function type doesn't match type reference"* at **line 3**, the import's `(type 0) (param i32 i32) (result i32)` |
+| wasmrt | `StackUnderflow` at **offset 32168, function 180** |
+
+§6.4.4's rule — *a `(type x)` plus explicit `param`/`result` clauses must MATCH* — was implemented
+for function definitions at T9's seventh pass. It appears **not to be applied to imports**, so the
+mismatched declaration is accepted and the module fails much later for an unrelated-looking reason.
+🎓 §5.6b: a reason that names the wrong cause is worse than a bare refusal. Costs 2 `.wat` corpus
+files; the fix is a check, not a feature.
+
+⚠️ **These were invisible until the corpus gate was fixed** — it keyed on the CLI's exit status,
+and `wasmrt <file>` exits 0 even when validation fails (see the entry below). The corpus is
+**528/532**, not 530: two `anyfunc` files and these two.
+
+
 ## ✅ CLOSED 2026-09-17 — `(pagesize N)` was PARSED AND SILENTLY DROPPED. Refused by name now.
 
 **Found 2026-08-20 while SCOPING the proposal work, not by a test.** Priority X1 in `roadmap.md`.
