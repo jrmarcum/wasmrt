@@ -393,6 +393,32 @@ impl Runner {
         self.instantiate_bytes(&bytes)
     }
 
+    /// assemble → decode → **validate, and stop**. The pipeline `assert_invalid` and
+    /// `assert_malformed` actually ask about.
+    ///
+    /// ⚠️⚠️ **Both assertions used to run the FULL [`Self::build`], through link and
+    /// instantiation, and that made the runner misreport.** `assert_invalid` ends at
+    /// validation by definition — a module that validates has already answered the
+    /// assertion, and what happens to its imports afterwards is not part of the question.
+    /// Running on regardless meant a module whose imports nothing provides came back as
+    /// `Unlinkable`, which [`Rejection::accepts`] rightly refuses, and the failure printed
+    /// *"rejected at the wrong stage (link: unknown import)"* — blaming the engine for
+    /// reaching a stage the runner should never have taken it to.
+    ///
+    /// Found by the Track M/A triage (2026-08-20): 4 of `proposals/threads/imports.wast`'s
+    /// 13 failures were this, wearing a conformance-failure label. 🎓 The count does not
+    /// move — those 4 still fail, because the modules are era-pinned assertions a modern
+    /// engine must reject — but they now fail with the TRUE reason (*"module was
+    /// accepted"*), which is what makes them attributable to the snapshot rather than to us.
+    /// **The misreport is corpus-wide and would resurface the moment another file pairs an
+    /// unresolvable import with a validity assertion**, which is why this is fixed on its own
+    /// merits rather than waiting for the snapshot refresh to hide it.
+    fn build_to_validation(&mut self, form: &[Sexpr]) -> Result<(), BuildErr> {
+        let bytes = Self::module_binary(form).map_err(BuildErr::Assemble)?;
+        let md = crate::module::decode(&bytes).map_err(BuildErr::Decode)?;
+        crate::validate::validate(&md).map_err(BuildErr::Validate)
+    }
+
     /// decode → validate → link → instantiate, from module bytes.
     ///
     /// Split out of [`Self::build`] so `(module instance $I $M)` can instantiate a stored
@@ -723,7 +749,7 @@ impl Runner {
             self.skip(format!("{kind:?}: operand is not a (module …)"));
             return;
         };
-        match self.build(inner.as_list().unwrap_or(&[])) {
+        match self.build_to_validation(inner.as_list().unwrap_or(&[])) {
             // Quote the spec's own reason string. Without it every over-acceptance in a file
             // reads identically and triaging means hand-matching failures back to source.
             Ok(_) => self.fail(format!(
@@ -1278,6 +1304,36 @@ mod tests {
         );
         assert_eq!(s.failed, 1);
         assert!(s.failures[0].contains("should be rejected"));
+    }
+
+    /// A validity assertion must be adjudicated at **validation**, never carried on to link.
+    ///
+    /// ⚠️⚠️ **The module here is VALID and its import is unresolvable, which is the exact pair
+    /// that produced a misreport.** Running the full build pipeline made it fail at link, and
+    /// the runner printed *"rejected at the wrong stage (link: unknown import)"* — a sentence
+    /// about the engine that was really about the runner. The honest verdict is *"module was
+    /// accepted"*: it validated, so the assertion is wrong about it.
+    ///
+    /// Four of `proposals/threads/imports.wast`'s failures read that way until 2026-09-17, and
+    /// the shape is corpus-wide, not a threads matter.
+    #[test]
+    fn a_validity_assertion_stops_at_validation_and_never_links() {
+        let s = run(
+            r#"(assert_invalid
+                 (module (import "spectest" "nothing-provides-this" (func)))
+                 "some reason")"#,
+        );
+        assert_eq!((s.passed, s.failed, s.skipped), (0, 1, 0));
+        assert!(
+            s.failures[0].contains("module was accepted"),
+            "an unresolvable import must not be reported as a rejection stage: {}",
+            s.failures[0]
+        );
+        assert!(
+            !s.failures[0].contains("wrong stage"),
+            "the runner must not take a validity assertion to the linker: {}",
+            s.failures[0]
+        );
     }
 
     #[test]
