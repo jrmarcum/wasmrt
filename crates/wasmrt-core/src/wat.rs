@@ -1661,6 +1661,52 @@ fn find_exports(items: &[Sexpr]) -> Result<Vec<Vec<u8>>> {
     Ok(out)
 }
 
+/// A segment's **bare** `memidx` / `tableidx` — the abbreviated `memuse` / `tableuse` of
+/// §6.6.11–§6.6.12. Returns the resolved index and advances past it, or leaves `j` alone.
+///
+/// 🔴 **Both segment parsers read only the parenthesised form** (`(memory 0)`, `(table 0)`)
+/// until 2026-09-17, and the bare spelling is equally valid — wasmtime accepts both. The two
+/// failures were not the same kind:
+///
+/// * `(data 0 (i32.const 0) "x")` fell through to the datastring loop and came back `BadForm`.
+///   A false rejection: the safe direction, and still wrong.
+/// * `(elem 0 (i32.const 1) $f)` **assembled a DIFFERENT SEGMENT.** With nothing consuming the
+///   `0`, no offset was recognised either, so an *active* segment at offset 0 holding one
+///   funcref became a *passive* segment holding three items — `ref.func 0`, the offset
+///   expression itself, and `ref.func $f`. It was caught only because an `i32.const` cannot be
+///   a `funcref`, and the validator then reported `TypeMismatch`: an error naming neither the
+///   stage nor the thing that was wrong. ⚠️ **A spelling the parser does not know is not
+///   automatically refused — it can be silently re-read as something else**, which is the
+///   emitter mechanism of T10a arriving from the parser's side.
+///
+/// ⚠️⚠️ **The ambiguity is real, and a DIGIT is what resolves it.** At this position a bare atom
+/// can also be `func`, `funcref`, `declare` or any reftype keyword — every one of which
+/// introduces a PASSIVE segment's element list, not a table index. `(elem func $f)` read as
+/// "table `func`" would be this same defect pointing the other way. Accepting only an atom that
+/// starts with a digit excludes all of them by construction, rather than by a keyword list that
+/// a future reftype spelling could outgrow.
+///
+/// 🔒 **A `$name` here is REFUSED, deliberately, and that is a disagreement traced rather than
+/// assumed.** A first cut resolved names too, which made wasmrt accept
+/// `(data $seg $m (i32.const 0) "x")` — and **wasmtime refuses it** ("expected `(`"), because
+/// its parser takes a bare index in this slot but a named one only parenthesised. Neither the
+/// spec's own testsuite nor the wasmtk corpus spells a named bare use-index anywhere, so
+/// accepting it would be permissiveness with nothing behind it, and over-acceptance is the
+/// direction that cannot be noticed afterwards. `(memory $m)` / `(table $t)` remain the way to
+/// name one. The `id?` slot is already taken by the caller's `opt_name`, so `(data $m …)` names
+/// the SEGMENT — checked against wasmtime, which agrees.
+fn opt_bare_use_index(items: &[Sexpr], j: &mut usize) -> Result<u32> {
+    let Some(a) = items.get(*j).and_then(Sexpr::as_atom) else {
+        return Ok(0);
+    };
+    if !a.starts_with(|c: char| c.is_ascii_digit()) {
+        return Ok(0);
+    }
+    let idx = parse_index(&items[*j])?;
+    *j += 1;
+    Ok(idx)
+}
+
 /// Refuse a `(pagesize N)` clause on a memory type — the **custom-page-sizes** proposal, which
 /// this build does not implement (Track P).
 ///
@@ -2331,6 +2377,9 @@ fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     if let Some(s) = items.get(j).filter(|s| eq_kw(s, "table")) {
         table_index = resolve_by_name(&b.table_names, nth(want_list(s)?, 1)?)?;
         j += 1;
+    } else {
+        // The abbreviated `tableuse`: `(elem 0 (i32.const 1) $f)`.
+        table_index = opt_bare_use_index(items, &mut j)?;
     }
     if let Some(s) = items.get(j) {
         if eq_kw(s, "offset") {
@@ -2394,6 +2443,9 @@ fn parse_data_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     if let Some(s) = items.get(j).filter(|s| eq_kw(s, "memory")) {
         mem_index = resolve_by_name(&b.mem_names, nth(want_list(s)?, 1)?)?;
         j += 1;
+    } else {
+        // The abbreviated `memuse`: `(data 0 (i32.const 10) "")`.
+        mem_index = opt_bare_use_index(items, &mut j)?;
     }
     if let Some(s) = items.get(j) {
         if eq_kw(s, "offset") {
@@ -6621,6 +6673,86 @@ mod emitter_coverage_tests {
         .expect("must assemble");
         let md = crate::module::decode(&m).expect("must decode");
         crate::validate::validate(&md).expect("must validate");
+    }
+
+    /// A segment may name its memory or table with a **bare index**, and both spellings must
+    /// mean the same thing.
+    ///
+    /// ⚠️⚠️ **The `elem` half was not a refusal — it assembled a DIFFERENT SEGMENT.** With
+    /// nothing consuming the `0`, `(elem 0 (i32.const 1) $f)` lost its offset too and became a
+    /// *passive* segment of three items (`ref.func 0`, the offset expression, `ref.func $f`).
+    /// It surfaced as the validator's `TypeMismatch`, an error naming neither the stage nor the
+    /// thing that was wrong, and only because an `i32.const` cannot be a `funcref`. So this test
+    /// asserts the segment's MEANING, not merely that the module assembles: an active segment
+    /// writing `$f` at index 1, checked by calling through the table.
+    #[test]
+    fn a_segment_may_name_its_target_with_a_bare_index() {
+        // Both spellings of the same active elem segment must behave identically.
+        for elem in [
+            br#"(elem 0 (i32.const 1) $f)"#.as_slice(),
+            br#"(elem (table 0) (i32.const 1) func $f)"#.as_slice(),
+            br#"(elem 0 (offset (i32.const 1)) func $f)"#.as_slice(),
+        ] {
+            let src = [
+                br#"(module (type $t (func (result i32))) (table 4 funcref)
+                      (func $f (result i32) (i32.const 11)) "#
+                    .as_slice(),
+                elem,
+                br#" (func (export "call") (param i32) (result i32)
+                       (call_indirect (type $t) (local.get 0))))"#
+                    .as_slice(),
+            ]
+            .concat();
+            let m = assemble(&src).unwrap_or_else(|e| panic!("must assemble: {e}"));
+            let md = crate::module::decode(&m).expect("must decode");
+            crate::validate::validate(&md).expect("must validate");
+            // ⚠️ The segment must be ACTIVE and land at index 1 — a passive segment also
+            // assembles, decodes and validates, which is exactly how the defect hid.
+            assert_eq!(md.elements.len(), 1);
+            assert_eq!(
+                md.elements[0].mode,
+                crate::module::ElementMode::Active,
+                "a bare index must not turn an active segment passive"
+            );
+            assert_eq!(md.elements[0].funcs.len() + md.elements[0].exprs.len(), 1,
+                "the bare index must be the TABLE, never an element item");
+        }
+        // And the data twin, which merely came back `BadForm`.
+        for data in [
+            br#"(data 0 (i32.const 0) "x")"#.as_slice(),
+            br#"(data (memory 0) (i32.const 0) "x")"#.as_slice(),
+            br#"(data 0 (offset (i32.const 0)) "x")"#.as_slice(),
+        ] {
+            let src = [br#"(module (memory 1) "#.as_slice(), data, b")"].concat();
+            let m = assemble(&src).unwrap_or_else(|e| panic!("must assemble: {e}"));
+            let md = crate::module::decode(&m).expect("must decode");
+            crate::validate::validate(&md).expect("must validate");
+            assert_eq!(md.data.len(), 1);
+        }
+    }
+
+    /// The exclusions, which are the whole rule: a keyword in the use-index position introduces
+    /// a PASSIVE segment's element list and must not be read as a table index. Reading
+    /// `(elem func $f)` as "table `func`" would be the same defect pointing the other way.
+    ///
+    /// 🔒 A `$name` in the bare position stays REFUSED — wasmtime refuses it, and nothing in the
+    /// spec testsuite or the wasmtk corpus spells one.
+    #[test]
+    fn a_keyword_is_not_a_bare_use_index() {
+        for src in [
+            br#"(module (func $f) (elem func $f))"#.as_slice(),
+            br#"(module (func $f) (elem funcref (ref.func $f)))"#.as_slice(),
+            br#"(module (table 1 funcref) (func $f) (elem declare func $f))"#.as_slice(),
+            br#"(module (memory 1) (data "abc"))"#.as_slice(),
+        ] {
+            let m = assemble(src)
+                .unwrap_or_else(|e| panic!("{} must assemble: {e}", core::str::from_utf8(src).unwrap()));
+            crate::module::decode(&m).expect("and decode");
+        }
+        assert!(
+            assemble(br#"(module (memory $m 1) (data $seg $m (i32.const 0) "x"))"#).is_err(),
+            "a NAMED bare use-index must stay refused, as wasmtime refuses it"
+        );
     }
 
     /// X1 — every text spelling of a `(pagesize N)` memory must be REFUSED, not silently
