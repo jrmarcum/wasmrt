@@ -4442,8 +4442,13 @@ fn ref_matches(
 
 /// Integer arithmetic / comparison / bitwise / conversion opcodes. Anything else (float,
 /// memory, SIMD, …) traps `UnsupportedInstruction` in this slice.
+// ⚠️ Dispatches on `op as u16`, not `as u8`: `Op` is `#[repr(u16)]` and the internal tags for the
+// prefixed families can sit above `0xff`, where a `u8` cast would truncate one op onto another.
+// The `cmp_*` / `bin_*` / `fcmp` helpers still take `u8` on purpose — every arm that calls them is
+// a real single-byte opcode, and the const-expression evaluator calls the same helpers with a raw
+// wire byte.
 fn exec_numeric(frame: &mut Frame, op: Op) -> Result<()> {
-    match op as u8 {
+    match op as u16 {
         // i32 unary
         0x45 => {
             let v = frame.pop_i32();
@@ -4545,7 +4550,7 @@ fn exec_numeric(frame: &mut Frame, op: Op) -> Result<()> {
 /// manipulation (no_std-clean); `sqrt` is gated behind `std`. Saturating float→int uses
 /// Rust's `as` cast, which matches wasm exactly (NaN→0, saturates to min/max).
 fn exec_float(frame: &mut Frame, op: Op) -> Result<()> {
-    match op as u8 {
+    match op as u16 {
         // f32 / f64 comparison (result i32) — IEEE ordering; NaN compares false (ne true).
         0x5b..=0x60 => {
             let b = frame.pop_f32();

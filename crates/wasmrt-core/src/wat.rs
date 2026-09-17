@@ -3622,7 +3622,14 @@ fn emit_op_with_immediates(
             };
             uleb(&mut ctx.out, sub);
         }
-        _ => ctx.out.push(op as u8),
+        // Every remaining op is a real single-byte opcode. 🔒 **Converted FALLIBLY, because `Op`
+        // is `#[repr(u16)]`**: an internal tag reaching here would mean the prefixed-family arms
+        // above are missing a case, and `op as u8` would silently emit a TRUNCATED byte — a
+        // different instruction. Refusing by name says which op has no emitter instead.
+        _ => match u8::try_from(op as u16) {
+            Ok(b) => ctx.out.push(b),
+            Err(_) => return Err(Error::Unsupported(op.text_name())),
+        },
     }
 
     match op {

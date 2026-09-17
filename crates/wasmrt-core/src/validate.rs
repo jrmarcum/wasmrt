@@ -2649,7 +2649,10 @@ fn atomic_val_type(sub: u32) -> V {
 /// Fixed value-type signature for the numeric / comparison / conversion / const / load /
 /// store / memory opcodes. `None` for opcodes handled specially in [`FuncValidator::step`].
 fn simple_sig(op: Op) -> Option<Sig> {
-    Some(match op as u8 {
+    // `as u16`: `Op` is `#[repr(u16)]` and several arms below are INTERNAL tags (saturating
+    // truncation, wide arithmetic), which may sit above `0xff` — a `u8` cast would truncate
+    // one op's signature onto another's.
+    Some(match op as u16 {
         // Comparisons
         0x45 => sig(I32_1, I32_1),        // i32.eqz
         0x46..=0x4f => sig(I32_2, I32_1), // i32 compares

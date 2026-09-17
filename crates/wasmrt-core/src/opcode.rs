@@ -41,7 +41,21 @@ macro_rules! define_ops {
         /// Every WebAssembly opcode, keyed by its binary byte (§5.4) for the single-byte
         /// forms and by an internal tag for the prefixed families.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        #[repr(u8)]
+        // ⚠️ **`u16`, not `u8`, and the reason is TAG SPACE — not speed.** 248 of 256 byte values
+        // were assigned and wide-arithmetic took the last four, so the next proposal to add
+        // instructions had nowhere to go. Widening was measured before it was adopted
+        // (2026-09-17): `size_of::<Instr>()` is **unchanged at 80** — `Imm` is 64 bytes at
+        // 16-byte alignment, so the second byte lands in padding `offset` already occupied — and
+        // the full 288-file spec suite produced **byte-identical** output, because `Op` is an
+        // internal tag that never reaches the wire. It also measured **7–9% FASTER** on the steady
+        // loop (A/B/A/B, non-overlapping), and ⚠️⚠️ **that gain has no explained mechanism**, so it
+        // is a T11 lead beside the unattributed ~5% regression and NOT a number to quote.
+        //
+        // 🔒 **A tag may now exceed `0xff`, so `op as u8` is a TRUNCATING cast.** Every site that
+        // needs the discriminant uses `as u16`; the one site that must emit a single wire byte
+        // (`wat::emit_op_with_immediates`' catch-all) converts fallibly and refuses rather than
+        // truncating. `simple_sig`, `exec_numeric` and `exec_float` match on `u16`.
+        #[repr(u16)]
         pub enum Op {
             $($w = $wv,)*
             $($i = $iv,)*
