@@ -329,6 +329,15 @@ impl Runner {
         }
         if let Some(id) = self.spectest_mem {
             l.define_memory("spectest", "memory", id, 0);
+            // The threads proposal's `spectest` adds a SHARED memory beside the plain one, and
+            // `proposals/threads/imports.wast` needs both at once: it imports `shared_memory` as
+            // shared (must link), then asserts that importing it UNSHARED is unlinkable and that
+            // importing plain `memory` as shared is unlinkable. ⚠️ The second of those three was
+            // already scored a PASS while this export was missing — an unresolvable import is a
+            // link failure, and `assert_unlinkable` asks only that linking fail. It was right for
+            // the wrong reason, and only defining the export makes it test the `shared` flag it
+            // was written to test.
+            l.define_memory("spectest", "shared_memory", id, 1);
             l.define_table("spectest", "table", id, 0);
             // `table64` is the 64-bit twin the memory64 proposal's spectest adds; `table64.wast`
             // imports it and, without it, the whole file failed at link.
@@ -357,7 +366,7 @@ impl Runner {
         // *wider* type is unlinkable. Both live in one owner module because a memory's and a table's
         // identity in this engine is a store slot, so something must own them.
         let Ok(bytes) = crate::wat::assemble(
-            b"(module (memory (export \"memory\") 1 2) (table (export \"table\") 10 20 funcref)               (table (export \"table64\") i64 10 20 funcref))",
+            b"(module (memory (export \"memory\") 1 2) (memory (export \"shared_memory\") 1 2 shared)               (table (export \"table\") 10 20 funcref) (table (export \"table64\") i64 10 20 funcref))",
         ) else {
             return;
         };
@@ -1304,6 +1313,27 @@ mod tests {
         );
         assert_eq!(s.failed, 1);
         assert!(s.failures[0].contains("should be rejected"));
+    }
+
+    /// `spectest.shared_memory` exists, and the `shared` flag is what decides compatibility.
+    ///
+    /// ⚠️⚠️ **The middle assertion here was already PASSING while the export did not exist.**
+    /// An unresolvable import is a link failure, and `assert_unlinkable` asks only that linking
+    /// fail — so it was right for the wrong reason, and could not have caught a linker that
+    /// ignored `shared`. *A blanket absence is not a neutral placeholder*, the same lesson the
+    /// blanket `assert_unlinkable` skip taught at T9a#4.
+    #[test]
+    fn spectest_shared_memory_links_and_sharedness_is_enforced() {
+        let s = run(
+            r#"(module (import "spectest" "shared_memory" (memory 1 2 shared)))
+               (assert_unlinkable
+                 (module (import "spectest" "shared_memory" (memory 1 2)))
+                 "incompatible import type")
+               (assert_unlinkable
+                 (module (import "spectest" "memory" (memory 1 2 shared)))
+                 "incompatible import type")"#,
+        );
+        assert_eq!((s.passed, s.failed, s.skipped), (2, 0, 0), "{:?}", s.failures);
     }
 
     /// A validity assertion must be adjudicated at **validation**, never carried on to link.
