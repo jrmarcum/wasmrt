@@ -381,6 +381,7 @@ fn feature_of(i: u32) -> Option<Feature> {
         12 => Feature::Gc,
         13 => Feature::Exceptions,
         14 => Feature::TailCall,
+        15 => Feature::WideArithmetic,
         _ => return None,
     })
 }

@@ -707,4 +707,62 @@ mod tests {
             "a flag that rejects more than it claims is its own kind of wrong"
         );
     }
+
+    /// **T10b — the proposal list has THREE spellings, and nothing made them agree.**
+    /// `Feature` (this enum), `Features`' struct fields, and `wasmrt_feature_t` in
+    /// `wasmrt.h` + `feature_of` in the C ABI. Adding `WideArithmetic` updated the first two
+    /// and the third was missed on the first pass, which would have shipped a proposal an
+    /// embedder could not switch off **through the C ABI only** — enabled in-process, gated at
+    /// one entry point of two. X3 asks for "gated at BOTH module entry points"; this is the
+    /// check that notices when it is one.
+    ///
+    /// 🔒 The C ABI's integers are FROZEN, so this walks upward from 0 and fails on the first
+    /// gap: a new feature must be APPENDED, never inserted, or every embedder's compiled
+    /// constant silently changes meaning.
+    #[test]
+    fn every_feature_is_reachable_through_the_c_abi_by_a_stable_integer() {
+        // Every `Feature`, in declaration order. Kept here rather than derived, because the
+        // point is to compare two independently-written lists.
+        let all = [
+            Feature::SignExtension,
+            Feature::SaturatingFloatToInt,
+            Feature::MultiValue,
+            Feature::ReferenceTypes,
+            Feature::BulkMemory,
+            Feature::ExtendedConst,
+            Feature::Simd,
+            Feature::RelaxedSimd,
+            Feature::Threads,
+            Feature::MultiMemory,
+            Feature::Memory64,
+            Feature::FunctionReferences,
+            Feature::Gc,
+            Feature::Exceptions,
+            Feature::TailCall,
+            Feature::WideArithmetic,
+        ];
+        // Spelling 2: the struct. `set` then `has` must round-trip, or a flag exists in the
+        // enum with no field behind it.
+        for f in all {
+            let mut fs = Features::all();
+            fs.set(f, false);
+            assert!(!fs.has(f), "{f} has no field behind it: set(false) did not take");
+            fs.set(f, true);
+            assert!(fs.has(f), "{f}: set(true) did not take");
+        }
+        // Spelling 3: the C ABI integers, contiguous from 0 and in this same order. The
+        // assertion is on the ORDER, not just membership — an inserted feature would shift
+        // every later integer and break an already-compiled embedder.
+        assert_eq!(
+            all.len(),
+            16,
+            "a feature was added: append it to `wasmrt_feature_t` (never insert), extend \
+             `feature_of`, and add it here"
+        );
+        assert_eq!(
+            all.last().copied(),
+            Some(Feature::WideArithmetic),
+            "the newest feature must be LAST — the C integers are frozen"
+        );
+    }
 }
