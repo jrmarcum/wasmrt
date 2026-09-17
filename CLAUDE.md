@@ -31,14 +31,14 @@ than the thing the consumer uses.
 **T0–T8 DONE (published through v0.9.0); T9's eighteen passes landed 2026-08-14; 🆕 T13 — the
 CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 3 landed 2026-09-17, all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,068 / 74 / 549** of 64,142 over **288**
+**embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,068 / 66 / 549** of 64,134 over **288**
 files), **503 workspace tests**, C-ABI gate PASSED, `.wat` corpus 530/532, no file lost a pass in any
 pass. ⚠️ **Miri NOT RUN on day 3** — not installed on this host, so the 28/28 on record is not
 re-verified.
-🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A RESIDUE AND TRACK W.** `wide-arithmetic.wast`
-**0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; `proposals/threads/imports.wast`
-**89/11/18 → 107/6/0**. What remains: **custom-descriptors 65/451** (track D), **`custom/` 1/20**
-(track A, new), **threads 8/0** (all era-pinned, an owner call) and **custom-page-sizes 0/78** (track P).
+🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
+**0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; and **`proposals/threads/` is at
+497 / 0 / 0** after the owner-directed vendored patch. **custom-descriptors is now 65/451 — 98% of
+everything that remains**; the rest is `custom/` 1/20 (track A) and custom-page-sizes 0/78 (track P).
 🔻 **THE CORPUS MOVED AND THE TOTALS HID IT** — wasmtk synced the vendored testsuite to upstream on
 2026-08-20 at 18:34, so day 3's real starting point was **63,963 / 112 / 604 over 288 files**, not
 63,807/112/584 over 284: +4 files, +156 passes, +20 skips, and ⚠️⚠️ **the failure count matched on both
@@ -54,15 +54,23 @@ decoration; a gate that exists only in a doc comment is not even that** (§4.4).
 🔬 **A THIRD HOLE IN THE PER-FILE GATE**: a clean file carried no row, so passes it lost to **skips**
 were invisible — `memory_max.wast` went 2 passed → 0 and `conformance-diff.sh` printed *"no file lost a
 pass"*. Every file prints a row now, and the same gate then reported four affected files instead of two.
-⚠️⚠️ **TRACK D IS BLOCKED ON A REPRESENTATION DECISION, and it is not the one D1 names.** `Op` is
-`#[repr(u8)]` and W's four tags took the **last four free bytes — zero remain**. Custom-descriptors
-needs ≥8 `*desc*` ops, so it must either widen `Op` to `u16` (moving `Instr`, whose size is pinned, on
-the hot path — a T11 question landing inside T13) or adopt the `Simd`/`Atomic` **family** pattern.
-🔴 **AND A RECORDED DECISION TURNED OUT TO BE A NO-OP**: the era-pinned `proposals/threads/` fix
-("refresh the vendored snapshot") cannot be executed — the 08-20 sync **did not touch
-`proposals/threads/`**, so the vendored copy already IS upstream and upstream is the stale one.
-🎓 *Verifying the premise of an option is not verifying the option* (§8.4) — "the snapshot is behind
-CORE" was proved; "a newer snapshot exists" was assumed. Needs an owner decision again.
+⚠️ **`Op` HAS ZERO FREE TAGS and Track D needs ≥8 — but the decision is MEASURED now, not a
+trade-off.** Widening `Op` to `u16` is **free on size** (`Instr` stays 80 bytes; the second byte lands in
+padding `offset` already used), **cannot change canonical behaviour** (`Op` is an internal tag — the
+288-file suite under `u16` came out **byte-identical**, and `Op` never crosses the C ABI, so the T8
+freeze is untouched), and is **+7–9% faster** on the steady axis (A/B/A/B, non-overlapping groups).
+Cost: 13 `op as u8` sites. ⚠️⚠️ **The mechanism is unexplained** — the number is measured, the cause is
+not — so it goes to **T11 beside the unattributed ~5% regression** rather than being banked.
+🎁 Dividend: under `u16` internal tags can move to `0x100+`, out of the wire byte space, retiring
+`decode_body`'s raw-internal-tag guard and the §3A.2 "synthetic tag in a real space" class.
+🔴 **A RECORDED DECISION TURNED OUT TO BE A NO-OP, and was then done properly.** The era-pinned
+`proposals/threads/` fix — "refresh the vendored snapshot" — could not be executed: the 08-20 sync
+**did not touch `proposals/threads/`**, so the vendored copy already IS upstream and upstream is the
+stale one. 🎓 *Verifying the premise of an option is not verifying the option* (§8.4). The owner directed
+**"patch and report"**, so the snapshot is patched in place with annotated blocks quoting the eight
+removed assertions, and `proposals/threads/` is now **497 / 0 / 0**. ⚠️ The patch is **uncommitted in the
+wasmtk tree on purpose** (the write was authorised; committing in another repo is not) and is designed
+to be overwritten by the next corpus sync — **re-check after every sync.**
 🚦 **NEXT: track A (the `custom/` runner commands, 20 skips, no engine risk) → the two owner decisions
 above → track P → track D.** The 2026-08-20 scoping below is now the record of how it was planned; its
 cross-cutting items and track W are done. *(Superseded scoping follows.)* — `cmem/roadmap.md`, "THE REMAINING

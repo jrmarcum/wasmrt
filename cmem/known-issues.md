@@ -66,7 +66,7 @@ field-coverage half never did** (X2). A ten-clause spot probe found this one; `s
 collapsing to the bare form is **correct** — a bare composite type *is* `sub final ϵ` — which was
 checked before reporting rather than counted as a sixth.
 
-## 🔴 REOPENED 2026-09-17 — the era-pinned `proposals/threads/` assertions. **THE DECIDED FIX IS A NO-OP.**
+## ✅ RESOLVED 2026-09-17 — the era-pinned `proposals/threads/` assertions: **VENDORED PATCH** (owner)
 
 8 of the 13 `proposals/threads/` failures are assertions that a **modern engine must fail**: the
 snapshot predates multi-memory and multi-table, so it asserts `(memory 0) (memory 0)` invalid, and
@@ -99,13 +99,36 @@ comparing it with the *core* file in the same checkout — and that proves stale
 that a NEWER SNAPSHOT EXISTS. Those are different claims, and only the second one makes "refresh it"
 available. *Verifying the premise of an option is not the same as verifying the option.*
 
-🚦 **So this needs an owner decision again**, and the surviving routes are the two that were rejected
-plus one that was not considered:
-1. **Patch the vendored snapshot in place** (a deliberate local deviation from upstream, annotated) —
-   keeps T13's *empty baseline* clause, at the cost of the vendored tree no longer matching upstream.
-2. **An explained baseline entry** — honest, contradicts "empty baseline".
-3. **Report it upstream** to the spec repo and carry a temporary entry until it lands. Slowest, and the
-   only route that fixes it for everyone.
+🔒 **DECIDED AND DONE (owner, 2026-09-17): "patch and report" — route 1 plus route 3.** The vendored
+snapshot is patched in place, annotated, and the staleness is reported upward; the alternatives were an
+explained baseline entry (honest, contradicts *empty baseline*) and waiting on upstream (slowest, and the
+only route that fixes it for everyone — so it is done *as well*, not instead).
+
+✅ **THE PATCH — `proposals/threads/` IS NOW 497 PASSED / 0 FAILED / 0 SKIPPED.** Eight `assert_invalid`
+cases removed, six from `imports.wast` (3 tables + 3 memories) and two from `memory.wast`, each replaced
+**by an annotated comment block that quotes the removed assertions verbatim** and says why. Suite
+**64,068 / 74 / 549 → 64,068 / 66 / 549**; adjudicated 64,142 → 64,134; no file lost a pass. Passes did
+not move, because the removed assertions were the failing ones and the modules inside them are not
+re-asserted as anything.
+
+🔒 **Removed, not rewritten, and that was checked rather than assumed.** Upstream itself *deleted* these
+same assertions from the CORE files when multi-memory and multi-table landed (core `imports.wast` and
+`memory.wast` carry zero), so deletion mirrors upstream's own treatment. ⚠️ **Rewriting them as positive
+assertions was considered and rejected on evidence**: a bare `(module …)` command in a `.wast` script is
+instantiated, and these modules import `""."" ` — they would fail at LINK and become new failures. Their
+only valid use is as an `assert_invalid` operand, which is exactly what stopped being true. Multi-memory
+and multi-table keep positive coverage in core's `*0`/`*1` variants (`address1.wast`, `align0.wast`,
+`data0.wast`, …), so nothing is lost.
+
+🔒🔒 **The patch is UNCOMMITTED in the wasmtk tree, deliberately.** The owner authorised the *write* this
+time; that does not extend to committing in another project's repo, which is what launders authorship.
+Two files are modified and nothing else — `git status` in wasmtk shows exactly
+`proposals/threads/imports.wast` and `proposals/threads/memory.wast`. **wasmtk's own session commits it.**
+
+⚠️ **It is a DEVIATION FROM UPSTREAM and it is designed to be overwritten.** `update-testsuite.py` will
+replace these files on the next sync, taking the annotations with them — which is the desired behaviour:
+if upstream has fixed its threads snapshot by then the patch is unnecessary, and if it has not, the
+failures return and say so. **Re-check after every corpus sync.**
 
 📐 **What has already been paid, without any snapshot change:** threads went **13 → 8**. The 4
 bare-memidx segment failures are fixed (a real core-grammar gap of ours), `spectest.shared_memory` is

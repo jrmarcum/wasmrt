@@ -31,14 +31,15 @@ security model — the WASI sandbox — is built and unaffected.
 
 ---
 
-### T13 — the CONFORMANCE CLEAR-OUT. `1.0.0` `[◐]` — **day 3 landed 2026-09-17: 64,068 / 74 / 549**
+### T13 — the CONFORMANCE CLEAR-OUT. `1.0.0` `[◐]` — **day 3 landed 2026-09-17: 64,068 / 66 / 549**
 
 **Target: 0 failed / 0 skipped / 0 files unrun, and an EMPTY baseline.** The starting position was
 **62,238 / 378 / 2,038** — **2,416 assertions not passing**, and the second number was the smaller one.
 
-📍 **AFTER DAY 3 (2026-09-17): 64,068 / 74 / 549 — 99.9% of 64,142 adjudicated, 288 files, 503 tests.**
-Track W is done; `custom-descriptors` is 65f/451s of the 74/549 that remain, and **8 of the 74 failures
-are era-pinned assertions a modern engine must fail.** ⚠️ The denominator moved on 2026-08-20 when wasmtk
+📍 **AFTER DAY 3 (2026-09-17): 64,068 / 66 / 549 — 99.9% of 64,134 adjudicated, 288 files, 503 tests.**
+Track W is done and **`proposals/threads/` is at 497/0/0** after the owner-directed vendored patch, so
+`custom-descriptors` is now **65f/451s of the 66/549 that remain** — everything else is one failure in
+`custom/`. ⚠️ The denominator moved on 2026-08-20 when wasmtk
 synced the corpus to upstream — see day 3 below; re-measure, never quote.
 
 📍 **AFTER DAY 1 (2026-08-19): 63,333 / 172 / 1,024 — 99.7% of 63,505 adjudicated, 484 tests.**
@@ -187,7 +188,7 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### ✅ DAY 3 (2026-09-17) — X1, X2, X3, the M/A residue and **TRACK W** all landed. `[x]`
 
-**64,068 / 74 / 549 over 288 files**, 503 workspace tests, C-ABI gate PASSED, gate green at every step.
+**64,068 / 66 / 549 over 288 files**, 503 workspace tests, C-ABI gate PASSED, gate green at every step.
 ⚠️ **Miri NOT RUN** — not installed on this host; the 28/28 on record is from an earlier session and is
 not re-verified.
 
@@ -209,6 +210,7 @@ a measurement too* — and an unchanged total is not evidence that nothing chang
 | **X2** the coverage sweep | ✅ **39 rows, and it is CLAUSE coverage, not field coverage** — see the correction below. Mutation-tested at three emitter sites. |
 | **X3 / T10b** | ✅ `Feature::WideArithmetic`, gated at both entry points — **after** the gate table was found not to work. See below. |
 | **TRACK W** wide-arithmetic | ✅ **`wide-arithmetic.wast` 0/1/108 → 107/0/0.** Wire format taken from the testsuite's `(module binary …)`; emitted bytes handed to wasmtime 48, which accepts them with `-W wide-arithmetic` and refuses them without. |
+| **the threads snapshot** | ✅ **PATCHED (owner: "patch and report"), and `proposals/threads/` is now 497 / 0 / 0.** Eight era-pinned `assert_invalid` cases removed, each replaced by an annotated block quoting what was removed. ⚠️ Uncommitted in the wasmtk tree on purpose — the write was authorised, committing in another repo is not. |
 
 🔴 **X2's SPECIFICATION WAS WRONG, and this is the useful part.** T10a asked for a **`ModuleBuild`
 FIELD-coverage sweep** and `known-issues.md` said it "is exactly what would have caught" X1. **It would
@@ -228,27 +230,53 @@ through the C ABI — *gated at one entry point of two*. Both are pinned by data
 a three-list comparison). 🎓 **A gate that cannot fail is decoration; a gate that exists only in a doc
 comment is not even that** — and the comment asserting the protection is the reason nobody looked.
 
-⚠️⚠️ **TRACK D IS NOW BLOCKED ON A REPRESENTATION DECISION, and it is not the one D1 names.** `Op` is
-`#[repr(u8)]`, and Track W's four tags took `0x1d`/`0x1e`/`0x27`/`0xff` — **the last four free bytes.
-There are ZERO left.** Custom-descriptors needs at least eight `*desc*` instructions, so it **cannot be
-tagged this way at all.** Two routes, and it is a real decision rather than a detail:
-1. **Widen `Op` to `u16`** — moves `Instr`, whose size is pinned by `instr_is_sixteen_bytes`, and `Instr`
-   is the hot path. That makes it a **T11 (size/perf) question landing inside T13**.
-2. **Adopt the FAMILY pattern** `Simd` (`0xdb`) and `Atomic` (`0xdc`) already use: one tag, sub-opcode in
-   the immediate. Costs no tag space, adds one dispatch, and is the existing precedent for a prefixed
-   family. ⚠️ Note the codebase's convention cuts the other way for SMALL groups — bulk memory (4), table
-   ops (6) and the GC array ops (8) each took individual tags — so this is a change of convention, not
-   just a mechanism.
-**Route 2 looks right and costs nothing measurable, but it is D's call, not W's.** Recorded in
-`opcode.rs` beside the tags as well.
+⚠️⚠️ **`Op` HAS ZERO FREE TAGS, and Track D needs at least eight.** Track W's four tags took
+`0x1d`/`0x1e`/`0x27`/`0xff` — the last four free bytes of the `#[repr(u8)]` space. Custom-descriptors
+cannot be tagged this way at all.
+
+✅ **MEASURED 2026-09-17 (owner asked what widening costs, and whether it touches canonical behaviour).
+Widening `Op` to `u16` is FREE on size, NEUTRAL on canonical behaviour, and MEASURABLY FASTER.**
+
+| question | answer, measured |
+| --- | --- |
+| **Does it change canonical behaviour vs wasmtime?** | **No, and it cannot.** `Op` is an *internal tag*; the wire format is a `0xFB`–`0xFE` prefix plus a LEB sub-opcode, read and written independently of the tag's value. ⚠️ Not asserted — **checked**: the whole 288-file suite under `#[repr(u16)]` produced output **byte-identical** to the `u8` run (`diff -q`, 64,068 / 74 / 549 both ways), and all 456 core tests passed. `Op` also **never crosses the C ABI** (no `wasmrt.h` type contains one), so the T8 freeze is untouched. |
+| **Does it move `Instr`?** | **No.** `size_of::<Op>()` goes 1 → 2 and `size_of::<Instr>()` **stays 80** — `Imm` is 64 bytes with 16-byte alignment, so the second byte lands in the same padding `offset` already occupies. `instr_is_sixteen_bytes` passes unchanged. The worry that made this a T11 question does not apply. |
+| **What does it cost on the hot path?** | 🎯 **Nothing — it GAINS.** A/B/A/B on the 50M steady run, one machine, one session: **u8 = 229.8, 228.5, 225.6 Mops/s** · **u16 = 250.1, 243.4 Mops/s**. **+7% to +9%, and the two groups do not overlap.** Cold start unchanged (5.71–5.81 ms). |
+| **What actually has to change?** | **13 `op as u8` sites** (interp 10, wat 2, validate 1). They compile and behave correctly *today* because no tag exceeds `0xff`; they become wrong the moment one does, so they are part of the change, not a follow-up. |
+
+⚠️⚠️ **THE MECHANISM IS UNEXPLAINED, so this is a LEAD and not yet a decision.** A change that only widens
+a discriminant should be neutral, not 8% faster; the plausible causes (jump-table codegen, field layout,
+branch-target alignment) are untested. 🎓 *A number the report cannot attribute is not a measurement* —
+the **number** here is measured (repeated, bracketed, non-overlapping), the **cause** is not. 🔗 **Hand
+this to T11 beside the unattributed ~5% steady regression**: a ~8% swing from a one-line type change is
+exactly the shape of thing that could be the other half of that story, and T11 already owns bisecting it.
+
+🎁 **And there is a CORRECTNESS dividend nobody was counting.** Internal tags currently live *inside* the
+single-byte wire space, which is the only reason
+`decode_body`'s raw-internal-tag guard exists — without it a raw `0xcd` byte in a body decodes as
+`array.copy` (an accept-invalid, found on 2026-08-19). Under `u16` the internal tags can move to `0x100+`,
+**entirely outside any wire byte**, and that guard — plus the whole "a synthetic tag in a real encoding
+space eventually means something else" class (§3A.2) — retires by construction. Five separate ranges
+currently have to be kept in sync by hand there.
+
+📐 **So the two routes are no longer symmetric:**
+1. **Widen `Op` to `u16`** — free on size, +7–9% on the steady axis, retires a defect class, costs 13 cast
+   sites. ⚠️ Ship the speed as a *separate, attributed* change if T11 explains it; do not bank an
+   unexplained gain as a headline number.
+2. **The FAMILY pattern** (`Simd` `0xdb` / `Atomic` `0xdc`): one tag, sub-opcode in the immediate. Costs no
+   tag space and adds one dispatch. ⚠️ It is the precedent for *large* prefixed families only — bulk
+   memory (4), table ops (6) and the GC array ops (8) each took individual tags — so for D it is a change
+   of convention, and it leaves the internal tags inside the wire space where the guard is still needed.
+**Route 1 now looks strictly better on the evidence.** Still D's call to make, but it is no longer a
+trade-off against size or speed.
 
 📊 **What is left — all of it, measured:**
 
 | track | proposal | fails | skips | note |
 | --- | --- | --- | --- | --- |
-| **D** | custom-descriptors | **65** | **451** | 🚦 essentially the whole remainder. Blocked on the `Op`-space decision above before D1 starts. |
+| **D** | custom-descriptors | **65** | **451** | 🚦 **now 98% of everything that remains.** Needs the `Op`-space decision above before D1 starts — and that decision is measured now, not open-ended. |
 | **A** | custom-annotations (`custom/`) | 1 | 20 | 🆕 **NEW — arrived with the 2026-08-20 corpus sync and no track covered it.** 19 skips are the unhandled `assert_malformed_custom` command and 1 is `assert_invalid_custom`: **runner work, no engine risk**, the same shape as S2. Do it before D. |
-| **M/A** | threads | 8 | 0 | 🔴 **all 8 are era-pinned** and the recorded fix (refresh the snapshot) is a **NO-OP** — see `known-issues.md`. Needs an owner decision, no code. |
+| **M/A** | threads | **0** | **0** | ✅ **DONE** — the directory is at 497/0/0 after the vendored patch. ⚠️ The patch is designed to be overwritten by the next corpus sync; **re-check then**. |
 | **P** | custom-page-sizes | 0 | **78** | every module now honestly refused. The implementation work is untouched and unchanged in size. |
 | **W** | wide-arithmetic | 0 | 0 | ✅ **DONE.** |
 

@@ -55,17 +55,17 @@ emitted as `ValType`'s internal tag rather than `0x64 <heaptype>`, and `try_tabl
 off by one. **wasmtime 47 rejects both.** `wasmtime compile out.wasm` is now part of how a
 format-level change is checked — see §3.8b.
 
-## Spec-suite conformance — day 3 (2026-09-17) — **99.9%: 64,068 / 74 / 549 over 288 files**
+## Spec-suite conformance — day 3 (2026-09-17) — **99.9%: 64,068 / 66 / 549 over 288 files**
 
 `wasmrt wast <testsuite>` over the **288** vendored files (284 until the corpus sync below).
 
 | | T13 day 1 (08-19) | T13 day 2 (08-20) | corpus sync re-measure (09-17) | **T13 day 3 (09-17)** |
 | --- | --- | --- | --- | --- |
 | **passed** | 63,333 | 63,807 | 63,963 | **64,068** |
-| failed | 172 | 112 | 112 | **74** |
+| failed | 172 | 112 | 112 | **66** |
 | skipped | 1,024 | 584 | 604 | **549** |
 | files | 284 | 284 | 288 | **288** |
-| **pass rate** | 99.7% of 63,505 | 99.8% of 64,503 | 99.8% of 64,075 | **99.9% of 64,142** |
+| **pass rate** | 99.7% of 63,505 | 99.8% of 64,503 | 99.8% of 64,075 | **99.9% of 64,134** |
 
 🔻 **THE CORPUS MOVED, AND THE TOTALS HID IT.** wasmtk synced the vendored testsuite to upstream
 `65a43d2e` on **2026-08-20 at 18:34**, after day 2's numbers were recorded. Re-measuring rather than
@@ -76,7 +76,9 @@ skips** (the unhandled `assert_malformed_custom` / `assert_invalid_custom` comma
 custom-page-sizes −2, `custom/` +1. 🎓 *An unchanged total is not evidence that nothing changed*
 (`best-practices.md` §1.7), and it is one more reason the gate reads per file.
 
-**Day 3's own movement: 63,963 / 112 / 604 → 64,068 / 74 / 549.** X1 (refuse `(pagesize N)`), the
+**Day 3's own movement: 63,963 / 112 / 604 → 64,068 / 66 / 549**, and **`proposals/threads/` reached
+497 / 0 / 0** via the owner-directed vendored patch (8 era-pinned `assert_invalid` cases removed;
+adjudicated 64,142 → 64,134, passes unchanged because the removed assertions were the failing ones). X1 (refuse `(pagesize N)`), the
 `assert_invalid` stage fix, the bare-index segment spellings, `spectest.shared_memory`, X2's clause
 sweep, and **Track W complete** (`wide-arithmetic.wast` **0/1/108 → 107/0/0**). No file lost a pass at
 any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **530/532**.
