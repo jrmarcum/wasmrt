@@ -461,6 +461,14 @@ before anything executes**:
 * 🆕 **a SINGLE-DASH token in position 3** — the run immediately after the module path, in a mode that
   has guest argv. It is the guest's and needs no `--`: `prog.wasm -la` runs.
 
+🚨 **TIMING — READ BEFORE MIRRORING FROM wazmrt.** The handoff reached wazmrt BEFORE this narrowing, and
+wazmrt folded the WIDE text in as **CONTRACT VERSION 11** (with §2.5 as v12 and the §2.3m annex as v13).
+Seen 2026-09-19 in their tree, **uncommitted and in flight**, so their v11 §2.4a still says 
+must be written . ⚠️ **The narrowing below post-dates their fold-in and is the owner’s
+current decision** — it has to reach them before they implement the wide rule in their CLI. 🔒 wasmrt does
+not mirror their v11–v13 yet: the file is mid-edit over there, and *reconcile against code that has
+stopped moving* (§1d). Mirror after they commit AND adopt the narrowing.
+
 🆕 **Why position 3 splits by dash count** (owner, 2026-09-19, narrowing the rule the same day it was
 written): **every host flag that can appear after the module path is double-dash** — `--dir`,
 `--ro-dir`, `--env`, `--max-*`, `--pins`, `--verify`, `--no-verify`, `--yes`, `--features`,
