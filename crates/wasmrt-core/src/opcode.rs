@@ -314,6 +314,10 @@ pub enum HeapType {
     NoExn,
     /// A concrete type index.
     Concrete(u32),
+    /// `(exact $t)` — EXACTLY type `$t`, never a subtype (custom-descriptors). A separate variant rather
+    /// than a flag on `Concrete`, so that every `match` on a heap type had to decide what exactness
+    /// means for it: added 2026-09-19, and the compiler listed each site.
+    Exact(u32),
 }
 
 /// A reference type: a heap type plus nullability (`(ref null? ht)`).
@@ -337,6 +341,9 @@ pub enum BlockType {
     /// `$t` is. `decode_body` has no module context by design, so the index travels
     /// unresolved and the validator — which does hold the module — maps it.
     ConcreteRef { nullable: bool, type_index: u32 },
+    /// The same, EXACT: `(ref null? (exact $t))` (custom-descriptors). Its own variant for the reason
+    /// `HeapType::Exact` is — so every consumer had to be told what it means.
+    ExactRef { nullable: bool, type_index: u32 },
 }
 
 /// A load/store memory-immediate. `memory` is the target memory index (multi-memory):
@@ -718,7 +725,9 @@ fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
         -25 => BlockType::Value(ValType::EXTERNREF_NN),
         -26 => BlockType::Value(ValType::ANYREF_NN),
         -27 => BlockType::Value(ValType::EQREF_NN),
-        -30 => BlockType::Value(ValType::I31REF_NN),
+        // ⚠️ `-30` is the byte `0x62`, which was mapped here to wasmrt's INTERNAL `(ref i31)` tag — a
+        // value no binary spells that way. Since custom-descriptors it is the EXACT prefix, which
+        // cannot stand alone as a block type: wasm-tools refuses it, "unexpected exact type".
         -31 => BlockType::Value(ValType::STRUCTREF_NN),
         -39 => BlockType::Value(ValType::ARRAYREF_NN),
         -40 => BlockType::Value(ValType::NULLREF_NN),
@@ -731,6 +740,10 @@ fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
             let nullable = v == -29;
             match read_heap_type(r)? {
                 HeapType::Concrete(type_index) => BlockType::ConcreteRef {
+                    nullable,
+                    type_index,
+                },
+                HeapType::Exact(type_index) => BlockType::ExactRef {
                     nullable,
                     type_index,
                 },
@@ -759,9 +772,8 @@ fn abstract_heap_val_type(ht: HeapType, nullable: bool) -> ValType {
         HeapType::Array => (ValType::ARRAYREF, ValType::ARRAYREF_NN),
         HeapType::Exn => (ValType::EXNREF, ValType::EXNREF_NN),
         HeapType::None => (ValType::NULLREF, ValType::NULLREF_NN),
-        // Unreachable: `read_heap_type` returns `Concrete` only for a non-negative s33,
-        // which the caller has already split off.
-        HeapType::Concrete(_) => (ValType::ANYREF, ValType::ANYREF_NN),
+        // Unreachable: the callers split the concrete forms off first.
+        HeapType::Concrete(_) | HeapType::Exact(_) => (ValType::ANYREF, ValType::ANYREF_NN),
     };
     if nullable { n } else { nn }
 }
@@ -769,13 +781,29 @@ fn abstract_heap_val_type(ht: HeapType, nullable: bool) -> ValType {
 /// Read a heap type (§ GC binary format): a non-negative `s33` is a concrete type index;
 /// negative values are the abstract heap-type codes. Public because the validator reads it
 /// from a `ref.null` constant expression.
+///
+/// 🔒 **The one reader of a heap type** — casts, `ref.null`, `br_on_cast`, long-form block types, AND
+/// (since 2026-09-19) every value type's `0x63`/`0x64 ht`, which had its own copy in `module.rs`. The
+/// exact prefix (custom-descriptors: `0x62 x:typeidx`) therefore exists in one place.
 pub fn read_heap_type(r: &mut Reader) -> DecodeResult<HeapType> {
     let v = r.read_var_s33()?;
     if v >= 0 {
-        if v > u32::MAX as i64 {
-            return Err(DecodeError::UnsupportedOpcode);
+        if v > i64::from(ValType::MAX_CONCRETE_INDEX) {
+            // ⚠️ Enforced HERE, not left to the type-count bound: `ValType` packs the index in 27
+            // bits and `concrete_ref` MASKS, so an over-range index would truncate to a smaller,
+            // VALID one — type confusion. The two bounds stopped being the same constraint when
+            // exactness took bit 27.
+            return Err(DecodeError::IndexOutOfRange);
         }
         return Ok(HeapType::Concrete(v as u32));
+    }
+    // `0x62` — the exact prefix — reads as the s33 `-30`.
+    if v == -0x1e {
+        let ti = r.read_var_u32()?;
+        if ti > ValType::MAX_CONCRETE_INDEX {
+            return Err(DecodeError::IndexOutOfRange);
+        }
+        return Ok(HeapType::Exact(ti));
     }
     Ok(match v {
         -0x10 => HeapType::Func,

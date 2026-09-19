@@ -221,6 +221,12 @@ fn name_bytes(out: &mut Vec<u8>, name: &[u8]) {
 /// look total; the non-null tags were invented, and nothing in the round trip could tell the two
 /// apart. §3.8 again: the only reader that can is one that did not write it.
 fn emit_val_type(out: &mut Vec<u8>, v: V) -> Result<()> {
+    if v.is_exact() {
+        // custom-descriptors: `0x63`/`0x64`, the exact prefix `0x62`, then an UNSIGNED type index.
+        out.push(if v.is_non_null_ref() { 0x64 } else { 0x63 });
+        emit_heap(out, Heap::Exact(v.concrete_index()));
+        return Ok(());
+    }
     if v.is_concrete() {
         out.push(if v.is_non_null_ref() { 0x64 } else { 0x63 });
         sleb(out, i64::from(v.concrete_index()));
@@ -887,6 +893,10 @@ fn string_to_val_type(atom: &str) -> Option<V> {
 /// typed reference carrying that type index; the abstract heads map to their own value
 /// types. `nullable` picks the nullable or non-null variant.
 fn heap_type_to_val_type(s: &Sexpr, nullable: bool, type_names: &[Option<String>]) -> Result<V> {
+    if let Some(ti) = parse_exact(s, type_names)? {
+        // The kind bits are a placeholder, as for `concrete_ref` below.
+        return Ok(V::exact_ref(nullable, crate::types::RefHeap::Struct, ti));
+    }
     let atom = want_atom(s).map_err(|_| Error::BadValType)?;
     let first = atom.chars().next().unwrap_or(' ');
     if first == '$' || first.is_ascii_digit() {
@@ -930,7 +940,7 @@ fn heap_type_to_val_type(s: &Sexpr, nullable: bool, type_names: &[Option<String>
 fn parse_val_type(s: &Sexpr, type_names: &[Option<String>]) -> Result<V> {
     if let Some(l) = s.as_list() {
         if l.len() >= 2 && eq_atom(&l[0], "ref") {
-            let nullable = l.len() >= 3 && eq_atom(&l[1], "null");
+            let nullable = ref_form_nullable(l)?;
             return heap_type_to_val_type(&l[l.len() - 1], nullable, type_names);
         }
         return Err(Error::BadValType);
@@ -1122,6 +1132,8 @@ enum ImportKind {
 struct ImportedFunc {
     r: ImportRef,
     type_index: u32,
+    /// `(func (exact …))` — custom-descriptors' EXACT function import (kind `0x20`).
+    exact: bool,
 }
 #[derive(Debug, Clone)]
 struct ImportedTable {
@@ -2219,9 +2231,21 @@ fn parse_func_field(items: &[Sexpr], annots: &[Annot], b: &mut ModuleBuild) -> R
         if seen_local {
             return Err(Error::UnexpectedToken);
         }
+        // `(func (import …) (exact <typeuse>))` — the exact form carries the whole signature, so
+        // it cannot ALSO have one outside it.
+        if items.get(k).is_some_and(|s| s.keyword() == Some("exact")) {
+            if type_ref.is_some() || seen_param || seen_result {
+                return Err(Error::UnexpectedToken);
+            }
+            let ti = exact_import_sig(items, k, b)?.ok_or(Error::UnexpectedToken)?;
+            b.func_imports.push(ImportedFunc { r, type_index: ti, exact: true });
+            b.import_order.push(ImportKind::Func);
+            b.func_names.push(name);
+            return Ok(());
+        }
         after_import_signature(items.get(k))?;
         let ti = type_ref.unwrap_or_else(|| intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig));
-        b.func_imports.push(ImportedFunc { r, type_index: ti });
+        b.func_imports.push(ImportedFunc { r, type_index: ti, exact: false });
         b.import_order.push(ImportKind::Func);
     } else {
         b.funcs.push(Func {
@@ -2532,18 +2556,34 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     Ok(())
 }
 
-/// Parse a tag's `(type $t)` and/or inline `(param …)`, returning its type index.
-/// What may follow an imported function's (or a tag's) signature: nothing.
-///
-/// 🔒 One rule for both spellings of an import. `(exact (type x))` is custom-descriptors' EXACT
-/// import (track D, unimplemented), so it is refused as [`Error::Unsupported`] — a gap of ours,
-/// scored as a skip — never as a verdict on the input. Anything else is malformed.
+/// What may follow an imported function's (or a tag's) signature: nothing. (An EXACT function
+/// import is recognised before this is reached — see [`exact_import_sig`] — so `(exact …)` here is
+/// on a tag, or mixed with an ordinary type use, and is as malformed as anything else.)
 fn after_import_signature(next: Option<&Sexpr>) -> Result<()> {
     match next {
         None => Ok(()),
-        Some(s) if s.keyword() == Some("exact") => Err(Error::Unsupported("custom-descriptors")),
         Some(_) => Err(Error::UnexpectedToken),
     }
+}
+
+/// `(exact <typeuse>)` — custom-descriptors' EXACT function import — as the LAST item of `items`,
+/// starting at `j`: the type index it names (interning an inline signature), or `None` if `items[j]`
+/// is not an `(exact …)` form. Anything after it, or left inside it, is malformed.
+///
+/// One reader for both spellings of a function import (`(import … (func (exact …)))` and
+/// `(func (import …) (exact …))`), so the two cannot disagree about what exact means.
+fn exact_import_sig(items: &[Sexpr], j: usize, b: &mut ModuleBuild) -> Result<Option<u32>> {
+    let Some(ex) = items.get(j).filter(|s| s.keyword() == Some("exact")) else {
+        return Ok(None);
+    };
+    let inner = want_list(ex)?;
+    let mut k = 1;
+    let (type_ref, sig) =
+        read_type_use(&b.types, &b.type_names, inner, &mut k, true, &mut b.deferred_type_uses)?;
+    if k != inner.len() || j + 1 != items.len() {
+        return Err(Error::UnexpectedToken);
+    }
+    Ok(Some(type_ref.unwrap_or_else(|| intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig))))
 }
 
 /// The signature of a function IMPORT or a tag: its inline `(import …)` / `(export …)` clauses
@@ -2597,8 +2637,12 @@ fn parse_import_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     let name = opt_name(desc, &mut j);
     match kw {
         "func" => {
-            let ti = parse_tag_type(&desc[j..], b)?; // same (type $t) | (param…)(result…) shape
-            b.func_imports.push(ImportedFunc { r, type_index: ti });
+            let (ti, exact) = match exact_import_sig(desc, j, b)? {
+                Some(ti) => (ti, true),
+                // The same (type $t) | (param…)(result…) shape a tag has.
+                None => (parse_tag_type(&desc[j..], b)?, false),
+            };
+            b.func_imports.push(ImportedFunc { r, type_index: ti, exact });
             b.import_order.push(ImportKind::Func);
             b.func_names.push(name);
         }
@@ -2900,7 +2944,7 @@ fn emit_imports(out: &mut Vec<u8>, b: &ModuleBuild) -> Result<()> {
                 f += 1;
                 name_bytes(&mut c, &i.r.module);
                 name_bytes(&mut c, &i.r.name);
-                c.push(0x00);
+                c.push(if i.exact { 0x20 } else { 0x00 });
                 uleb(&mut c, u64::from(i.type_index));
             }
             ImportKind::Table => {
@@ -3431,7 +3475,9 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     // The cast ops take a **list** immediate — `(ref null? ht)` — which the atom/list split
     // below would otherwise mistake for an operand and try to emit as an instruction.
     match op {
-        O::RefTest | O::RefCastOp => {
+        // `ref.null`'s heap type may be a LIST — `(ref.null (exact $t))` — which the atom/list split
+        // below would take for an operand. Same shape as the cast targets.
+        O::RefTest | O::RefCastOp | O::RefNull => {
             let imm_end = 2.min(l.len());
             for j in imm_end..l.len() {
                 emit_one(ctx, l, j)?;
@@ -4297,14 +4343,14 @@ fn emit_op_with_immediates(
         | O::AnyConvertExtern
         | O::ExternConvertAny => {}
         O::RefTest | O::RefCastOp => {
-            let (nullable, code) = parse_ref_type_target(ctx, imm(0)?)?;
+            let (nullable, heap) = parse_ref_type_target(ctx, imm(0)?)?;
             if nullable {
                 // Re-select the nullable sub-opcode (0x14→0x15 test, 0x16→0x17 cast); the
                 // prefix arm above wrote the non-null one.
                 let last = ctx.out.len() - 1;
                 ctx.out[last] = if op == O::RefTest { 0x15 } else { 0x17 };
             }
-            sleb(&mut ctx.out, code);
+            emit_heap(&mut ctx.out, heap);
         }
         O::BrOnCast | O::BrOnCastFail => {
             let label = ctx.resolve_label(imm(0)?)?;
@@ -4314,8 +4360,8 @@ fn emit_op_with_immediates(
             ctx.out
                 .push(u8::from(n1) | (u8::from(n2) << 1));
             uleb(&mut ctx.out, u64::from(label));
-            sleb(&mut ctx.out, c1);
-            sleb(&mut ctx.out, c2);
+            emit_heap(&mut ctx.out, c1);
+            emit_heap(&mut ctx.out, c2);
         }
         O::RefNull => {
             // A heap type: an abstract head, or a **concrete** `$t`/index — legal, and
@@ -4323,21 +4369,10 @@ fn emit_op_with_immediates(
             // unknown head falls through to type-name resolution rather than being
             // rejected. Abstract codes come from the one `abstract_heap_code` table, so
             // `nofunc`/`noexn` cannot drift into their family heads.
-            let s = imm(0)?;
-            let a = want_atom(s)?;
-            // ⚠️ The **fifth** entry point, and the one that survived fixing the other four.
-            // `ref.null` reads a heap type through its own reader, so it needs its own guard: the
-            // fall-through below is exactly the funcidx path that turned `(ref.null anyfunc)` into
-            // `BadNumber`. Enumerating the positions is what found it — the first four looked like
-            // the whole set.
-            if let Some(modern) = obsolete_type_keyword(a) {
-                return Err(Error::ObsoleteKeyword(modern));
-            }
-            let code = match abstract_heap_code(a) {
-                Some(c) => c,
-                None => i64::from(resolve_by_name(ctx.type_names, s)?),
-            };
-            sleb(&mut ctx.out, code);
+            // ⚠️ `ref.null` was the **fifth** entry point with its own heap-type reader — the one that
+            // survived fixing the other four (`(ref.null anyfunc)` came back `BadNumber`). It now reads
+            // through `parse_heap`, the one reader, which carries that guard and `(exact $t)` both.
+            emit_heap(&mut ctx.out, parse_heap(ctx.type_names, imm(0)?)?);
         }
         // `call_ref`/`return_call_ref` take a **type** index, not a function index — the callee is
         // the `funcref` on the stack, and the immediate is the signature to check it against.
@@ -5007,20 +5042,12 @@ fn abstract_heap_code(atom: &str) -> Option<i64> {
 /// Parse a `ref.test` / `ref.cast` / `br_on_cast` type target: `(ref null? ht)` or a bare
 /// heap type. Returns `(nullable, heap-type code)` — a concrete `$t` yields its type index
 /// as a non-negative code, an abstract head its negative one.
-fn parse_ref_type_target(ctx: &Ctx, s: &Sexpr) -> Result<(bool, i64)> {
+fn parse_ref_type_target(ctx: &Ctx, s: &Sexpr) -> Result<(bool, Heap)> {
     // The list form `(ref null? ht)`.
     if let Some(l) = s.as_list() {
         if l.len() >= 2 && eq_atom(&l[0], "ref") {
-            let nullable = l.len() >= 3 && eq_atom(&l[1], "null");
-            let ht = &l[l.len() - 1];
-            let a = want_atom(ht)?;
-            if let Some(modern) = obsolete_type_keyword(a) {
-                return Err(Error::ObsoleteKeyword(modern));
-            }
-            if let Some(code) = abstract_heap_code(a) {
-                return Ok((nullable, code));
-            }
-            return Ok((nullable, i64::from(resolve_by_name(ctx.type_names, ht)?)));
+            let nullable = ref_form_nullable(l)?;
+            return Ok((nullable, parse_heap(ctx.type_names, &l[l.len() - 1])?));
         }
         return Err(Error::BadImmediate);
     }
@@ -5047,9 +5074,86 @@ fn parse_ref_type_target(ctx: &Ctx, s: &Sexpr) -> Result<(bool, i64)> {
         other => (false, other),
     };
     if let Some(code) = abstract_heap_code(head) {
-        return Ok((nullable, code));
+        return Ok((nullable, Heap::Code(code)));
     }
-    Ok((false, i64::from(resolve_by_name(ctx.type_names, s)?)))
+    Ok((false, Heap::Code(i64::from(resolve_by_name(ctx.type_names, s)?))))
+}
+
+/// A heap type as written: one `s33` (an abstract code, or a concrete type index), or EXACT.
+#[derive(Debug, Clone, Copy)]
+enum Heap {
+    Code(i64),
+    /// `(exact $t)` — custom-descriptors; encoded `0x62` + an unsigned type index.
+    Exact(u32),
+}
+
+/// Write a heap type: the one writer, so `0x62` is emitted in one place.
+fn emit_heap(out: &mut Vec<u8>, h: Heap) {
+    match h {
+        Heap::Code(c) => sleb(out, c),
+        Heap::Exact(ti) => {
+            out.push(0x62);
+            uleb(out, u64::from(ti));
+        }
+    }
+}
+
+/// `(exact $t)` — `Some(index)` for that list, `None` for anything else.
+///
+/// Only a CONCRETE type may be exact: `(exact any)`, `(exact)` and the bare `exact 0` are all
+/// "unexpected token" in `exact.wast`, so the refusal is `UnexpectedToken` (malformed text).
+fn parse_exact(s: &Sexpr, type_names: &[Option<String>]) -> Result<Option<u32>> {
+    let Some(l) = s.as_list() else {
+        return Ok(None);
+    };
+    if !l.first().is_some_and(|x| eq_atom(x, "exact")) {
+        return Ok(None);
+    }
+    let [_, t] = l else {
+        return Err(Error::UnexpectedToken);
+    };
+    let a = want_atom(t).map_err(|_| Error::UnexpectedToken)?;
+    if !(a.starts_with('$') || a.starts_with(|c: char| c.is_ascii_digit())) {
+        return Err(Error::UnexpectedToken);
+    }
+    let ti = resolve_by_name(type_names, t)?;
+    // As for `concrete_ref`: the index is packed into 27 bits and would truncate.
+    if ti > V::MAX_CONCRETE_INDEX {
+        return Err(Error::BadImmediate);
+    }
+    Ok(Some(ti))
+}
+
+/// Any heap type: `(exact $t)`, an abstract head, or a type index.
+///
+/// 🔒 **The one text reader of a heap type** — cast targets, `br_on_cast`, and `ref.null` (which
+/// had its own copy, the "fifth entry point" its comment warned about). Learning `(exact …)` once is
+/// the point: a heap type read by two readers is one that one of them will get wrong.
+fn parse_heap(type_names: &[Option<String>], s: &Sexpr) -> Result<Heap> {
+    if let Some(ti) = parse_exact(s, type_names)? {
+        return Ok(Heap::Exact(ti));
+    }
+    let a = want_atom(s)?;
+    if let Some(modern) = obsolete_type_keyword(a) {
+        return Err(Error::ObsoleteKeyword(modern));
+    }
+    if let Some(code) = abstract_heap_code(a) {
+        return Ok(Heap::Code(code));
+    }
+    Ok(Heap::Code(i64::from(resolve_by_name(type_names, s)?)))
+}
+
+/// `(ref ht)` or `(ref null ht)` — exactly those two shapes. Anything else is malformed.
+///
+/// ⚠️ The shape was read as "`null` if the second item is `null`, then the LAST item" — so
+/// `(ref exact 0)` (a missing pair of parentheses; malformed in `exact.wast`) quietly read as `(ref 0)`,
+/// dropping the word that made it exact. Another clause parsed and not carried.
+fn ref_form_nullable(l: &[Sexpr]) -> Result<bool> {
+    match l.len() {
+        2 => Ok(false),
+        3 if eq_atom(&l[1], "null") => Ok(true),
+        _ => Err(Error::UnexpectedToken),
+    }
 }
 
 /// A block signature: either a type index or an inline result list.

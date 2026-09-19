@@ -31,8 +31,8 @@ than the thing the consumer uses.
 **T0–T8 DONE (published through v0.9.0); T9's eighteen passes landed 2026-08-14; 🆕 T13 — the
 CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 4 landed 2026-09-19 (track A done as the custom-annotations feature; the shipped cdylib −62% after `rlib` was found defeating LTO; the import type-use check #4 closed; TRACK P custom-page-sizes done — `PAGE_SIZE` deleted, byte-granular bounds cross-checked on wasmtime), all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,142 / 63 / 457** of 64,205 over **288**
-files), **522 workspace tests**, C-ABI gate PASSED, `.wat` corpus **528/532** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 31/31 PASSED on day 3** — ⚠️ 31, not the 28 on record; the crate gained tests and
+**embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,264 / 39 / 331** of 64,303 over **288**
+files), **525 workspace tests**, C-ABI gate PASSED, `.wat` corpus **528/532** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 31/31 PASSED on day 3** — ⚠️ 31, not the 28 on record; the crate gained tests and
 nobody re-counted.
 🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
 **0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; and **`proposals/threads/` is at
@@ -76,7 +76,7 @@ stale one. 🎓 *Verifying the premise of an option is not verifying the option*
 removed assertions, and `proposals/threads/` is now **497 / 0 / 0**. ⚠️ The patch is **uncommitted in the
 wasmtk tree on purpose** (the write was authorised; committing in another repo is not) and is designed
 to be overwritten by the next corpus sync — **re-check after every sync.**
-🚦 **NEXT: TRACK D — custom-descriptors** (2026-09-19). Tracks A and P, #4, the cdylib dead-code leak and both
+🚦 **NEXT: TRACK D2** — D1 (exact types) DONE 2026-09-19 with its soundness checkpoint met (`tests/exact-type-confusion.wast`). ⚠️ wasmtime 48 has NO custom-descriptors: wasm-tools is the outside reader (encoding + validity). **TRACK D — custom-descriptors** (2026-09-19). Tracks A and P, #4, the cdylib dead-code leak and both
 threads-snapshot patches are DONE (`cmem/roadmap.md`, DAY 4 parts 1–3). *(Was: track A → the two owner decisions
 above → track P → track D.)* The 2026-08-20 scoping below is now the record of how it was planned; its
 cross-cutting items and track W are done. *(Superseded scoping follows.)* — `cmem/roadmap.md`, "THE REMAINING

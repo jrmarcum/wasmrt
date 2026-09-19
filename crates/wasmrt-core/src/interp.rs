@@ -995,7 +995,9 @@ fn cross_module_val_types_match(a_ids: &[u32], a: crate::types::ValType, b_ids: 
     if !a.is_concrete() || !b.is_concrete() {
         return a == b;
     }
-    if a.is_non_null_ref() != b.is_non_null_ref() {
+    // Nullability AND exactness are part of the type (custom-descriptors): `(ref (exact $t))` is not
+    // `(ref $t)`, whatever their targets' ids.
+    if a.is_non_null_ref() != b.is_non_null_ref() || a.is_exact() != b.is_exact() {
         return false;
     }
     // Both ids must EXIST and match. An absent id means the module named a type it does not have — an
@@ -1043,8 +1045,17 @@ fn cross_module_val_subtype(
             // Refuse when either side has no store-wide id: a hand-built `Module` never joined the
             // registry, and the ACCEPT side is the dangerous one. Two unknowns must NOT read as
             // "the same type", which is why the sentinel is filtered out before comparing.
+            // 🔒 An EXACT declaration admits only exactly its type (custom-descriptors) — the
+            // cross-module twin of the validator's rule. Invariant positions (mutable globals, tables)
+            // require exactness to match as well as identity.
             (Some(a), Some(b)) => {
-                if invariant { a == b } else { reg.is_subtype(a, b) }
+                if invariant {
+                    a == b && got.is_exact() == want.is_exact()
+                } else if want.is_exact() {
+                    got.is_exact() && a == b
+                } else {
+                    reg.is_subtype(a, b)
+                }
             }
             _ => false,
         },
@@ -1687,11 +1698,29 @@ impl Store {
         // mismatched declaration is the silent-wrong-call class — the guest would marshal
         // arguments for one shape and the callee read another.
         let declared_funcs = module.imports.iter().filter_map(|i| match &i.ty {
-            crate::module::Extern::Func(ft) => Some((ft, i.func_type_index)),
+            crate::module::Extern::Func(ft) => Some((ft, i.func_type_index, i.exact)),
             _ => None,
         });
         for (decl, backing) in declared_funcs.zip(&imports.funcs) {
-            let (declared, declared_ti) = decl;
+            let (declared, declared_ti, exact) = decl;
+            // 🔒 An EXACT import (custom-descriptors) links only to a function whose DYNAMIC type — the
+            // one it was defined with, followed through any re-export — is IDENTICAL to the declared
+            // one. Not a subtype: `ref.func` of this import is typed exact, so a subtype bound here
+            // would pass exact casts it must fail. A host function has no registry type to compare,
+            // so it is refused (the accept side is the dangerous one).
+            if exact {
+                let ImportedFunc::Wasm { instance, func } = backing else {
+                    return Err(Trap::IncompatibleImport);
+                };
+                let exporter = self.slot(*instance).ok_or(Trap::MissingImport)?;
+                let want = declared_ti.and_then(|ti| type_ids.get(ti as usize).copied());
+                let got = defining_func(&self.code, exporter, *func)
+                    .and_then(|(owner, ti)| self.code[owner].type_ids.get(ti as usize).copied());
+                match (want, got) {
+                    (Some(w), Some(g)) if w == g => continue,
+                    _ => return Err(Trap::IncompatibleImport),
+                }
+            }
             if let ImportedFunc::Wasm { instance, func } = backing {
                 let exporter = self.slot(*instance).ok_or(Trap::MissingImport)?;
                 let actual = self.code[exporter]
@@ -2615,7 +2644,9 @@ fn block_arity(ctx: &Ctx, bt: BlockType, want_params: bool) -> u32 {
     match bt {
         BlockType::Empty => 0,
         // Both spell a single result and no parameters.
-        BlockType::Value(_) | BlockType::ConcreteRef { .. } => u32::from(!want_params),
+        BlockType::Value(_) | BlockType::ConcreteRef { .. } | BlockType::ExactRef { .. } => {
+            u32::from(!want_params)
+        }
         BlockType::TypeIndex(i) => ctx.module.func_sig(i).map_or(0, |ft| {
             (if want_params {
                 ft.params.len()
@@ -4325,16 +4356,59 @@ fn defined_func_type(module: &Module, fi: u32) -> Option<u32> {
     module.functions.get((fi - imported) as usize).copied()
 }
 
+/// The instance that DEFINES function `fi` of instance `inst`, and its type index there — following
+/// imports (possibly through re-exports) to their source. `None` for a host function, or a chain that
+/// does not resolve.
+///
+/// Bounded by the number of instances: a well-formed chain visits each at most once, and the bound
+/// keeps this total on a malformed one rather than looping.
+fn defining_func(code: &[InstanceData], mut inst: usize, mut fi: u32) -> Option<(usize, u32)> {
+    for _ in 0..=code.len() {
+        let d = code.get(inst)?;
+        if let Some(ti) = defined_func_type(&d.module, fi) {
+            return Some((inst, ti));
+        }
+        match d.imports.get(fi as usize)? {
+            FuncTarget::Wasm { instance, func } => {
+                inst = *instance;
+                fi = *func;
+            }
+            FuncTarget::Host(_) => return None,
+        }
+    }
+    None
+}
+
 /// Match a value's actual heap head against a target heap type — abstract targets use the
 /// hierarchy relation, concrete targets the declared subtype chain.
 fn head_matches(module: &Module, actual: RefHeap, actual_ti: Option<u32>, target: HeapType) -> bool {
     match target {
         HeapType::Concrete(t) => actual_ti.is_some_and(|ti| module.is_subtype(ti, t)),
+        // Exact: the SAME type, never a subtype. And no family fallback — without an index there is
+        // nothing to be exactly equal to, so the answer is no (the wildcard below would have said
+        // "any struct matches").
+        HeapType::Exact(t) => actual_ti.is_some_and(|ti| module.types_equal(ti, t)),
         // The uninhabited bottoms: only a null ref has these, already handled by `ref_matches`.
         HeapType::NoFunc | HeapType::NoExtern | HeapType::NoExn => false,
         _ => module
             .ref_head(target)
             .is_ok_and(|th| actual.is_subtype_of(th)),
+    }
+}
+
+/// A concrete cast target as `(type index, exact?)`; `None` for an abstract one.
+///
+/// 🔒 **The one place a cast target's index is read.** Every arm of [`ref_matches`] used to split the
+/// target with `let HeapType::Concrete(t) = rt.heap else { <abstract path> }` — and an EXACT target is
+/// not `Concrete`, so it fell into the abstract path, where `head_matches` resolved it to its FAMILY:
+/// `ref.cast (ref (exact $t))` would have accepted ANY struct, and the `struct.get` after it read
+/// fields at another type's layout. Type confusion, found by reading before the assembler could
+/// spell `(exact …)` — the shape wazmrt shipped (a path that "dropped the prefix").
+fn concrete_target(ht: HeapType) -> Option<(u32, bool)> {
+    match ht {
+        HeapType::Concrete(t) => Some((t, false)),
+        HeapType::Exact(t) => Some((t, true)),
+        _ => None,
     }
 }
 
@@ -4405,13 +4479,17 @@ fn ref_matches(
             // An ABSTRACT target (`any`, `eq`, `struct`, `array`, `i31`, `none`) asks only what shape
             // the object has, which `kind` already answers — no type index is involved, so this is
             // module-independent and needs no registry.
-            let HeapType::Concrete(t) = rt.heap else {
+            let Some((t, exact)) = concrete_target(rt.heap) else {
                 return head_matches(module, kind, None, rt.heap);
             };
             if owner == inst {
                 // Same instance: the two indices are in one numbering, so the cheap module-local
-                // subtype check is exact. This is the overwhelmingly common case.
-                return module.is_subtype(obj.type_index, t);
+                // check is exact. This is the overwhelmingly common case.
+                return if exact {
+                    module.types_equal(obj.type_index, t)
+                } else {
+                    module.is_subtype(obj.type_index, t)
+                };
             }
             // Across a link the two indices are in different modules and cannot be compared directly.
             // Resolve BOTH to store-wide ids and ask the registry — the same mechanism import
@@ -4425,6 +4503,8 @@ fn ref_matches(
                 code.get(inst)
                     .and_then(|d| d.type_ids.get(t as usize).copied()),
             ) {
+                // Store-wide ids are canonical, so equality IS type identity.
+                (Some(obj_id), Some(target_id)) if exact => obj_id == target_id,
                 (Some(obj_id), Some(target_id)) => store.types.is_subtype(obj_id, target_id),
                 // A hand-built `Module` never joined the registry, so one side has no store-wide id.
                 // Refuse. ⚠️ The direction matters and is not a style choice: the ACCEPT side is the
@@ -4438,21 +4518,22 @@ fn ref_matches(
         RefHeap::Func => {
             // Resolve the funcref's type index in the module that DEFINED it — the value carries its
             // owning instance in bits 62..32 precisely so this is possible.
-            let owner = funcref_instance(v);
-            let ti = code
-                .get(owner)
-                .and_then(|d| defined_func_type(&d.module, funcref_index(v)));
             // An abstract target needs no index: every non-null funcref is a `func`.
-            let HeapType::Concrete(t) = rt.heap else {
-                return head_matches(module, RefHeap::Func, ti, rt.heap);
+            let Some((t, exact)) = concrete_target(rt.heap) else {
+                return head_matches(module, RefHeap::Func, None, rt.heap);
             };
-            let Some(ti) = ti else {
-                // An IMPORTED function has no defining type index in its own module, so there is
-                // nothing to resolve. Refuse, for the same reason as above.
+            // A cast asks the function's DYNAMIC type — the one it was DEFINED with — so follow an
+            // imported function to the instance that defines it. (`A.f` imported inexactly by this
+            // module, or re-exported through `B`, is still exactly `A`'s `$f`.) ⚠️ This refused every
+            // cast of an imported function to a concrete type, "no defining type index in its own
+            // module" — a loud false negative, which `exact-func-import.wast` asserts against.
+            let Some((owner, ti)) = defining_func(code, funcref_instance(v), funcref_index(v)) else {
+                // A HOST function joined no type registry, so there is nothing to compare. Refuse:
+                // the accept side is the dangerous one.
                 return false;
             };
             if owner == inst {
-                return module.is_subtype(ti, t);
+                return if exact { module.types_equal(ti, t) } else { module.is_subtype(ti, t) };
             }
             // ⚠️ This arm used to stop one step short: it fetched `ti` from the owner's module and
             // then compared it against the TESTING module's table anyway — correct about where the
@@ -4463,6 +4544,7 @@ fn ref_matches(
                 code.get(inst)
                     .and_then(|d| d.type_ids.get(t as usize).copied()),
             ) {
+                (Some(got_id), Some(want_id)) if exact => got_id == want_id,
                 (Some(got_id), Some(want_id)) => store.types.is_subtype(got_id, want_id),
                 _ => false,
             }

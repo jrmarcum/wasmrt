@@ -88,6 +88,9 @@ pub enum Feature {
     /// 1 byte or 64 KiB. Gated on the flag, not the value: stating the default is still using
     /// the proposal, and wasm-tools refuses `(pagesize 65536)` without it too.
     CustomPageSizes,
+    /// Custom descriptors: exact reference types `(ref null? (exact $t))`, descriptor/describes
+    /// clauses, and the `*_desc` instructions. Defined on top of GC — requires [`Feature::Gc`].
+    CustomDescriptors,
 }
 
 impl Feature {
@@ -98,7 +101,7 @@ impl Feature {
     /// core test counts `Features`' FIELDS against it, and the C-ABI test parses `wasmrt.h` against
     /// it. (The first version of this check compared a hand-written list with itself, so a new
     /// proposal missing from it — `CustomPageSizes`, 2026-09-19 — passed. See that test.)
-    pub const ALL: [Feature; 17] = [
+    pub const ALL: [Feature; 18] = [
         Feature::SignExtension,
         Feature::SaturatingFloatToInt,
         Feature::MultiValue,
@@ -116,6 +119,7 @@ impl Feature {
         Feature::TailCall,
         Feature::WideArithmetic,
         Feature::CustomPageSizes,
+        Feature::CustomDescriptors,
     ];
 
     /// The stable lower-case name, matching the proposal's repository name. Used by the C
@@ -140,6 +144,7 @@ impl Feature {
             Feature::TailCall => "tail-call",
             Feature::WideArithmetic => "wide-arithmetic",
             Feature::CustomPageSizes => "custom-page-sizes",
+            Feature::CustomDescriptors => "custom-descriptors",
         }
     }
 }
@@ -172,6 +177,7 @@ pub struct Features {
     pub tail_call: bool,
     pub wide_arithmetic: bool,
     pub custom_page_sizes: bool,
+    pub custom_descriptors: bool,
 }
 
 impl Default for Features {
@@ -222,6 +228,7 @@ impl Features {
             tail_call: true,
             wide_arithmetic: true,
             custom_page_sizes: true,
+            custom_descriptors: true,
         }
     }
 
@@ -246,6 +253,7 @@ impl Features {
             tail_call: false,
             wide_arithmetic: false,
             custom_page_sizes: false,
+            custom_descriptors: false,
         }
     }
 
@@ -270,6 +278,7 @@ impl Features {
             Feature::TailCall => self.tail_call,
             Feature::WideArithmetic => self.wide_arithmetic,
             Feature::CustomPageSizes => self.custom_page_sizes,
+            Feature::CustomDescriptors => self.custom_descriptors,
         }
     }
 
@@ -293,6 +302,7 @@ impl Features {
             Feature::TailCall => self.tail_call = on,
             Feature::WideArithmetic => self.wide_arithmetic = on,
             Feature::CustomPageSizes => self.custom_page_sizes = on,
+            Feature::CustomDescriptors => self.custom_descriptors = on,
         }
     }
 
@@ -318,6 +328,7 @@ impl Features {
         require!(function_references => reference_types,
                  Feature::FunctionReferences, Feature::ReferenceTypes);
         require!(relaxed_simd => simd, Feature::RelaxedSimd, Feature::Simd);
+        require!(custom_descriptors => gc, Feature::CustomDescriptors, Feature::Gc);
         require!(exceptions => reference_types, Feature::Exceptions, Feature::ReferenceTypes);
         Ok(())
     }
@@ -436,6 +447,11 @@ pub fn val_type_feature(v: ValType) -> Option<Feature> {
     }
     if !v.is_ref() {
         return None; // i32 / i64 / f32 / f64
+    }
+    // An EXACT reference is custom-descriptors (wasm-tools: "custom descriptors required for exact
+    // reference types") — checked before the concrete rule, which would otherwise answer first.
+    if v.is_exact() {
+        return Some(Feature::CustomDescriptors);
     }
     // A concrete `(ref $t)` is function-references regardless of its family head.
     if v.is_concrete() {
@@ -786,6 +802,7 @@ mod tests {
         // The FROZEN prefix: integers an embedder may already have compiled keep their meaning.
         assert_eq!(all[15], Feature::WideArithmetic, "C value 15 is frozen");
         assert_eq!(all[16], Feature::CustomPageSizes, "C value 16 is frozen");
+        assert_eq!(all[17], Feature::CustomDescriptors, "C value 17 is frozen");
     }
 
     /// custom-page-sizes is gated on the FLAG — stating the default `(pagesize 65536)` is still

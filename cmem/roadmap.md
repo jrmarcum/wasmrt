@@ -188,9 +188,9 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,142 / 63 / 457 over 288 files, 522 workspace tests, C-ABI gate PASSED, `.wat` corpus
+**State: 64,264 / 39 / 331 over 288 files, 525 workspace tests, C-ABI gate PASSED, `.wat` corpus
 528/532, Miri **32/32**, custom-sections gate **528 agree / 4 refused by both / 0 differ**, shipped cdylib **522,240 B**, everything committed and pushed.** Day 4
-(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. The era-pinned `proposals/threads/memory.wast` contradiction was then PATCHED (owner-directed) — `proposals/threads/` 494/0/0. **Next: #6, track D.**
+(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. The era-pinned `proposals/threads/memory.wast` contradiction was then PATCHED (owner-directed) — `proposals/threads/` 494/0/0. **Track D1 (exact types) is DONE; next is D2.**
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -202,7 +202,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | **3** | ✅ **Track A — DONE (2026-09-19, owner: "we do not want the lexer to throw away information … align with canonical wasmtime and wasm").** `custom/` **0/1/20 → 20/0/0**. The first scoping ("pure runner work, no engine risk") was false — wasmtime scores neither command and the lexer dropped every annotation — so it became the **custom-annotations feature**, built to MEASURED canonical behaviour: `@custom` → a custom section at its slot, `@name` + every `$id` → the `name` section (all 12 subsections), branch hints → `metadata.code.branch_hint`, malformed/misplaced → **module refused** (as wasm-tools refuses it), a hint on a non-branch → **emitted and reported, not refused**. See the day-4 entry. | — |
 | **4** | ✅ **DONE 2026-09-19 — see `known-issues.md` (top); refused with wasmtime's own reason, and a rule-free fourth copy of the type-use loop behind it.** ~~**The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
 | **5** | ✅ **DONE 2026-09-19 — custom-page-sizes 5 files 166/0/0 (was 110/0/79); byte-granular bounds verified on every access path and CROSS-CHECKED ON WASMTIME 48; `PAGE_SIZE` deleted so no 64 KiB assumption can compile. See DAY 4 part 3.** ~~**Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
-| **6** | **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
+| **6** | ◐ **D1 DONE 2026-09-19 (exact types) — see DAY 4 part 4. Next: D2 (descriptor/describes), then D3/D4 (the `*_desc` instructions).** **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
 
 ⚠️ **Two predictions still standing, so honest movement is not read as regression:**
 * **Passes go DOWN when `exact` lands** — a parse gap currently scores as a correct rejection, so ~19
@@ -248,6 +248,51 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### ✅ DAY 4, part 4 — TRACK D1: EXACT TYPES, and the soundness checkpoint. `[x]`
+
+**64,142 / 63 / 457 → 64,264 / 39 / 331.** `exact.wast` 19/17/0 → **20/0/0**; `exact-casts.wast` 0/3/108 →
+**108/0/0**; `exact-func-import.wast` 7/3/18 → **20/0/0**. 525 tests, C-ABI PASSED, Miri 32/32, wasm32 builds.
+Size: CLI +4,096 B, cdylib +2,048 B.
+
+⚠️ **wasmtime 48 does NOT implement custom-descriptors** — it cannot referee this track at run time. The outside
+reader is **wasm-tools 1.259** (`--features all`) for ENCODING and VALIDITY; run-time behaviour rests on the corpus
+plus targeted wrong-answer tests. Every assembler spelling was byte-compared with wasm-tools.
+
+🔒 **The soundness checkpoint, met:** `tests/exact-type-confusion.wast` (28 assertions, run by `cargo test`) —
+a SUBTYPE must fail an exact cast on all four instructions (`ref.test`/`ref.cast`/`br_on_cast`/`br_on_cast_fail`),
+in the GC and func arms, same-instance and ACROSS instances (the registry path); an exact import refuses a subtype
+at link; types differing only in a field's exactness stay distinct. wasm-tools agrees on every module's validity.
+**Mutation-verified at 8 sites, all caught.**
+
+🔴 **A live type-confusion hole was found by READING, before it could be reached** — the shape the roadmap quoted
+from wazmrt ("a path that dropped the prefix"). Every arm of `ref_matches` split its target with
+`let HeapType::Concrete(t) = rt.heap else { <abstract path> }`; an exact target is not `Concrete`, so it fell into
+the abstract path, which resolved it to its FAMILY — `ref.cast (ref (exact $t))` would have accepted ANY struct.
+Unreachable only because the assembler could not yet spell `(exact …)`. Now one function (`concrete_target`)
+reads every cast target's index.
+
+**Made structural rather than inspected:** `HeapType::Exact` and `BlockType::ExactRef` are new enum VARIANTS, so
+every exhaustive match became a compile error until it decided what exactness means; the rest (bit-level
+`ValType`, wildcard matches) were enumerated by hand. Exactness is its own bit (27; the index is 27 bits and the
+decoder enforces `MAX_CONCRETE_INDEX` explicitly, since it no longer equals the type-count bound).
+
+**Six places that would have DROPPED exactness, each fixed:** the cast arms (above); `val_types_equal`
+(`call_indirect`'s fallback would equate `(ref (exact $t))` with `(ref $t)`); the canonical rec-group key (both the
+module-local AND store-wide keys go through `push_val_type` — one fix, both keys); the invariant and covariant
+cross-module matchers; and **three heap-type readers → one**: `module::read_heap_type_ref` and the type-section
+pre-scan's `skip_val_type` each had their own `s33` copy — the pre-scan read `0x62` as the whole heap type, left
+the index behind, and failed two types later as "invalid composite type entry". The text side likewise: casts,
+`br_on_cast` and `ref.null` (the "fifth entry point") now share `parse_heap`/`emit_heap`.
+
+**Semantics, measured on wasm-tools / the corpus:** `(exact $t) <: $t` and its supertypes; `(exact a) <: (exact b)`
+only when the same CANONICAL type; bottoms `<:` exact; nothing inexact `<:` exact. `struct.new*`/`array.new*` and
+`ref.func` of a DEFINED function or an EXACT import produce exact types; `ref.func` of an inexact import does not.
+Casts check the DYNAMIC type, so an imported function is followed to its defining instance (`defining_func`) —
+which also fixed every concrete cast of an imported function, which had been REFUSED. Exact imports (kind `0x20`)
+link only to an identical dynamic type; a host function is refused. `Feature::CustomDescriptors` (C value 17,
+requires GC) gates exact types and exact imports. `(ref exact 0)` used to parse as `(ref 0)` — the `(ref …)` shape
+is now strict. A bare `0x62` block type (wasmrt's internal `(ref i31)` tag) is refused, as wasm-tools refuses it.
 
 ##### ✅ DAY 4, part 3 — TRACK P, custom-page-sizes, and the security checklist it carried. `[x]`
 

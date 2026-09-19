@@ -383,6 +383,7 @@ fn feature_of(i: u32) -> Option<Feature> {
         14 => Feature::TailCall,
         15 => Feature::WideArithmetic,
         16 => Feature::CustomPageSizes,
+        17 => Feature::CustomDescriptors,
         _ => return None,
     })
 }

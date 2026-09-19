@@ -28,6 +28,21 @@ spec: `best-practices.md` §3.8b, exactly. **One `wasmtime compile` on our outpu
 wasmtime 48), raw bytes refused at decode, and the ops moved to internal tags above `0xff` so the
 byte space cannot claim them again.
 
+## 🟡 OPEN — the typed-`select` immediate reads each type as ONE RAW BYTE (found during D1, 2026-09-19)
+
+`opcode.rs`'s `ImmKind::SelectTypes` does `ValType::from_bits(r.read_byte())` and accepts anything `is_valid` —
+which includes wasmrt's INTERNAL non-null tags (`0x54`–`0x68`), exactly the accept-invalid fixed in
+`read_val_type` long ago. So a bare `0x62` in a `select` type vector decodes as `(ref i31)`, and a real
+`select (result (ref $t))` (`0x63`/`0x64` + heap type) cannot be decoded at all. Fix: read through
+`read_val_type`. Logged rather than fixed in D1 to keep that change's scope honest.
+
+## 🟡 OPEN — block-type single bytes `-24`…`-41` map to internal non-null tags
+
+`opcode.rs` block-type decoding maps `0x68`, `0x67`, … to wasmrt's internal `*_NN` tags. D1 removed the `0x62`
+arm (it is now the exact prefix; wasm-tools: "unexpected exact type"). The others are NOT simply wrong —
+wasm-tools accepts `0x68` as a block type (stack-switching's `contref`, likely) — so each needs checking against
+wasm-tools before it is changed.
+
 ## ✅ CLOSED 2026-09-19 (owner: "Yes. Please write the patch") — `proposals/threads/memory.wast` contradicted the core `memory.wast`
 
 **Patched in the vendored wasmtk copy**, in day 3's form: the three `assert_malformed` cases removed and quoted in an

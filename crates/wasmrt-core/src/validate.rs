@@ -684,6 +684,10 @@ fn check_module_features(module: &Module, features: &Features) -> ValidateResult
             gate(Some(Feature::CustomPageSizes), features)?;
         }
     }
+    // An EXACT function import is custom-descriptors (wasm-tools refuses kind `0x20` without it).
+    if module.imports.iter().any(|i| i.exact) {
+        gate(Some(Feature::CustomDescriptors), features)?;
+    }
 
     // --- tables: a second table, or any element type other than `funcref` ---
     if module.tables.len() > 1 {
@@ -807,8 +811,15 @@ fn validate_const_expr(
                         set[fi as usize] = true; // ref.func outside a body DECLARES it (C.refs)
                     }
                 }
+                // Exact for a DEFINED function, inexact for an import — the body rule's twin (see
+                // `Op::RefFunc`); a constant expression is a second copy of the same typing.
                 if let Some(ti) = module.declared_func_type_index(fi) {
-                    push(&mut stack, V::concrete_ref(false, RefHeap::Func, ti))?;
+                    let t = if module.func_ref_is_exact(fi) {
+                        V::exact_ref(false, RefHeap::Func, ti)
+                    } else {
+                        V::concrete_ref(false, RefHeap::Func, ti)
+                    };
+                    push(&mut stack, t)?;
                 } else {
                     push(&mut stack, V::FUNCREF_NN)?;
                 }
@@ -838,7 +849,7 @@ fn validate_const_expr(
                                 }
                             }
                         }
-                        push(&mut stack, V::concrete_ref(false, RefHeap::Struct, ti))?;
+                        push(&mut stack, V::exact_ref(false, RefHeap::Struct, ti))?;
                     }
                     // array.new t (init, len) / array.new_default t (len)
                     0x06 | 0x07 => {
@@ -856,7 +867,7 @@ fn validate_const_expr(
                                 return Err(ValidateError::TypeMismatch);
                             }
                         }
-                        push(&mut stack, V::concrete_ref(false, RefHeap::Array, ti))?;
+                        push(&mut stack, V::exact_ref(false, RefHeap::Array, ti))?;
                     }
                     // array.new_fixed t n
                     0x08 => {
@@ -871,7 +882,7 @@ fn validate_const_expr(
                                 return Err(ValidateError::TypeMismatch);
                             }
                         }
-                        push(&mut stack, V::concrete_ref(false, RefHeap::Array, ti))?;
+                        push(&mut stack, V::exact_ref(false, RefHeap::Array, ti))?;
                     }
                     // any.convert_extern / extern.convert_any. Constant per §3.3.11, and
                     // `extern.wast`'s very first global is `(extern.convert_any (ref.null any))`
@@ -1345,6 +1356,20 @@ impl<'a> FuncValidator<'a> {
                     RefType {
                         nullable,
                         heap: HeapType::Concrete(type_index),
+                    },
+                )?;
+                gate_val_type(t, self.features)?;
+                Ok((Vec::new(), vec![t]))
+            }
+            opcode::BlockType::ExactRef {
+                nullable,
+                type_index,
+            } => {
+                let t = ref_type_val_type(
+                    self.module,
+                    RefType {
+                        nullable,
+                        heap: HeapType::Exact(type_index),
                     },
                 )?;
                 gate_val_type(t, self.features)?;
@@ -1831,8 +1856,16 @@ impl<'a> FuncValidator<'a> {
                         return Err(ValidateError::UndeclaredFuncRef);
                     }
                 }
+                // custom-descriptors: `ref.func` of a DEFINED function is EXACT — the function is known
+                // to have exactly its declared type. Of an IMPORT it is not: the exporter's function may be
+                // a strict subtype ("References to inexact imports are not exact", exact-func-import.wast).
                 if let Some(ti) = self.module.declared_func_type_index(fi) {
-                    self.push_val_t(V::concrete_ref(false, RefHeap::Func, ti));
+                    let defined = self.module.func_ref_is_exact(fi);
+                    self.push_val_t(if defined {
+                        V::exact_ref(false, RefHeap::Func, ti)
+                    } else {
+                        V::concrete_ref(false, RefHeap::Func, ti)
+                    });
                 } else {
                     self.push_val_t(V::FUNCREF_NN);
                 }
@@ -1883,7 +1916,7 @@ impl<'a> FuncValidator<'a> {
                     // operands are pushed field 0 first → pop in reverse
                     self.pop_expect(f.storage.unpacked())?;
                 }
-                self.push_val_t(V::concrete_ref(false, RefHeap::Struct, ti));
+                self.push_val_t(V::exact_ref(false, RefHeap::Struct, ti));
             }
             Op::StructNewDefault => {
                 let ti = expect_gc_type(&instr.imm)?;
@@ -1894,7 +1927,7 @@ impl<'a> FuncValidator<'a> {
                 if fields.iter().any(|f| f.storage.unpacked().is_non_null_ref()) {
                     return Err(ValidateError::TypeMismatch); // not defaultable
                 }
-                self.push_val_t(V::concrete_ref(false, RefHeap::Struct, ti));
+                self.push_val_t(V::exact_ref(false, RefHeap::Struct, ti));
             }
             Op::StructGet | Op::StructGetS | Op::StructGetU => {
                 let (ti, fi) = expect_gc_field(&instr.imm)?;
@@ -1922,7 +1955,7 @@ impl<'a> FuncValidator<'a> {
                     .ok_or(ValidateError::UndefinedType)?;
                 self.pop_expect(V::I32)?; // length
                 self.pop_expect(f.storage.unpacked())?; // init value
-                self.push_val_t(V::concrete_ref(false, RefHeap::Array, ti));
+                self.push_val_t(V::exact_ref(false, RefHeap::Array, ti));
             }
             Op::ArrayNewDefault => {
                 let ti = expect_gc_type(&instr.imm)?;
@@ -1934,7 +1967,7 @@ impl<'a> FuncValidator<'a> {
                     return Err(ValidateError::TypeMismatch); // not defaultable
                 }
                 self.pop_expect(V::I32)?; // length
-                self.push_val_t(V::concrete_ref(false, RefHeap::Array, ti));
+                self.push_val_t(V::exact_ref(false, RefHeap::Array, ti));
             }
             Op::ArrayNewFixed => {
                 let Imm::GcTypeN { type_index, n } = instr.imm else {
@@ -1950,7 +1983,7 @@ impl<'a> FuncValidator<'a> {
                 for _ in 0..n {
                     self.pop_expect(f.storage.unpacked())?;
                 }
-                self.push_val_t(V::concrete_ref(false, RefHeap::Array, type_index));
+                self.push_val_t(V::exact_ref(false, RefHeap::Array, type_index));
             }
             Op::ArrayGet | Op::ArrayGetS | Op::ArrayGetU => {
                 let ti = expect_gc_type(&instr.imm)?;
@@ -2016,7 +2049,7 @@ impl<'a> FuncValidator<'a> {
                 }
                 self.pop_expect(V::I32)?; // size
                 self.pop_expect(V::I32)?; // offset into the segment
-                self.push_val_t(V::concrete_ref(false, RefHeap::Array, type_index));
+                self.push_val_t(V::exact_ref(false, RefHeap::Array, type_index));
             }
             Op::ArrayFill => {
                 let ti = expect_gc_type(&instr.imm)?;
@@ -2514,6 +2547,7 @@ fn ref_type_val_type(module: &Module, rt: RefType) -> ValidateResult<V> {
     let head = module.ref_head(rt.heap)?;
     Ok(match rt.heap {
         HeapType::Concrete(ti) => V::concrete_ref(rt.nullable, head, ti),
+        HeapType::Exact(ti) => V::exact_ref(rt.nullable, head, ti),
         _ => head.val_type(rt.nullable),
     })
 }
@@ -2532,6 +2566,14 @@ fn subtype_of(module: &Module, sub: V, sup: V) -> bool {
         return false;
     }
     if sub.is_concrete() && sup.is_concrete() {
+        // 🔒 custom-descriptors: an EXACT target admits exactly its own type. Only another exact
+        // reference to the SAME canonical type satisfies it — never a subtype, and never an inexact
+        // reference to the same type (which may hold a subtype at run time). Answering this with the
+        // supertype walk below is type confusion: the value's type would be one it proved it did not
+        // have. An inexact target is unchanged, and an exact source is below it like any other.
+        if sup.is_exact() {
+            return sub.is_exact() && module.types_equal(sub.concrete_index(), sup.concrete_index());
+        }
         return module.is_subtype(sub.concrete_index(), sup.concrete_index());
     }
     if sub.is_concrete() {

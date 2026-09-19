@@ -240,7 +240,10 @@ const CONCRETE_BIT: u32 = 0x8000_0000;
 const NULLABLE_BIT: u32 = 0x4000_0000;
 const KIND_SHIFT: u32 = 28;
 const KIND_MASK: u32 = 0x3 << KIND_SHIFT;
-const INDEX_MASK: u32 = 0x0fff_ffff; // 28 bits — up to ~268M types
+/// custom-descriptors: `(ref null? (exact $t))` — the reference admits values of EXACTLY `$t`, never a
+/// subtype. Taken out of the index field (which was 28 bits), so the index is now 27 bits.
+const EXACT_BIT: u32 = 0x0800_0000;
+const INDEX_MASK: u32 = 0x07ff_ffff; // 27 bits — up to ~134M types
 
 impl ValType {
     // Numeric value types.
@@ -289,7 +292,7 @@ impl ValType {
     pub const NULLEXNREF_NN: ValType = ValType(0x54);
 
     /// Largest type index a concrete `(ref $t)` can carry. [`ValType::concrete_ref`]
-    /// masks with the 28-bit index, so anything above this **silently truncates** — and
+    /// masks with the 27-bit index (28 until custom-descriptors took bit 27 for exactness), so anything above this **silently truncates** — and
     /// a large index can truncate to a small *valid* one, which is type confusion, not
     /// merely a wrong number. Callers must reject above this before constructing.
     pub const MAX_CONCRETE_INDEX: u32 = INDEX_MASK;
@@ -325,6 +328,31 @@ impl ValType {
                 | (k << KIND_SHIFT)
                 | (ti & INDEX_MASK),
         )
+    }
+
+    /// An EXACT concrete reference `(ref null? (exact $ti))` (custom-descriptors).
+    ///
+    /// # Panics
+    /// As [`ValType::concrete_ref`].
+    #[must_use]
+    pub fn exact_ref(is_nullable: bool, kind: RefHeap, ti: u32) -> ValType {
+        ValType(ValType::concrete_ref(is_nullable, kind, ti).0 | EXACT_BIT)
+    }
+
+    /// True for an exact concrete reference.
+    ///
+    /// 🔒 An exact reference is satisfied by values of EXACTLY its type — never a subtype. Any
+    /// subtype question answered from `concrete_index()` alone ignores this and is type confusion.
+    #[must_use]
+    pub const fn is_exact(self) -> bool {
+        self.is_concrete() && self.0 & EXACT_BIT != 0
+    }
+
+    /// The same reference with exactness dropped — `(ref (exact $t))` → `(ref $t)` (its immediate
+    /// supertype); anything else as-is.
+    #[must_use]
+    pub const fn inexact(self) -> ValType {
+        if self.is_concrete() { ValType(self.0 & !EXACT_BIT) } else { self }
     }
 
     /// True if this is a concrete typed reference (carries a type index).
@@ -467,7 +495,8 @@ impl fmt::Debug for ValType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_concrete() {
             let nn = if self.0 & NULLABLE_BIT == 0 { " nn" } else { "" };
-            return write!(f, "(ref{nn} {:?} #{})", self.ref_heap(), self.concrete_index());
+            let exact = if self.is_exact() { " exact" } else { "" };
+            return write!(f, "(ref{nn}{exact} {:?} #{})", self.ref_heap(), self.concrete_index());
         }
         let name = match self.0 {
             0x7f => "i32",
@@ -695,12 +724,28 @@ mod tests {
     }
 
     #[test]
-    fn concrete_index_truncates_at_28_bits() {
+    fn concrete_index_truncates_at_27_bits() {
         // Above MAX_CONCRETE_INDEX the index masks down — callers must reject first.
         let t = ValType::concrete_ref(false, RefHeap::Func, ValType::MAX_CONCRETE_INDEX);
         assert_eq!(t.concrete_index(), ValType::MAX_CONCRETE_INDEX);
         let over = ValType::concrete_ref(false, RefHeap::Func, INDEX_MASK + 1);
-        assert_eq!(over.concrete_index(), 0); // 2^28 masks to 0
+        assert_eq!(over.concrete_index(), 0); // 2^27 masks to 0
+        // ⚠️ and must NOT spill into the exact bit: an over-range index is not an exact ref.
+        assert!(!over.is_exact());
+    }
+
+    /// Exactness is its own bit: it survives the nullability conversions, is distinct under `==`,
+    /// and never changes the index or family.
+    #[test]
+    fn exact_ref_bit_packing() {
+        let e = ValType::exact_ref(false, RefHeap::Struct, 5);
+        let i = ValType::concrete_ref(false, RefHeap::Struct, 5);
+        assert!(e.is_exact() && !i.is_exact());
+        assert_ne!(e, i, "(ref (exact $t)) and (ref $t) are different types");
+        assert_eq!(e.inexact(), i);
+        assert_eq!((e.concrete_index(), e.ref_heap()), (5, RefHeap::Struct));
+        assert!(e.nullable().is_exact() && e.nullable().non_null() == e);
+        assert!(!ValType::ANYREF.is_exact() && ValType::ANYREF.inexact() == ValType::ANYREF);
     }
 
     #[test]

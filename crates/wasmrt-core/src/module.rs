@@ -210,6 +210,9 @@ pub struct Import {
     /// refers outward) against a `$f11` (in a group whose sibling refers inward) and must refuse.
     /// Comparing param/result lists cannot see that; comparing type indices can.
     pub func_type_index: Option<u32>,
+    /// A custom-descriptors EXACT function import (kind `0x20`): it links only to a function whose
+    /// type is EXACTLY the declared one — never a subtype — and `ref.func` of it is exact.
+    pub exact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,6 +438,22 @@ impl Module {
             .and_then(|i| i.func_type_index)
     }
 
+    /// Is `ref.func` of function `fi` EXACT (custom-descriptors)? A defined function is: it has exactly
+    /// its declared type. An import is only when it was declared exact — an inexact import may be bound
+    /// to a strict subtype ("References to inexact imports are not exact").
+    #[must_use]
+    pub fn func_ref_is_exact(&self, func_index: u32) -> bool {
+        let imported = self.imported_func_count();
+        if func_index >= imported {
+            return true;
+        }
+        self.imports
+            .iter()
+            .filter(|i| i.ty.kind() == crate::types::ExternKind::Func)
+            .nth(func_index as usize)
+            .is_some_and(|i| i.exact)
+    }
+
     /// The function signature at type index `ti`, or `None` if out of range or a
     /// non-function composite type.
     #[must_use]
@@ -512,7 +531,7 @@ impl Module {
             HeapType::Array => RefHeap::Array,
             HeapType::None => RefHeap::None,
             HeapType::Exn => RefHeap::Exn,
-            HeapType::Concrete(ti) => {
+            HeapType::Concrete(ti) | HeapType::Exact(ti) => {
                 let ct = self
                     .comp_types
                     .get(ti as usize)
@@ -566,13 +585,16 @@ impl Module {
     ///
     /// `==` on the packed bits is not the same question: a concrete reference packs a module-local
     /// type index, so two spellings of one type compare unequal. Nullability is part of the type and
-    /// must still match.
+    /// must still match — and so is EXACTNESS (custom-descriptors): `(ref (exact $t))` is not
+    /// `(ref $t)`. Omitting it made a function taking an exact parameter "equal" to one taking an
+    /// inexact one, which is what `call_indirect`'s structural fallback asks.
     #[must_use]
     pub fn val_types_equal(&self, a: ValType, b: ValType) -> bool {
         a == b
             || (a.is_concrete()
                 && b.is_concrete()
                 && a.is_non_null_ref() == b.is_non_null_ref()
+                && a.is_exact() == b.is_exact()
                 && self.types_equal(a.concrete_index(), b.concrete_index()))
     }
 
@@ -848,13 +870,18 @@ fn read_val_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<ValType> {
 /// Map a `heaptype` (following a `0x63`/`0x64` ref prefix) to a reference value type. A
 /// non-negative `s33` is a concrete type index collapsing to its family head; negative
 /// encodings are the abstract heap types.
+///
+/// Reads through [`crate::opcode::read_heap_type`], the ONE heap-type reader: this had its own copy of
+/// the `s33` table until custom-descriptors, and a second copy is where the exact prefix `0x62` would
+/// have been learned by one reader and not the other.
 fn read_heap_type_ref(r: &mut Reader, nullable: bool, kinds: &[CompKind]) -> DecodeResult<ValType> {
-    let ht = r.read_var_s33()?;
-    if ht >= 0 {
-        if ht > u32::MAX as i64 {
-            return Err(DecodeError::IndexOutOfRange);
-        }
-        let ti = ht as u32;
+    use crate::opcode::HeapType as H;
+    let ht = crate::opcode::read_heap_type(r).map_err(|e| match e {
+        // An unknown heap-type code in a VALUE type is a bad value type, as it always read here.
+        DecodeError::UnsupportedOpcode => DecodeError::BadValType,
+        e => e,
+    })?;
+    if let H::Concrete(ti) | H::Exact(ti) = ht {
         let kind = kinds
             .get(ti as usize)
             .ok_or(DecodeError::IndexOutOfRange)?;
@@ -863,22 +890,26 @@ fn read_heap_type_ref(r: &mut Reader, nullable: bool, kinds: &[CompKind]) -> Dec
             CompKind::Struct => RefHeap::Struct,
             CompKind::Array => RefHeap::Array,
         };
-        return Ok(ValType::concrete_ref(nullable, head, ti));
+        return Ok(if matches!(ht, H::Exact(_)) {
+            ValType::exact_ref(nullable, head, ti)
+        } else {
+            ValType::concrete_ref(nullable, head, ti)
+        });
     }
     let (n, nn) = match ht {
-        -0x10 => (ValType::FUNCREF, ValType::FUNCREF_NN),
-        -0x11 => (ValType::EXTERNREF, ValType::EXTERNREF_NN),
-        -0x0d => (ValType::NULLFUNCREF, ValType::NULLFUNCREF_NN),
-        -0x0e => (ValType::NULLEXTERNREF, ValType::NULLEXTERNREF_NN),
-        -0x0c => (ValType::NULLEXNREF, ValType::NULLEXNREF_NN),
-        -0x12 => (ValType::ANYREF, ValType::ANYREF_NN),
-        -0x13 => (ValType::EQREF, ValType::EQREF_NN),
-        -0x14 => (ValType::I31REF, ValType::I31REF_NN),
-        -0x15 => (ValType::STRUCTREF, ValType::STRUCTREF_NN),
-        -0x16 => (ValType::ARRAYREF, ValType::ARRAYREF_NN),
-        -0x0f => (ValType::NULLREF, ValType::NULLREF_NN),
-        -0x17 => (ValType::EXNREF, ValType::EXNREF_NN),
-        _ => return Err(DecodeError::BadValType),
+        H::Func => (ValType::FUNCREF, ValType::FUNCREF_NN),
+        H::Extern => (ValType::EXTERNREF, ValType::EXTERNREF_NN),
+        H::NoFunc => (ValType::NULLFUNCREF, ValType::NULLFUNCREF_NN),
+        H::NoExtern => (ValType::NULLEXTERNREF, ValType::NULLEXTERNREF_NN),
+        H::NoExn => (ValType::NULLEXNREF, ValType::NULLEXNREF_NN),
+        H::Any => (ValType::ANYREF, ValType::ANYREF_NN),
+        H::Eq => (ValType::EQREF, ValType::EQREF_NN),
+        H::I31 => (ValType::I31REF, ValType::I31REF_NN),
+        H::Struct => (ValType::STRUCTREF, ValType::STRUCTREF_NN),
+        H::Array => (ValType::ARRAYREF, ValType::ARRAYREF_NN),
+        H::None => (ValType::NULLREF, ValType::NULLREF_NN),
+        H::Exn => (ValType::EXNREF, ValType::EXNREF_NN),
+        H::Concrete(_) | H::Exact(_) => unreachable!("split off above"),
     };
     Ok(if nullable { n } else { nn })
 }
@@ -1212,9 +1243,14 @@ fn push_field_type(k: &mut Vec<u8>, canon: &[u32], start: u32, len: u32, f: &Fie
 
 /// A value type, with a **concrete** reference reduced to (nullability, normalised target) so the
 /// module-local type index it packs cannot leak into the key.
+///
+/// 🔒 EXACTNESS is part of the key (custom-descriptors): a struct with a `(ref (exact $t))` field and
+/// one with a `(ref $t)` field are DIFFERENT types. Keyed on nullability alone, they would canonicalise
+/// to one type — and a value of either would pass a cast to the other: type confusion at the level of
+/// type identity, invisible to every subtyping check downstream because they would agree it is one type.
 fn push_val_type(k: &mut Vec<u8>, canon: &[u32], start: u32, len: u32, v: ValType) {
     if v.is_concrete() {
-        k.push(0xc0 | u8::from(v.is_non_null_ref()));
+        k.push(0xc0 | u8::from(v.is_non_null_ref()) | (u8::from(v.is_exact()) << 1));
         push_type_ref(k, canon, start, len, v.concrete_index());
     } else {
         k.push(0x00);
@@ -1366,10 +1402,19 @@ fn skip_val_type_vec(r: &mut Reader) -> DecodeResult<()> {
 }
 
 /// Advance past one value type without resolving it (bytes only).
+///
+/// ⚠️ The heap type is consumed by [`crate::opcode::read_heap_type`], the one reader, NOT a bare `s33`:
+/// this was a THIRD copy of that reader, and it read the exact prefix `0x62` as the whole heap type —
+/// leaving the type index behind, so every later byte of the type section was misread and the module
+/// failed two types on as an "invalid composite type entry". A skipper must know the grammar exactly
+/// as well as a reader does; it only gets to ignore the answer.
 fn skip_val_type(r: &mut Reader) -> DecodeResult<()> {
     let b = r.read_byte()?;
     if b == 0x63 || b == 0x64 {
-        r.read_var_s33()?; // (ref null? ht): + heaptype s33
+        crate::opcode::read_heap_type(r).map_err(|e| match e {
+            DecodeError::UnsupportedOpcode => DecodeError::BadValType,
+            e => e,
+        })?;
     }
     Ok(())
 }
@@ -1403,13 +1448,14 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
         let module = read_name(r)?;
         let name = read_name(r)?;
         let byte = r.read_byte()?;
-        // `0x20` is custom-descriptors' EXACT function import — a real encoding of a proposal wasmrt
-        // does not implement (track D), so it is OUR gap, never a verdict that the input is malformed.
-        // (In an EXPORT the same byte is malformed, and stays `UnknownExternKind`.)
-        if byte == 0x20 {
-            return Err(DecodeError::UnimplementedProposal);
-        }
-        let kind = ExternKind::from_u8(byte).ok_or(DecodeError::UnknownExternKind)?;
+        // `0x20` is custom-descriptors' EXACT function import: a function import in every respect
+        // but matching. (In an EXPORT the same byte is malformed, and stays `UnknownExternKind`.)
+        let exact = byte == 0x20;
+        let kind = if exact {
+            ExternKind::Func
+        } else {
+            ExternKind::from_u8(byte).ok_or(DecodeError::UnknownExternKind)?
+        };
         let mut func_type_index = None;
         let ty = match kind {
             ExternKind::Func => {
@@ -1459,6 +1505,7 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
             name,
             ty,
             func_type_index,
+            exact,
         });
     }
     Ok(list)
@@ -2257,5 +2304,40 @@ mod tests {
         assert_eq!(max_pages(false, 0), 0xFFFF_FFFF); // "at most 0xffffffff 1-byte pages"
         assert_eq!(max_pages(true, 16), 0x1_0000_0000_0000);
         assert_eq!(max_pages(true, 0), u64::MAX);
+    }
+
+    /// custom-descriptors at the DECODER: the exact prefix `0x62` is meaningful ONLY after `0x63`/`0x64`
+    /// (as a value type) or as a heap type, and names a CONCRETE type — each boundary as wasm-tools has it.
+    #[test]
+    fn the_exact_prefix_decodes_only_where_it_means_something() {
+        // (struct (field (ref (exact 0)))) and its nullable twin.
+        for (nn, prefix) in [(true, 0x64u8), (false, 0x63)] {
+            let md = decode(&m(&[0x01, 0x07, 0x01, 0x5f, 0x01, prefix, 0x62, 0x00, 0x00])).unwrap();
+            let CompType::Struct(fs) = &md.comp_types[0] else { panic!() };
+            let StorageType::Val(v) = fs[0].storage else { panic!() };
+            assert!(v.is_exact() && v.concrete_index() == 0 && v.is_non_null_ref() == nn, "{v:?}");
+        }
+        // A bare `0x62` is not a value type; a repeated prefix is not a type index.
+        assert!(decode(&m(&[0x01, 0x06, 0x01, 0x5f, 0x01, 0x62, 0x00, 0x00])).is_err());
+        assert!(decode(&m(&[0x01, 0x08, 0x01, 0x5f, 0x01, 0x64, 0x62, 0x62, 0x00, 0x00])).is_err());
+        // An index beyond `MAX_CONCRETE_INDEX` is refused, not truncated into a smaller valid one.
+        let over = crate::types::ValType::MAX_CONCRETE_INDEX + 1; // 2^27 — a 4-byte LEB
+        let leb = [0x80, 0x80, 0x80, 0x40];
+        assert_eq!(over, 1 << 27);
+        let mut body = alloc::vec![0x01, 0x0a, 0x01, 0x5f, 0x01, 0x64, 0x62];
+        body.extend_from_slice(&leb);
+        body.push(0x00);
+        assert_eq!(decode(&m(&body)).unwrap_err(), DecodeError::IndexOutOfRange);
+    }
+
+    /// Exactness is part of a value type's IDENTITY: `val_types_equal` — what `call_indirect`'s
+    /// structural fallback asks — must not equate `(ref (exact $t))` with `(ref $t)`.
+    #[test]
+    fn val_types_equal_distinguishes_exactness() {
+        let md = decode(&m(&[0x01, 0x03, 0x01, 0x5f, 0x00])).unwrap(); // (type (struct))
+        let e = crate::types::ValType::exact_ref(false, crate::types::RefHeap::Struct, 0);
+        let i = crate::types::ValType::concrete_ref(false, crate::types::RefHeap::Struct, 0);
+        assert!(md.val_types_equal(e, e) && md.val_types_equal(i, i));
+        assert!(!md.val_types_equal(e, i) && !md.val_types_equal(i, e));
     }
 }
