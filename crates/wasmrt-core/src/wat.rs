@@ -127,6 +127,9 @@ pub enum Error {
     /// 2026-09-19 an IMPORT with this defect was not refused at all, and surfaced 32 KB later as a
     /// `StackUnderflow` in an unrelated function.)
     TypeUseMismatch,
+    /// `(pagesize N)` with `N` zero or not a power of two — malformed text, "invalid custom page
+    /// size" (custom-page-sizes). A power of two the proposal does not allow is the validator's.
+    InvalidPageSize,
     /// A malformed or misplaced CUSTOM annotation — `@custom`, `@name`, or a branch hint. The
     /// payload is the reason, worded as the spec suite words it. Its own variant because the
     /// stage is the verdict: `assert_malformed_custom` is satisfied by this and nothing else.
@@ -149,6 +152,7 @@ impl fmt::Display for Error {
         match self {
             Error::Parse(e) => write!(f, "s-expression parse error: {e}"),
             Error::Annotation(why) => write!(f, "annotation: {why}"),
+            Error::InvalidPageSize => write!(f, "invalid custom page size"),
             Error::TypeUseMismatch => {
                 write!(f, "inline function type doesn't match type reference")
             }
@@ -251,6 +255,18 @@ fn val_type_vec(out: &mut Vec<u8>, vts: &[V]) -> Result<()> {
 
 /// Emit a `limits` (§5.3.7): a flag byte then `min[, max]`.
 /// Flag bits: 0 = has max, 1 = shared (threads), 2 = i64 index (memory64).
+/// A memory type's binary form: its limits, and — when the text stated a page size, including
+/// the default — flag bit 3 and the exponent after them (custom-page-sizes; wasm-tools keeps an
+/// explicit `(pagesize 65536)` as flag `0x08` + `16` too, so dropping it would change the module).
+fn emit_memory_type(out: &mut Vec<u8>, m: &MemoryDef) {
+    let at = out.len();
+    emit_limits(out, m.min, m.max, m.shared, m.is64);
+    if let Some(e) = m.page_size_log2 {
+        out[at] |= 0x08;
+        uleb(out, u64::from(e));
+    }
+}
+
 fn emit_limits(out: &mut Vec<u8>, min: u64, max: Option<u64>, shared: bool, is64: bool) {
     let flag = u8::from(max.is_some()) | (u8::from(shared) << 1) | (u8::from(is64) << 2);
     out.push(flag);
@@ -1041,6 +1057,8 @@ struct MemoryDef {
     max: Option<u64>,
     shared: bool,
     is64: bool,
+    /// `(pagesize N)` as `log2(N)`; `None` when the text states none (64 KiB, no flag emitted).
+    page_size_log2: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1948,30 +1966,94 @@ fn opt_bare_use_index(items: &[Sexpr], j: &mut usize) -> Result<u32> {
     Ok(idx)
 }
 
-/// Refuse a `(pagesize N)` clause on a memory type — the **custom-page-sizes** proposal, which
-/// this build does not implement (Track P).
+/// `(pagesize N)` — custom-page-sizes. `N` must be a nonzero power of two or the TEXT is malformed
+/// ("invalid custom page size"); whether it is one of the two sizes the proposal allows (1, 64 KiB)
+/// is the validator's question, so `(pagesize 4)` assembles and is refused there, as the suite has it.
 ///
-/// ⚠️⚠️ **Until 2026-09-17 the clause was parsed and SILENTLY THROWN AWAY.** Neither memory-type
-/// parser looked past the limits, so `(memory 1 (pagesize 1))` assembled to bytes
-/// **byte-identical to `(memory 1)`**: a guest asking for a one-byte memory got 64 KiB, and every
-/// access that had to trap succeeded instead. That is the silent-wrong-output class this port
-/// ranks worst, and it was reachable from plain text input. wasmtime refuses the same source.
-///
-/// 🔒 **Refusing is the safe direction** — a module wasmrt will not run cannot answer wrongly —
-/// and it is what the sibling runtime did before implementing the proposal. When Track P lands,
-/// this guard is *replaced* by real page-size plumbing, not merely deleted: every bounds check
-/// that compares against `pages × 65536` has to learn the declared page size first.
-///
-/// ⚠️ **Called from BOTH memory-type parsers**, because a memory type is read in two places —
-/// `parse_memory_field` and the `"memory"` arm of [`parse_import_field`] — and a guard that sits
-/// in only one of them refuses only half the forms the corpus spells. The clause travels in two
-/// positions (after the limits, and before an inline `(data …)`), so this scans the whole form
-/// rather than one index.
-fn check_no_page_size(items: &[Sexpr]) -> Result<()> {
-    if items.iter().any(|s| eq_kw(s, "pagesize")) {
-        return Err(Error::Unsupported("custom-page-sizes"));
+/// ⚠️ History: until 2026-09-17 this clause was parsed and SILENTLY THROWN AWAY — `(memory 1
+/// (pagesize 1))` assembled byte-identical to `(memory 1)`, a 1-byte-page memory silently given 64 KiB
+/// pages. X1 then refused it outright (`Error::Unsupported`) until the feature existed; Track P
+/// (2026-09-19) replaced that refusal with this.
+fn parse_page_size(clause: &Sexpr) -> Result<u32> {
+    let [_, n] = want_list(clause)? else {
+        return Err(Error::BadForm);
+    };
+    let n = parse_u64_str(want_atom(n)?)?;
+    if !n.is_power_of_two() {
+        return Err(Error::InvalidPageSize);
     }
-    Ok(())
+    Ok(n.trailing_zeros())
+}
+
+/// A memory type, read from `items[*j..]` to the END of the form:
+/// `addrtype? min max? shared? (pagesize N)?` — or, for a definition, the inline-data abbreviation
+/// `addrtype? (pagesize N)? (data "…"*)`, returned with its bytes. Anything left over is malformed.
+///
+/// 🔒 **The ONE reader of a memory type.** A memory type is spelled in a definition and in an
+/// import descriptor, and each used to read it itself — which is how `(pagesize N)` came to be
+/// dropped by both (X1), and how `(memory 1 2 3)` still assembled on 2026-09-19 with the `3`
+/// ignored. A clause the parser accepts and the module does not carry is the T10a mechanism; one
+/// reader that owns every clause, and refuses what it does not own, is the structural answer.
+fn parse_memory_type(items: &[Sexpr], j: &mut usize) -> Result<(MemoryDef, Option<Vec<u8>>)> {
+    // ⚠️ The index type is read BEFORE the inline-data branch, because `(memory i64 (data …))` is
+    // legal (`float_memory64.wast` failed whole on a branch that hardcoded `is64: false`).
+    let mut is64 = false;
+    if items.get(*j).is_some_and(|s| eq_atom(s, "i64")) {
+        is64 = true;
+        *j += 1;
+    } else if items.get(*j).is_some_and(|s| eq_atom(s, "i32")) {
+        *j += 1;
+    }
+    let is_page = |k: usize| items.get(k).is_some_and(|s| eq_kw(s, "pagesize"));
+    let is_data = |k: usize| items.get(k).is_some_and(|s| eq_kw(s, "data"));
+
+    // The inline-data abbreviation: the data sizes the memory, in pages of the stated size.
+    if is_data(*j) || (is_page(*j) && is_data(*j + 1)) {
+        let mut page_size_log2 = None;
+        if is_page(*j) {
+            page_size_log2 = Some(parse_page_size(&items[*j])?);
+            *j += 1;
+        }
+        let mut bytes = Vec::new();
+        for s in &want_list(&items[*j])?[1..] {
+            bytes.extend_from_slice(want_str(s)?);
+        }
+        *j += 1;
+        if *j != items.len() {
+            return Err(Error::UnexpectedToken);
+        }
+        // ⚠️ `div_ceil(65536)` stood here: `(memory (pagesize 1) (data "xyz"))` is THREE pages.
+        let e = page_size_log2.unwrap_or(crate::module::DEFAULT_PAGE_SIZE_LOG2);
+        let pages = (bytes.len() as u64).div_ceil(1u64 << e);
+        let m = MemoryDef { min: pages, max: Some(pages), shared: false, is64, page_size_log2 };
+        return Ok((m, Some(bytes)));
+    }
+
+    let min = match items.get(*j) {
+        Some(s) => parse_u64_str(want_atom(s)?)?,
+        None => 0,
+    };
+    *j += 1;
+    let mut max = None;
+    if let Some(a) = items.get(*j).and_then(Sexpr::as_atom) {
+        if a != "shared" {
+            max = Some(parse_u64_str(a)?);
+            *j += 1;
+        }
+    }
+    let shared = items.get(*j).is_some_and(|s| eq_atom(s, "shared"));
+    if shared {
+        *j += 1;
+    }
+    let mut page_size_log2 = None;
+    if is_page(*j) {
+        page_size_log2 = Some(parse_page_size(&items[*j])?);
+        *j += 1;
+    }
+    if *j < items.len() {
+        return Err(Error::UnexpectedToken);
+    }
+    Ok((MemoryDef { min, max, shared, is64, page_size_log2 }, None))
 }
 
 /// Skip over inline `(import …)` / `(export …)` clauses.
@@ -2217,7 +2299,6 @@ fn consume_matching_label(ctx: &Ctx, items: &[Sexpr], at: usize) -> Result<usize
 }
 
 fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
-    check_no_page_size(items)?;
     let mut j = 1;
     let name = opt_name(items, &mut j);
     let import = find_import(items)?;
@@ -2230,33 +2311,14 @@ fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         });
     }
     skip_inline_clauses(items, &mut j);
-
-    // ⚠️ The index-type keyword is read BEFORE the inline-data branch below, because
-    // `(memory i64 (data …))` is legal and that branch used to hardcode `is64: false`. Parsed
-    // here, both forms see it. (`float_memory64.wast` was 6 failures / 84 skips on this one
-    // line — the `i64` sat where the branch expected `data`, so neither path matched and the
-    // whole file failed to assemble with `BadForm`.)
-    let mut is64 = false;
-    if items.get(j).is_some_and(|s| eq_atom(s, "i64")) {
-        is64 = true;
-        j += 1;
-    } else if items.get(j).is_some_and(|s| eq_atom(s, "i32")) {
-        j += 1;
-    }
-
-    // `(memory $m [i64] (data "…"))` — an inline data segment sizes the memory.
-    if let Some(d) = items.get(j).filter(|s| eq_kw(s, "data")) {
-        let mut bytes = Vec::new();
-        for s in &want_list(d)?[1..] {
-            bytes.extend_from_slice(want_str(s)?);
+    let (m, data) = parse_memory_type(items, &mut j)?;
+    if let Some(bytes) = data {
+        // An imported memory has no contents of its own to initialise.
+        if import.is_some() {
+            return Err(Error::UnexpectedToken);
         }
-        let pages = bytes.len().div_ceil(65536) as u64;
-        b.memories.push(MemoryDef {
-            min: pages,
-            max: Some(pages),
-            shared: false,
-            is64,
-        });
+        let is64 = m.is64;
+        b.memories.push(m);
         b.mem_names.push(name);
         b.datas.push(DataSeg {
             mem_index: mi,
@@ -2266,26 +2328,6 @@ fn parse_memory_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         b.data_names.push(None);
         return Ok(());
     }
-
-    let min = match items.get(j) {
-        Some(s) => parse_u64_str(want_atom(s)?)?,
-        None => 0,
-    };
-    j += 1;
-    let mut max = None;
-    if let Some(a) = items.get(j).and_then(Sexpr::as_atom) {
-        if a != "shared" {
-            max = Some(parse_u64_str(a)?);
-            j += 1;
-        }
-    }
-    let shared = items.get(j).is_some_and(|s| eq_atom(s, "shared"));
-    let m = MemoryDef {
-        min,
-        max,
-        shared,
-        is64,
-    };
     if let Some(r) = import {
         b.mem_imports.push(ImportedMemory { r, m });
         b.import_order.push(ImportKind::Mem);
@@ -2561,31 +2603,12 @@ fn parse_import_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             b.func_names.push(name);
         }
         "memory" => {
-            check_no_page_size(desc)?;
-            let mut is64 = false;
-            if desc.get(j).is_some_and(|s| eq_atom(s, "i64")) {
-                is64 = true;
-                j += 1;
+            // The same reader as a memory definition — see `parse_memory_type`.
+            let (m, data) = parse_memory_type(desc, &mut j)?;
+            if data.is_some() {
+                return Err(Error::UnexpectedToken);
             }
-            let min = parse_u64_str(want_atom(nth(desc, j)?)?)?;
-            j += 1;
-            let mut max = None;
-            if let Some(a) = desc.get(j).and_then(Sexpr::as_atom) {
-                if a != "shared" {
-                    max = Some(parse_u64_str(a)?);
-                    j += 1;
-                }
-            }
-            let shared = desc.get(j).is_some_and(|s| eq_atom(s, "shared"));
-            b.mem_imports.push(ImportedMemory {
-                r,
-                m: MemoryDef {
-                    min,
-                    max,
-                    shared,
-                    is64,
-                },
-            });
+            b.mem_imports.push(ImportedMemory { r, m });
             b.import_order.push(ImportKind::Mem);
             b.mem_names.push(name);
         }
@@ -2895,7 +2918,7 @@ fn emit_imports(out: &mut Vec<u8>, b: &ModuleBuild) -> Result<()> {
                 name_bytes(&mut c, &i.r.module);
                 name_bytes(&mut c, &i.r.name);
                 c.push(0x02);
-                emit_limits(&mut c, i.m.min, i.m.max, i.m.shared, i.m.is64);
+                emit_memory_type(&mut c, &i.m);
             }
             ImportKind::Global => {
                 let i = &b.global_imports[g];
@@ -2961,7 +2984,7 @@ fn emit_rest(out: &mut Vec<u8>, b: &ModuleBuild, e: &Encoded) -> Result<()> {
         let mut c = Vec::new();
         uleb(&mut c, b.memories.len() as u64);
         for m in &b.memories {
-            emit_limits(&mut c, m.min, m.max, m.shared, m.is64);
+            emit_memory_type(&mut c, m);
         }
         push_section(out, 5, &c);
     }
@@ -7646,36 +7669,59 @@ mod emitter_coverage_tests {
         );
     }
 
-    /// X1 — every text spelling of a `(pagesize N)` memory must be REFUSED, not silently
-    /// stripped.
+    /// Track P — every text spelling of a `(pagesize N)` memory must CARRY its page size, byte for
+    /// byte as wasm-tools writes it (each expectation below is wasm-tools 1.259's output, past the
+    /// 8-byte header).
     ///
-    /// ⚠️⚠️ **This is a wrong-ANSWER test, not a conformance test.** Until 2026-09-17
-    /// `(memory 1 (pagesize 1))` assembled to bytes byte-identical to `(memory 1)`, so a guest
-    /// asking for a one-byte memory got 64 KiB and every access that had to trap returned 0.
-    /// The spec suite could not see it: our assembler and our decoder agreed, and the corpus
-    /// asserts *behaviour* of a proposal we do not implement, so the module simply "worked".
+    /// ⚠️⚠️ **A wrong-ANSWER test, not a conformance test** — the history is why. Until 2026-09-17
+    /// `(memory 1 (pagesize 1))` assembled byte-identical to `(memory 1)`: a guest asking for 1-byte
+    /// pages got 64 KiB ones. X1 then refused every spelling (this test pinned that refusal); Track P
+    /// replaced the refusal with the feature, and the test with this one.
     ///
-    /// 🔒 **The clause travels in two positions and through two parsers.** After the limits, and
-    /// before an inline `(data …)`; via `(memory …)` and via `(import … (memory …))`. All four
-    /// combinations are pinned, because the first guard written covered only one parser.
+    /// 🔒 The clause travels in two positions (after the limits; before an inline `(data …)`) and
+    /// through two parsers (a definition; an import descriptor). All are pinned, because the first
+    /// guard ever written covered only one parser.
     #[test]
-    fn a_page_size_clause_is_refused_in_every_position() {
-        for src in [
-            br#"(module (memory 1 (pagesize 1)))"#.as_slice(),
-            br#"(module (memory $m 1 2 (pagesize 65536)))"#.as_slice(),
-            br#"(module (memory (pagesize 1) (data "xyz")))"#.as_slice(),
-            br#"(module (memory (export "m") 0 (pagesize 1)))"#.as_slice(),
-            br#"(module (memory i64 1 (pagesize 65536)))"#.as_slice(),
-            br#"(module (import "a" "b" (memory 1 (pagesize 1))))"#.as_slice(),
-            br#"(module (memory (import "m" "x") 0 (pagesize 65536)))"#.as_slice(),
-        ] {
-            assert_eq!(
-                assemble(src).err(),
-                Some(Error::Unsupported("custom-page-sizes")),
-                "a page-size clause must be refused by name: {}",
-                core::str::from_utf8(src).unwrap()
-            );
+    fn a_page_size_clause_is_carried_in_every_position() {
+        fn hex(s: &str) -> Vec<u8> {
+            s.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
         }
+        for (src, want) in [
+            (r#"(module (memory 1 (pagesize 1)))"#, "05 04 01 08 01 00"),
+            (r#"(module (memory $m 1 2 (pagesize 65536)))"#,
+             "05 05 01 09 01 02 10 00 0b 04 6e 61 6d 65 06 04 01 00 01 6d"),
+            (r#"(module (memory (pagesize 1) (data "xyz")))"#,
+             "05 05 01 09 03 03 00 0b 09 01 00 41 00 0b 03 78 79 7a"),
+            (r#"(module (memory (export "m") 0 (pagesize 1)))"#, "05 04 01 08 00 00 07 05 01 01 6d 02 00"),
+            (r#"(module (memory i64 1 (pagesize 65536)))"#, "05 04 01 0c 01 10"),
+            (r#"(module (import "a" "b" (memory 1 (pagesize 1))))"#, "02 09 01 01 61 01 62 02 08 01 00"),
+            (r#"(module (memory (import "m" "x") 0 (pagesize 65536)))"#, "02 09 01 01 6d 01 78 02 08 00 10"),
+            (r#"(module (memory 1 2 shared (pagesize 1)))"#, "05 05 01 0b 01 02 00"),
+        ] {
+            let m = assemble(src.as_bytes()).unwrap_or_else(|e| panic!("{src} must assemble: {e:?}"));
+            assert_eq!(m[8..], hex(want)[..], "{src}");
+        }
+    }
+
+    /// The memory-type grammar is exact — `addrtype? min max? shared? (pagesize N)?` or
+    /// `addrtype? (pagesize N)? (data …)` — and wasm-tools refuses everything else. The last two
+    /// used to assemble with a clause silently IGNORED (`(memory 1 2 3)` became `(memory 1 2)`).
+    #[test]
+    fn a_memory_type_is_read_exactly() {
+        for (src, e) in [
+            (r#"(module (memory 0 (pagesize 3)))"#, Error::InvalidPageSize),
+            (r#"(module (memory 0 (pagesize 0)))"#, Error::InvalidPageSize),
+            (r#"(module (memory (pagesize 3) (data "x")))"#, Error::InvalidPageSize),
+            (r#"(module (memory 1 2 (pagesize 1) shared))"#, Error::UnexpectedToken),
+            (r#"(module (memory 1 (pagesize 1) (pagesize 1)))"#, Error::UnexpectedToken),
+            (r#"(module (memory (data "x") (pagesize 1)))"#, Error::UnexpectedToken),
+            (r#"(module (memory 1 2 3))"#, Error::UnexpectedToken),
+            (r#"(module (import "a" "b" (memory 1 2 3)))"#, Error::UnexpectedToken),
+        ] {
+            assert_eq!(assemble(src.as_bytes()).unwrap_err(), e, "{src}");
+        }
+        // A power of two the proposal does not allow is the VALIDATOR's to refuse, not the text's.
+        assert!(assemble(br#"(module (memory 0 (pagesize 4)))"#).is_ok());
     }
 
     /// The other half, and the half a guard gets wrong: a plain memory must still assemble.

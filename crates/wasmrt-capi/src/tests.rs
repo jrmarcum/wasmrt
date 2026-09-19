@@ -128,6 +128,33 @@ const ADD: &str = r#"(module
 
 // ---- the happy path ------------------------------------------------------------------
 
+/// The C spelling of the proposal list, checked against the Rust one by READING THE HEADER — the
+/// third leg of T10b. `wasmrt_feature_t` must be contiguous from 0, every integer must reach
+/// `feature_of`, and integer `n` must be `Feature::ALL[n]`.
+///
+/// ⚠️ Until 2026-09-19 nothing compared the header with anything: T10b's core test walked a
+/// hand-written Rust list, so a proposal present in `wasmrt.h` but absent from `feature_of` — or
+/// the reverse — was invisible to every gate.
+#[test]
+fn the_header_feature_enum_matches_feature_of_and_the_rust_list() {
+    use wasmrt_core::features::Feature;
+    let header = include_str!("../include/wasmrt.h");
+    let mut values: Vec<u32> = header
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("WASMRT_FEATURE_"))
+        .filter_map(|l| l.split('=').nth(1))
+        .filter_map(|v| v.trim().trim_end_matches(|c: char| !c.is_ascii_digit()).split(|c: char| !c.is_ascii_digit()).next())
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    values.sort_unstable();
+    let expect: Vec<u32> = (0..Feature::ALL.len() as u32).collect();
+    assert_eq!(values, expect, "wasmrt_feature_t must be exactly 0..{} — one per Feature", Feature::ALL.len());
+    for (n, f) in Feature::ALL.iter().enumerate() {
+        assert_eq!(feature_of(n as u32), Some(*f), "C value {n}");
+    }
+    assert_eq!(feature_of(Feature::ALL.len() as u32), None, "one past the end must be unknown");
+}
+
 #[test]
 fn abi_version_matches_the_header() {
     // `wasmrt.h` hardcodes WASMRT_ABI_VERSION; if this drifts, a dynamically-bound caller

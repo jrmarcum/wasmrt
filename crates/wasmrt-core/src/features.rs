@@ -84,9 +84,40 @@ pub enum Feature {
     /// already refused by the multi-value gate, and adding a dependency here would refuse the
     /// instruction for a reason that is not about this proposal.
     WideArithmetic,
+    /// Custom page sizes: a memory type may state its page size (flag bit 3 + an exponent) —
+    /// 1 byte or 64 KiB. Gated on the flag, not the value: stating the default is still using
+    /// the proposal, and wasm-tools refuses `(pagesize 65536)` without it too.
+    CustomPageSizes,
 }
 
 impl Feature {
+    /// Every proposal, in declaration order — which is also `wasmrt_feature_t`'s integer order in
+    /// `wasmrt.h` (`Feature::ALL[n]` is C value `n`). Those integers are FROZEN: append, never insert.
+    ///
+    /// Kept as a written list on purpose, and checked from both sides so it cannot fall behind: the
+    /// core test counts `Features`' FIELDS against it, and the C-ABI test parses `wasmrt.h` against
+    /// it. (The first version of this check compared a hand-written list with itself, so a new
+    /// proposal missing from it — `CustomPageSizes`, 2026-09-19 — passed. See that test.)
+    pub const ALL: [Feature; 17] = [
+        Feature::SignExtension,
+        Feature::SaturatingFloatToInt,
+        Feature::MultiValue,
+        Feature::ReferenceTypes,
+        Feature::BulkMemory,
+        Feature::ExtendedConst,
+        Feature::Simd,
+        Feature::RelaxedSimd,
+        Feature::Threads,
+        Feature::MultiMemory,
+        Feature::Memory64,
+        Feature::FunctionReferences,
+        Feature::Gc,
+        Feature::Exceptions,
+        Feature::TailCall,
+        Feature::WideArithmetic,
+        Feature::CustomPageSizes,
+    ];
+
     /// The stable lower-case name, matching the proposal's repository name. Used by the C
     /// ABI's error text and by the CLI.
     #[must_use]
@@ -108,6 +139,7 @@ impl Feature {
             Feature::Exceptions => "exception-handling",
             Feature::TailCall => "tail-call",
             Feature::WideArithmetic => "wide-arithmetic",
+            Feature::CustomPageSizes => "custom-page-sizes",
         }
     }
 }
@@ -139,6 +171,7 @@ pub struct Features {
     pub exceptions: bool,
     pub tail_call: bool,
     pub wide_arithmetic: bool,
+    pub custom_page_sizes: bool,
 }
 
 impl Default for Features {
@@ -188,6 +221,7 @@ impl Features {
             exceptions: true,
             tail_call: true,
             wide_arithmetic: true,
+            custom_page_sizes: true,
         }
     }
 
@@ -211,6 +245,7 @@ impl Features {
             exceptions: false,
             tail_call: false,
             wide_arithmetic: false,
+            custom_page_sizes: false,
         }
     }
 
@@ -234,6 +269,7 @@ impl Features {
             Feature::Exceptions => self.exceptions,
             Feature::TailCall => self.tail_call,
             Feature::WideArithmetic => self.wide_arithmetic,
+            Feature::CustomPageSizes => self.custom_page_sizes,
         }
     }
 
@@ -256,6 +292,7 @@ impl Features {
             Feature::Exceptions => self.exceptions = on,
             Feature::TailCall => self.tail_call = on,
             Feature::WideArithmetic => self.wide_arithmetic = on,
+            Feature::CustomPageSizes => self.custom_page_sizes = on,
         }
     }
 
@@ -721,26 +758,19 @@ mod tests {
     /// constant silently changes meaning.
     #[test]
     fn every_feature_is_reachable_through_the_c_abi_by_a_stable_integer() {
-        // Every `Feature`, in declaration order. Kept here rather than derived, because the
-        // point is to compare two independently-written lists.
-        let all = [
-            Feature::SignExtension,
-            Feature::SaturatingFloatToInt,
-            Feature::MultiValue,
-            Feature::ReferenceTypes,
-            Feature::BulkMemory,
-            Feature::ExtendedConst,
-            Feature::Simd,
-            Feature::RelaxedSimd,
-            Feature::Threads,
-            Feature::MultiMemory,
-            Feature::Memory64,
-            Feature::FunctionReferences,
-            Feature::Gc,
-            Feature::Exceptions,
-            Feature::TailCall,
-            Feature::WideArithmetic,
-        ];
+        let all = Feature::ALL;
+        // ⚠️⚠️ **This test once compared a hand-written list with ITSELF.** Its `all` was a literal
+        // array and its size check was `all.len() == 16` — so `CustomPageSizes`, added to the enum,
+        // the struct and the C header but not to that array, PASSED. A list can only be checked
+        // against something that grows on its own. `Features` does: a proposal cannot be gated
+        // without a field, and `Debug` prints every field. The C header is checked in `wasmrt-capi`.
+        let fields = alloc::format!("{:?}", Features::all()).matches(": true").count();
+        assert_eq!(
+            fields,
+            all.len(),
+            "`Features` has {fields} flags but `Feature::ALL` lists {} — a proposal is missing              from `Feature::ALL` (append it; the C integers follow this order)",
+            all.len()
+        );
         // Spelling 2: the struct. `set` then `has` must round-trip, or a flag exists in the
         // enum with no field behind it.
         for f in all {
@@ -753,16 +783,26 @@ mod tests {
         // Spelling 3: the C ABI integers, contiguous from 0 and in this same order. The
         // assertion is on the ORDER, not just membership — an inserted feature would shift
         // every later integer and break an already-compiled embedder.
-        assert_eq!(
-            all.len(),
-            16,
-            "a feature was added: append it to `wasmrt_feature_t` (never insert), extend \
-             `feature_of`, and add it here"
-        );
-        assert_eq!(
-            all.last().copied(),
-            Some(Feature::WideArithmetic),
-            "the newest feature must be LAST — the C integers are frozen"
-        );
+        // The FROZEN prefix: integers an embedder may already have compiled keep their meaning.
+        assert_eq!(all[15], Feature::WideArithmetic, "C value 15 is frozen");
+        assert_eq!(all[16], Feature::CustomPageSizes, "C value 16 is frozen");
+    }
+
+    /// custom-page-sizes is gated on the FLAG — stating the default `(pagesize 65536)` is still
+    /// using the proposal, as wasm-tools has it — and refuses nothing else.
+    #[test]
+    fn the_custom_page_sizes_flag_refuses_a_stated_page_size_and_nothing_else() {
+        let mut off = Features::all();
+        off.custom_page_sizes = false;
+        for src in [&b"(module (memory 1 (pagesize 1)))"[..], b"(module (memory 1 (pagesize 65536)))"] {
+            let m = crate::module::decode(&crate::wat::assemble(src).unwrap()).unwrap();
+            assert_eq!(
+                crate::validate::validate_with_features(&m, &off),
+                Err(crate::validate::ValidateError::FeatureDisabled(Feature::CustomPageSizes))
+            );
+            assert!(crate::validate::validate_with_features(&m, &Features::all()).is_ok());
+        }
+        let plain = crate::module::decode(&crate::wat::assemble(b"(module (memory 1))").unwrap()).unwrap();
+        assert!(crate::validate::validate_with_features(&plain, &off).is_ok());
     }
 }

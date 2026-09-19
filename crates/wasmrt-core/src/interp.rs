@@ -73,8 +73,11 @@ pub fn as_f64(v: Value) -> f64 {
 /// through [`ResourceLimits::max_call_depth`] instead.
 const DEFAULT_MAX_CALL_DEPTH: usize = 512;
 
-/// WebAssembly linear-memory page size (64 KiB).
-pub const PAGE_SIZE: usize = 64 * 1024;
+// 🔒 There is NO page-size constant here, on purpose. A memory's page size is per MEMORY
+// (custom-page-sizes: 1 byte or 64 KiB), carried as `Memory::page_size_log2`. `PAGE_SIZE` was deleted
+// on 2026-09-19 so that every site still assuming 64 KiB became a compile error rather than a
+// memory-safety hole — a bounds or size computation left holding the default would let a guest with
+// 1-byte pages address 65,536x the memory it has. Do not reintroduce one.
 
 /// Default ceiling on total linear memory per instance (summed across memories), applied at
 /// instantiation and at `memory.grow`. A tiny module can declare gigabytes, so this bounds a
@@ -326,10 +329,37 @@ struct LegacyTry {
 /// OSes), so a large declared minimum costs address space, not resident memory.
 pub struct Memory {
     pub bytes: Vec<u8>,
+    /// Declared maximum, in PAGES of `1 << page_size_log2` bytes.
     pub max: Option<u64>,
     pub is64: bool,
     /// A `shared` memory (threads proposal) — required by `memory.atomic.wait*`.
     pub shared: bool,
+    /// This memory's page size, as an exponent: 16 (64 KiB) or 0 (1 byte, custom-page-sizes).
+    ///
+    /// 🔒 Every page↔byte conversion goes through [`Memory::pages`] / [`Memory::page_bytes`];
+    /// bounds checks compare against `bytes.len()` and so are byte-granular by construction.
+    pub page_size_log2: u32,
+}
+
+impl Memory {
+    /// The current size in pages — what `memory.size` returns and what import matching compares.
+    #[must_use]
+    pub fn pages(&self) -> u64 {
+        (self.bytes.len() as u64) >> self.page_size_log2
+    }
+
+    /// `pages` pages in bytes, or `None` if that does not fit the host's address space.
+    #[must_use]
+    pub fn page_bytes(&self, pages: u64) -> Option<usize> {
+        pages_to_bytes(pages, self.page_size_log2)
+    }
+}
+
+/// `pages << page_size_log2` as a host size, checked — `None` rather than a wrapped value when the
+/// product overflows `u64` or `usize` (a 64-bit memory's page count can be anything up to `u64::MAX`).
+fn pages_to_bytes(pages: u64, page_size_log2: u32) -> Option<usize> {
+    let bytes = pages.checked_mul(1u64.checked_shl(page_size_log2)?)?;
+    usize::try_from(bytes).ok()
 }
 
 /// A reference table: `Value` slots (`NULL_REF` = uninitialized; a funcref is its function
@@ -1044,7 +1074,10 @@ fn memory_import_matches(actual: &Memory, declared: &crate::module::MemoryType) 
     // did (`table_grow.wast`), and the rule is the same for both.
     actual.is64 == declared.limits.is64
         && actual.shared == declared.limits.shared
-        && (actual.bytes.len() / PAGE_SIZE) as u64 >= declared.limits.min
+        // custom-page-sizes: the page size is part of the TYPE, and must be EQUAL — a 1-byte-page
+        // memory is not a 64 KiB-page memory with more pages (spec test: "incompatible import type").
+        && actual.page_size_log2 == declared.page_size_log2()
+        && actual.pages() >= declared.limits.min
         && match declared.limits.max {
             Some(m) => actual.max.is_some_and(|a| a <= m),
             None => true,
@@ -1775,9 +1808,8 @@ impl Store {
         let mut memories: Vec<Memory> = Vec::with_capacity(defined_mems.len());
         let mut total_bytes: usize = 0;
         for mt in defined_mems {
-            let min_pages = usize::try_from(mt.limits.min).map_err(|_| Trap::MemoryLimitExceeded)?;
-            let nbytes = min_pages
-                .checked_mul(PAGE_SIZE)
+            // The declared minimum is in pages of THIS memory's size, not 64 KiB.
+            let nbytes = pages_to_bytes(mt.limits.min, mt.page_size_log2())
                 .ok_or(Trap::MemoryLimitExceeded)?;
             total_bytes = total_bytes
                 .checked_add(nbytes)
@@ -1788,6 +1820,7 @@ impl Store {
                 max: mt.limits.max,
                 is64: mt.limits.is64,
                 shared: mt.limits.shared,
+                page_size_log2: mt.page_size_log2(),
             });
         }
 
@@ -3837,7 +3870,7 @@ fn exec_memory(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &I
             // shared pool reads whichever instance happens to sit there (the shared-store
             // defect class; invisible with one instance per store, where they are equal).
             let mem = store.memories.get(maps.mem(mi)).ok_or(Trap::NoMemory)?;
-            let pages = (mem.bytes.len() / PAGE_SIZE) as u64;
+            let pages = mem.pages();
             if mem.is64 {
                 frame.push_i64(pages as i64);
             } else {
@@ -3958,14 +3991,16 @@ fn memory_grow(frame: &mut Frame, store: &mut Pools, maps: &IndexMaps, instr: &I
     let delta = frame.pop_mem(is64);
     let byte_ceiling = store.limits.max_memory_bytes; // read before the &mut borrow below
     let mem = &mut store.memories[mi];
-    let old_pages = (mem.bytes.len() / PAGE_SIZE) as u64;
-    let cap: u64 = if is64 { 0x1_0000_0000_0000 } else { 65536 };
+    let old_pages = mem.pages();
+    // The ceiling is the validator's, for this memory's page size — one rule, `max_pages`. With
+    // 1-byte pages a 32-bit memory reaches 2^32 - 1 pages where 64 KiB pages stop at 65536: the
+    // hardcoded `65536` that stood here would have refused every 1-byte-page grow past 64 KiB.
+    let cap = crate::module::max_pages(is64, mem.page_size_log2);
     let limit = mem.max.unwrap_or(cap).min(cap);
     let target = old_pages
         .checked_add(delta)
         .filter(|&p| p <= limit)
-        .and_then(|p| usize::try_from(p).ok())
-        .and_then(|p| p.checked_mul(PAGE_SIZE))
+        .and_then(|p| mem.page_bytes(p))
         .filter(|&n| n <= byte_ceiling);
     match target {
         Some(nbytes) => {
@@ -8322,7 +8357,7 @@ mod tests {
                 md,
                 Imports::new(),
                 ResourceLimits {
-                    max_memory_bytes: 2 * PAGE_SIZE,
+                    max_memory_bytes: 2 * 65536, // two 64 KiB pages
                     ..ResourceLimits::defaults()
                 }
             )
@@ -8345,7 +8380,7 @@ mod tests {
             md,
             Imports::new(),
             ResourceLimits {
-                max_memory_bytes: 2 * PAGE_SIZE,
+                max_memory_bytes: 2 * 65536, // two 64 KiB pages
                 ..ResourceLimits::defaults()
             },
         )

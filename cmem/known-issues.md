@@ -28,6 +28,22 @@ spec: `best-practices.md` §3.8b, exactly. **One `wasmtime compile` on our outpu
 wasmtime 48), raw bytes refused at decode, and the ops moved to internal tags above `0xff` so the
 byte space cannot claim them again.
 
+## 🟡 OPEN (owner decision) — `proposals/threads/memory.wast` contradicts the core `memory.wast`
+
+Since limits are decoded as u64 (Wasm 3.0, 2026-09-19), `(memory 0x1_0000_0000)` is refused at VALIDATION —
+what the current core `memory.wast` asserts (`assert_invalid` "memory size") and what wasm-tools 1.259 does. The
+era-pinned `proposals/threads/memory.wast` asserts the same text `assert_malformed` ("i32 constant out of range"):
+**3 honest failures**. Both cannot pass; before, the u32 decoder refused at decode and the runner accepted that
+for EITHER assertion, so the core file's passes were for the wrong reason. The same class as day 3's eight
+era-pinned threads assertions; patching the vendored snapshot is a wasmtk-tree write and needs the owner.
+
+## ✅ CLOSED 2026-09-19 — the runner never VALIDATED `(module definition …)`; behind it, `ref.func` of an import
+
+The runner assembled and stored a definition and nothing more, so every "this module is valid" claim made
+through one was unchecked. Validating them exposed a real defect: `ref.func` of an IMPORTED function was typed
+as abstract `funcref`, refusing every valid `(ref $f)` use of an imported function. Fixed
+(`Module::declared_func_type_index`); both pinned by tests.
+
 ## ✅ CLOSED 2026-09-19 — the import type-use check, and the wider defect behind it
 
 **Refused now with wasmtime's own reason** (*"inline function type doesn't match type reference"*,

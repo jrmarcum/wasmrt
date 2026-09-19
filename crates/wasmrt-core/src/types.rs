@@ -524,6 +524,10 @@ pub enum DecodeError {
     IndexOutOfRange,
     /// A single-byte flag (global mutability, limits flag) held a reserved value.
     MalformedFlag,
+    /// A memory's custom page size exponent (custom-page-sizes) cannot be a page size at all —
+    /// `2^e` does not fit the 64-bit address space (`e >= 64`). Malformed, as wasm-tools has it;
+    /// a representable size that is not 1 or 64 KiB is merely INVALID (the validator's call).
+    InvalidPageSize,
     /// A value-type byte was not one of the defined value types.
     BadValType,
     /// A name (import module/field, export, custom-section id) was not valid UTF-8.
@@ -532,6 +536,9 @@ pub enum DecodeError {
     DataCountMismatch,
     /// An instruction opcode wasmrt does not decode (or a raw internal-tag byte).
     UnsupportedOpcode,
+    /// A well-formed encoding from a proposal wasmrt does not implement (today: custom-descriptors'
+    /// exact function import, `0x20`). A gap of OURS — scored as a skip, never as "malformed".
+    UnimplementedProposal,
     /// A non-custom section appeared twice, or out of the order §5.5.2 fixes. Both read the same
     /// way to a decoder: it has already finished with that section, so those bytes are unexpected
     /// content — which is exactly how the spec suite words it. Silently taking the *second*
@@ -586,10 +593,12 @@ impl fmt::Display for DecodeError {
             DecodeError::UnknownExternKind => "unknown import/export kind byte",
             DecodeError::IndexOutOfRange => "index outside the decoded space",
             DecodeError::MalformedFlag => "reserved value in a single-byte flag",
+            DecodeError::InvalidPageSize => "invalid custom page size",
             DecodeError::BadValType => "byte is not a defined value type",
             DecodeError::InvalidUtf8 => "name is not valid UTF-8",
             DecodeError::DataCountMismatch => "data count disagrees with data segments",
             DecodeError::UnsupportedOpcode => "unsupported instruction opcode",
+            DecodeError::UnimplementedProposal => "encoding from a proposal wasmrt does not implement",
             DecodeError::SectionOrder => "section repeated or out of order",
             DecodeError::SectionSizeMismatch => "section size mismatch",
             DecodeError::FuncCodeCountMismatch => {

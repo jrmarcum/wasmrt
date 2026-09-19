@@ -48,11 +48,11 @@ is now simply how everything is done. memory64 **is** in scope (owner, 2026-07-2
 🚦 **PICKING UP? The handoff list is in [roadmap.md](roadmap.md), "HANDOFF — where to pick up".**
 Nothing is half-finished; the only work-in-progress anywhere is the threads patch sitting
 uncommitted in the **wasmtk** tree, on purpose, for wasmtk's own session to commit. Next tasks in
-order: ~~track A~~ ✅ **done 2026-09-19 as the custom-annotations feature** (`custom/` 20/0/0; see `roadmap.md`, DAY 4 part 2) → ~~the import type-use check~~ ✅ done 2026-09-19 → **track P** →
+order: ~~track A~~ ✅ **done 2026-09-19 as the custom-annotations feature** (`custom/` 20/0/0; see `roadmap.md`, DAY 4 part 2) → ~~the import type-use check~~ ✅ → ~~track P~~ ✅ done 2026-09-19 →
 **track D** (now 98% of what remains, and unblocked — `Op` has 0xEB free tags).
 
-Working tree is **ahead of the published v0.9.0**. Suite **64,087 / 63 / 535 — 99.9% of 64,150** over
-**288** files (day 4, 2026-09-19); **515 workspace tests**; clippy ⚠️ **NOT clean — 3 pre-existing warnings** (`opcode.rs` dead `ImmKind` variants, two `thread_local` const initializers; none added by day 4); C-ABI gate PASSED (74 symbols); `.wat` corpus
+Working tree is **ahead of the published v0.9.0**. Suite **64,142 / 66 / 457 — 99.9% of 64,208** over
+**288** files (day 4, 2026-09-19); **522 workspace tests**; clippy ⚠️ **NOT clean — 3 pre-existing warnings** (`opcode.rs` dead `ImmKind` variants, two `thread_local` const initializers; none added by day 4); C-ABI gate PASSED (74 symbols); `.wat` corpus
 **528/532** ⚠️ *(not 530 — the corpus loop keyed on the CLI's exit status, which is 0 even when validation fails; reading the verdict instead exposed two pre-existing failures. All four are corpus defects wasmtime also refuses.)*; **no file lost a TRUE pass** in any pass, across T9's eighteen and T13's four days — day 4 removed one FALSE pass (`custom-page-sizes.wast`), exposed by the whole-module-quote fix.
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 

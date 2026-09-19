@@ -382,6 +382,7 @@ fn feature_of(i: u32) -> Option<Feature> {
         13 => Feature::Exceptions,
         14 => Feature::TailCall,
         15 => Feature::WideArithmetic,
+        16 => Feature::CustomPageSizes,
         _ => return None,
     })
 }
@@ -1549,7 +1550,7 @@ capi! {
         let Some((id, mi)) = s.memory(h) else { return 0 };
         s.inner
             .memory(id, mi)
-            .map_or(0, |m| (m.bytes.len() / interp::PAGE_SIZE) as u64)
+            .map_or(0, interp::Memory::pages)
     }
 }
 

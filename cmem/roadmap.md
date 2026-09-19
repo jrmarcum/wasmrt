@@ -188,9 +188,9 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,087 / 63 / 535 over 288 files, 515 workspace tests, C-ABI gate PASSED, `.wat` corpus
-528/532, Miri **31/31**, custom-sections gate **528 agree / 4 refused by both / 0 differ**, shipped cdylib **521,216 B** (`rlib` removed from its crate-type, −62%), everything committed and pushed.** Day 4
-(below) found the runner manufacturing passes, did track A as the custom-annotations feature, fixed the cdylib dead-code leak, and closed #4. **Next: #5, track P.**
+**State: 64,142 / 66 / 457 over 288 files, 522 workspace tests, C-ABI gate PASSED, `.wat` corpus
+528/532, Miri **32/32**, custom-sections gate **528 agree / 4 refused by both / 0 differ**, shipped cdylib **522,240 B**, everything committed and pushed.** Day 4
+(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. **Next: #6, track D** — plus 🚦 **an owner decision**: `proposals/threads/memory.wast` (the era-pinned snapshot) asserts `(memory 0x1_0000_0000)` MALFORMED, the current core `memory.wast` and wasm-tools say INVALID; 3 honest failures until the vendored copy is patched (a wasmtk-tree write — needs the owner).
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -201,7 +201,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | **2** | 📮 **Report the stale snapshot upstream** (the spec repo's `proposals/threads/` still asserts multi-memory and multi-table invalid). Not filed — needs the owner's account. | The only route that fixes it for everyone; until then the patch carries it. |
 | **3** | ✅ **Track A — DONE (2026-09-19, owner: "we do not want the lexer to throw away information … align with canonical wasmtime and wasm").** `custom/` **0/1/20 → 20/0/0**. The first scoping ("pure runner work, no engine risk") was false — wasmtime scores neither command and the lexer dropped every annotation — so it became the **custom-annotations feature**, built to MEASURED canonical behaviour: `@custom` → a custom section at its slot, `@name` + every `$id` → the `name` section (all 12 subsections), branch hints → `metadata.code.branch_hint`, malformed/misplaced → **module refused** (as wasm-tools refuses it), a hint on a non-branch → **emitted and reported, not refused**. See the day-4 entry. | — |
 | **4** | ✅ **DONE 2026-09-19 — see `known-issues.md` (top); refused with wasmtime's own reason, and a rule-free fourth copy of the type-use loop behind it.** ~~**The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
-| **5** | **Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
+| **5** | ✅ **DONE 2026-09-19 — custom-page-sizes 5 files 166/0/0 (was 110/0/79); byte-granular bounds verified on every access path and CROSS-CHECKED ON WASMTIME 48; `PAGE_SIZE` deleted so no 64 KiB assumption can compile. See DAY 4 part 3.** ~~**Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
 | **6** | **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
 
 ⚠️ **Two predictions still standing, so honest movement is not read as regression:**
@@ -248,6 +248,51 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### ✅ DAY 4, part 3 — TRACK P, custom-page-sizes, and the security checklist it carried. `[x]`
+
+**64,087 / 63 / 535 → 64,142 / 66 / 457.** custom-page-sizes **110/0/79 → 166/0/0**. 522 tests, C-ABI PASSED,
+Miri 32/32, freestanding `wasm32` builds. Size: CLI +1,536 B, cdylib +1,024 B.
+
+🔒 **The scoping's three demands, each met structurally rather than by inspection:**
+* **Every page-size site** — enumerated by grep (by value AND spelling), then made a COMPILE ERROR:
+  `interp::PAGE_SIZE` is **deleted**, and the compiler named the five run-time uses; the grep found the
+  sixth the compiler could not (`memory_grow`'s literal `65536` cap), the validator's copy of the same
+  ceiling, and the C ABI's `memory_size_pages`. Both ceilings now come from ONE function,
+  `module::max_pages(is64, log2)`. Every page-to-byte conversion is `Memory::pages`/`page_bytes`, and bounds
+  checks compare against `bytes.len()`, so they are byte-granular by construction.
+* **Byte-granularity OOB, on every path** — `tests/custom-page-size-bounds.wast` (43 assertions, run by
+  `cargo test`): every load/store width, the offset immediate, SIMD, atomics, fill/copy/init, grow-then-access,
+  active segments, memory64, and a grow whose byte count cannot fit. ✅ **wasmtime 48 passes the whole file**
+  (`-W custom-page-sizes=y`), so the expected answers are not ours alone. Mutation-verified at every converted
+  site — 6 of 7 caught at once; the 7th found a runner hole (below) and is caught now.
+* **memory64 overflow** — `pages_to_bytes` is checked (`checked_shl` + `checked_mul` + `usize::try_from`), and
+  `grow(-1)` on a 1-byte-page memory64 is refused, never wrapped (pinned in the .wast).
+
+Canonical decisions, each MEASURED on wasm-tools/wasmtime first: exponent `>= 64` MALFORMED (decoder), other
+non-0/16 exponents INVALID (validator); table flag `0x08` malformed; an explicit `(pagesize 65536)` keeps the flag;
+`Feature::CustomPageSizes` gates the FLAG (C value 16), default on per the repo's convention; **limits decoded as
+u64 whatever the index type** (Wasm 3.0 — `(memory 0x1_0000_0000)` is now invalid at VALIDATION, as the core
+`memory.wast` asserts, where wasmrt refused it one stage early).
+
+⚠️ **Found on the way — five more of the same shape:**
+* 🔴 **The runner never validated `(module definition …)`** — it only assembled and stored it, so every validity
+  claim made through a definition went unchecked (`memory_max.wast`'s valid cases are all definitions). Found
+  by the one mutation nothing caught. Fixing it exposed the next one.
+* 🔴 **`ref.func` of an IMPORTED function was typed as abstract `funcref`**, so every valid use of an imported
+  function as a `(ref $f)` — global, table, body — was REFUSED. In function-references, recorded as done. New
+  `Module::declared_func_type_index` for the validator; the run-time `func_type_index` keeps answering `None` for
+  imports on purpose (an import's ACTUAL type is its exporter's, possibly a strict subtype).
+* **`(memory 1 2 3)` assembled with the `3` dropped** — the two memory-type parsers are now ONE reader
+  (`parse_memory_type`) that owns every clause and refuses leftovers.
+* **T10b's three-spellings test compared a hand-written list with ITSELF**, so `CustomPageSizes` would have passed
+  it absent. Now `Feature::ALL` is checked against `Features`' field count, and a capi test PARSES `wasmrt.h`.
+* Custom-descriptors' exact import byte `0x20` is now `DecodeError::UnimplementedProposal` (a skip), not "malformed".
+
+🚦 **Owner decision pending:** `proposals/threads/memory.wast` lost 3 passes — its era-pinned snapshot asserts
+`(memory 0x1_0000_0000)` MALFORMED ("i32 constant out of range"); the current core `memory.wast` asserts INVALID
+and wasm-tools agrees. They cannot both pass; the old u32 decoder "passed" both by refusing at decode, which the
+runner accepted for either. Patching the vendored copy is a write into the wasmtk tree.
 
 ##### ✅ DAY 4, part 2 — TRACK A became the CUSTOM-ANNOTATIONS feature (owner-directed). `[x]`
 

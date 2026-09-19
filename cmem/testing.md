@@ -85,6 +85,15 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🆕 2026-09-19 — day 4, part 3: **64,142 / 66 / 457** (track P)
+
+custom-page-sizes 166/0/0. **`tests/custom-page-size-bounds.wast`** — byte-granular OOB on every access path;
+run by `cargo test` via `regression_wast.rs`, and verified independently: `wasmtime wast -W
+custom-page-sizes=y,memory64=y,threads=y tests/custom-page-size-bounds.wast` exits 0. Re-run it on wasmtime
+whenever memory code changes. The runner now VALIDATES `(module definition …)` (it only assembled them).
+⚠️ `proposals/threads/memory.wast` 68 → 65: era-pinned contradiction with core `memory.wast`, owner decision
+(`known-issues.md`, top). Miri 32/32.
+
 ### 🆕 2026-09-19 — day 4: **64,087 / 65 / 530**, and a new EXTERNAL gate for custom sections
 
 `custom/` **0/1/20 → 20/0/0** (the custom-annotations feature); earlier the same day the whole-module

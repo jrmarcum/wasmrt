@@ -76,6 +76,9 @@ pub enum ValidateError {
     /// A `struct.set` / `array.set` on an immutable field.
     ImmutableField,
     InvalidLimits,
+    /// A memory's custom page size is representable but not one the proposal allows — only
+    /// 1 byte (`2^0`) and 64 KiB (`2^16`) are (custom-page-sizes).
+    InvalidPageSize,
     DuplicateExport,
     UndefinedTable,
     UndefinedElem,
@@ -256,11 +259,14 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
     // Limits (§3.2.5): min <= max, each bounded by the type ceiling; a shared memory must
     // declare a max.
     for mt in &module.memories {
-        let ceiling: u64 = if mt.limits.is64 {
-            0x1_0000_0000_0000
-        } else {
-            0x1_0000
-        };
+        // custom-page-sizes: only 1 byte and 64 KiB. (An exponent that is not a size at all was
+        // refused by the decoder as malformed.)
+        let e = mt.page_size_log2();
+        if e != 0 && e != crate::module::DEFAULT_PAGE_SIZE_LOG2 {
+            return Err(ValidateError::InvalidPageSize);
+        }
+        // The ceiling depends on the page size — the one rule `memory.grow` also applies.
+        let ceiling = crate::module::max_pages(mt.limits.is64, e);
         if mt.limits.min > ceiling {
             return Err(ValidateError::InvalidLimits);
         }
@@ -278,6 +284,12 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
         }
     }
     for tt in &module.tables {
+        // Limits are decoded as u64 whatever the index type, so a 32-bit table's bounds must be
+        // held to 32 bits here — wasm-tools: "table size must be at most 0xffffffff entries".
+        let ceiling = if tt.limits.is64 { u64::MAX } else { u64::from(u32::MAX) };
+        if tt.limits.min > ceiling || tt.limits.max.is_some_and(|mx| mx > ceiling) {
+            return Err(ValidateError::InvalidLimits);
+        }
         if let Some(mx) = tt.limits.max {
             if tt.limits.min > mx {
                 return Err(ValidateError::InvalidLimits);
@@ -668,6 +680,9 @@ fn check_module_features(module: &Module, features: &Features) -> ValidateResult
         if mt.limits.shared {
             gate(Some(Feature::Threads), features)?;
         }
+        if mt.page_size_log2.is_some() {
+            gate(Some(Feature::CustomPageSizes), features)?;
+        }
     }
 
     // --- tables: a second table, or any element type other than `funcref` ---
@@ -792,7 +807,7 @@ fn validate_const_expr(
                         set[fi as usize] = true; // ref.func outside a body DECLARES it (C.refs)
                     }
                 }
-                if let Some(ti) = module.func_type_index(fi) {
+                if let Some(ti) = module.declared_func_type_index(fi) {
                     push(&mut stack, V::concrete_ref(false, RefHeap::Func, ti))?;
                 } else {
                     push(&mut stack, V::FUNCREF_NN)?;
@@ -1816,7 +1831,7 @@ impl<'a> FuncValidator<'a> {
                         return Err(ValidateError::UndeclaredFuncRef);
                     }
                 }
-                if let Some(ti) = self.module.func_type_index(fi) {
+                if let Some(ti) = self.module.declared_func_type_index(fi) {
                     self.push_val_t(V::concrete_ref(false, RefHeap::Func, ti));
                 } else {
                     self.push_val_t(V::FUNCREF_NN);
@@ -4024,5 +4039,30 @@ mod wasmtime_shaped_diagnostic_tests {
         let site = last_failure_site();
         assert_eq!((site.expected, site.found), (None, None));
         assert_eq!(site.func_index, Some(0));
+    }
+
+    /// `ref.func` of an IMPORTED function has the type the import was declared with, exactly as a
+    /// defined function's does. It was typed as the abstract `funcref`, so every valid use of an
+    /// imported function as a `(ref $f)` — global, table, body — was refused. The last case is the
+    /// no-false-positive half: a DIFFERENT concrete type must still be refused.
+    #[test]
+    fn ref_func_of_an_import_has_its_declared_type() {
+        let v = |src: &str| {
+            let md = crate::module::decode(&crate::wat::assemble(src.as_bytes()).unwrap()).unwrap();
+            validate(&md)
+        };
+        for src in [
+            r#"(module (type $f (func)) (import "" "" (func $1 (type $f))) (global (ref $f) (ref.func $1)))"#,
+            r#"(module (type $f (func)) (import "" "" (func $1 (type $f))) (table 1 (ref $f) (ref.func $1)))"#,
+            r#"(module (type $f (func)) (import "" "" (func $1 (type $f))) (elem declare func $1)
+                 (func (result (ref $f)) (ref.func $1)))"#,
+        ] {
+            assert_eq!(v(src), Ok(()), "{src}");
+        }
+        assert_eq!(
+            v(r#"(module (type $f (func)) (type $g (func (param i32))) (import "" "" (func $1 (type $f)))
+                   (global (ref $g) (ref.func $1)))"#),
+            Err(ValidateError::TypeMismatch)
+        );
     }
 }

@@ -510,9 +510,27 @@ impl Runner {
                 .map(|a| sexpr::Annot { before: a.before - skip + 1, ..a.clone() })
                 .collect();
             match crate::wat::assemble_form(&Sexpr::List(form, annots)) {
+                // A DEFINITION is a module compiled and not instantiated — so it must VALIDATE.
+                //
+                // ⚠️ Until 2026-09-19 it was only assembled and stored, so every "this module is
+                // valid" claim the suite makes through `(module definition …)` went unchecked: a
+                // validator that wrongly refused `(memory 0xFFFF_FFFF (pagesize 1))` — the whole
+                // point of `memory_max.wast` — passed every file, because those modules are all
+                // definitions. Found by a mutation no gate caught.
                 Ok(bytes) => {
-                    if let Some(n) = name {
-                        self.definitions.push((n, bytes));
+                    let checked = crate::module::decode(&bytes)
+                        .map_err(BuildErr::Decode)
+                        .and_then(|md| crate::validate::validate(&md).map_err(BuildErr::Validate));
+                    match checked {
+                        Ok(()) => {
+                            if let Some(n) = name {
+                                self.definitions.push((n, bytes));
+                            }
+                        }
+                        Err(e) if e.is_unsupported() => {
+                            self.skip(format!("module definition: unsupported ({e})"));
+                        }
+                        Err(e) => self.fail(format!("module definition does not validate: {e}")),
                     }
                 }
                 Err(e) if BuildErr::Assemble(e.clone()).is_unsupported() => {
@@ -1088,6 +1106,7 @@ impl BuildErr {
                     | wat::Error::NotAModule
             ) | BuildErr::UnsupportedLink(_)
                 | BuildErr::Validate(crate::validate::ValidateError::UnsupportedValidation)
+                | BuildErr::Decode(crate::types::DecodeError::UnimplementedProposal)
                 | BuildErr::Instantiate(Trap::UnsupportedImportKind | Trap::UnsupportedInstruction)
         )
     }
@@ -1887,5 +1906,16 @@ mod tests {
                 "@metadata.code.branch_hint annotation: invalid target")"#,
         );
         assert_eq!((s.passed, s.failed), (0, 1), "{:?}", s.failures);
+    }
+
+    /// A `(module definition …)` is compiled, not instantiated — so it must VALIDATE. The runner
+    /// only assembled one until 2026-09-19, and every validity claim made through a definition
+    /// went unchecked (it hid a validator that refused `ref.func` of an imported function).
+    #[test]
+    fn a_module_definition_must_validate() {
+        let s = run("(module definition (memory 2 1))");
+        assert_eq!(s.failed, 1, "min > max is invalid, definition or not: {:?}", s.failures);
+        let s = run("(module definition (memory 1 2))");
+        assert_eq!((s.failed, s.skipped), (0, 0), "{:?}", s.failures);
     }
 }

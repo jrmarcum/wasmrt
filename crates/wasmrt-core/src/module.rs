@@ -120,6 +120,48 @@ pub struct TableType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryType {
     pub limits: Limits,
+    /// The custom page size's exponent (custom-page-sizes: a page is `2^e` bytes), or `None` when
+    /// the binary does not state one — which means 64 KiB. Kept as an `Option` because STATING the
+    /// default is still using the proposal (the feature gate refuses the flag, not the value).
+    pub page_size_log2: Option<u32>,
+}
+
+/// The default page size's exponent: 64 KiB.
+pub const DEFAULT_PAGE_SIZE_LOG2: u32 = 16;
+
+impl MemoryType {
+    /// The page size's exponent — `limits.min`/`max`, `memory.size` and `memory.grow` all count
+    /// in pages of `1 << page_size_log2()` bytes.
+    #[must_use]
+    pub const fn page_size_log2(&self) -> u32 {
+        match self.page_size_log2 {
+            Some(e) => e,
+            None => DEFAULT_PAGE_SIZE_LOG2,
+        }
+    }
+}
+
+/// The largest page count a memory may have, for its index type and page size — the ONE rule the
+/// validator (declared limits) and `memory.grow` (run time) both apply.
+///
+/// The memory may address at most `2^bits` bytes, so `2^(bits - e)` pages; with 1-byte pages that
+/// is `2^bits` pages, which the limits cannot even express, so the ceiling is `2^bits - 1` (wasm-tools:
+/// *"memory size must be at most 0xffffffff 1-byte pages"*). For 64 KiB pages: 65536 (32-bit) and
+/// 2^48 (64-bit). `e` is assumed valid (0 or 16) or at least `< bits`; anything else is saturated.
+///
+/// ⚠️ Before custom-page-sizes these ceilings were written TWICE — `0x1_0000` / `0x1_0000_0000_0000` in
+/// the validator and `65536` / `0x1_0000_0000_0000` in `memory_grow` — two copies of one rule, each of
+/// which would have had to change in step.
+#[must_use]
+pub const fn max_pages(is64: bool, page_size_log2: u32) -> u64 {
+    let bits: u32 = if is64 { 64 } else { 32 };
+    if page_size_log2 == 0 {
+        if is64 { u64::MAX } else { u32::MAX as u64 }
+    } else if page_size_log2 >= bits {
+        1
+    } else {
+        1u64 << (bits - page_size_log2)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +409,30 @@ impl Module {
         }
         let defined = (func_index - imported) as usize;
         self.functions.get(defined).copied()
+    }
+
+    /// The type index a function has IN THIS MODULE — its definition's, or for an import the index it
+    /// was declared with. The STATIC type, which is what validation asks for: `ref.func x` has type
+    /// `(ref $t)` for that `$t` whether `x` is defined or imported.
+    ///
+    /// ⚠️ Distinct from [`Self::func_type_index`], which answers `None` for an import ON PURPOSE: the
+    /// run-time callers compare a function's ACTUAL type, and an import's actual type is its
+    /// exporter's, which may be a strict subtype of what it was declared as.
+    ///
+    /// Added 2026-09-19: the validator used `func_type_index` and so typed `ref.func` of an IMPORTED
+    /// function as the abstract `funcref`, refusing every valid use of one as a `(ref $f)` — in a
+    /// global, a table, or a body. Hidden until the runner started validating `(module definition …)`.
+    #[must_use]
+    pub fn declared_func_type_index(&self, func_index: u32) -> Option<u32> {
+        let imported = self.imported_func_count();
+        if func_index >= imported {
+            return self.func_type_index(func_index);
+        }
+        self.imports
+            .iter()
+            .filter(|i| i.ty.kind() == crate::types::ExternKind::Func)
+            .nth(func_index as usize)
+            .and_then(|i| i.func_type_index)
     }
 
     /// The function signature at type index `ti`, or `None` if out of range or a
@@ -837,32 +903,57 @@ fn read_name(r: &mut Reader) -> DecodeResult<String> {
 }
 
 fn read_limits(r: &mut Reader) -> DecodeResult<Limits> {
+    let (limits, page) = read_limits_flagged(r)?;
+    // A page size is a MEMORY's; a table's flag has no such bit (wasm-tools: "invalid table
+    // resizable limits flags").
+    if page.is_some() {
+        return Err(DecodeError::MalformedFlag);
+    }
+    Ok(limits)
+}
+
+/// A memory type: limits, then — when flag bit 3 says so — the custom page size's exponent.
+fn read_memory_type(r: &mut Reader) -> DecodeResult<MemoryType> {
+    let (limits, page_size_log2) = read_limits_flagged(r)?;
+    Ok(MemoryType { limits, page_size_log2 })
+}
+
+/// Limits and, if flag bit 3 is set, the custom page size exponent that follows them.
+///
+/// Both bounds are read as **u64 whatever the index type** (Wasm 3.0 `limits`): a 32-bit memory
+/// or table whose bound does not fit 32 bits is INVALID — "memory size must be at most …", the
+/// validator's verdict — not a malformed LEB. wasmrt read u32 here until 2026-09-19, so
+/// `(memory 0x1_0000_0000)` was refused one stage early; wasm-tools decodes it and refuses it at
+/// validation.
+fn read_limits_flagged(r: &mut Reader) -> DecodeResult<(Limits, Option<u32>)> {
     let flag = r.read_byte()?;
-    // bit 0 = has max, bit 1 = shared (threads), bit 2 = i64 index (memory64).
-    if flag > 0x07 {
+    // bit 0 = has max, bit 1 = shared (threads), bit 2 = i64 index (memory64),
+    // bit 3 = custom page size (custom-page-sizes).
+    if flag > 0x0f {
         return Err(DecodeError::MalformedFlag);
     }
     let is64 = flag & 0x04 != 0;
-    let min: u64 = if is64 {
-        r.read_var_u64()?
-    } else {
-        u64::from(r.read_var_u32()?)
-    };
-    let max: Option<u64> = if flag & 0x01 != 0 {
-        Some(if is64 {
-            r.read_var_u64()?
-        } else {
-            u64::from(r.read_var_u32()?)
-        })
+    let min = r.read_var_u64()?;
+    let max = if flag & 0x01 != 0 { Some(r.read_var_u64()?) } else { None };
+    let page = if flag & 0x08 != 0 {
+        let e = r.read_var_u32()?;
+        // `2^e` must be a representable size at all; `e >= 64` is not (the spec test's 2^65).
+        if e >= 64 {
+            return Err(DecodeError::InvalidPageSize);
+        }
+        Some(e)
     } else {
         None
     };
-    Ok(Limits {
-        min,
-        max,
-        shared: flag & 0x02 != 0,
-        is64,
-    })
+    Ok((
+        Limits {
+            min,
+            max,
+            shared: flag & 0x02 != 0,
+            is64,
+        },
+        page,
+    ))
 }
 
 fn read_table_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<TableType> {
@@ -1311,7 +1402,14 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
     for _ in 0..count {
         let module = read_name(r)?;
         let name = read_name(r)?;
-        let kind = ExternKind::from_u8(r.read_byte()?).ok_or(DecodeError::UnknownExternKind)?;
+        let byte = r.read_byte()?;
+        // `0x20` is custom-descriptors' EXACT function import — a real encoding of a proposal wasmrt
+        // does not implement (track D), so it is OUR gap, never a verdict that the input is malformed.
+        // (In an EXPORT the same byte is malformed, and stays `UnknownExternKind`.)
+        if byte == 0x20 {
+            return Err(DecodeError::UnimplementedProposal);
+        }
+        let kind = ExternKind::from_u8(byte).ok_or(DecodeError::UnknownExternKind)?;
         let mut func_type_index = None;
         let ty = match kind {
             ExternKind::Func => {
@@ -1331,9 +1429,7 @@ fn decode_import_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<Vec<Im
                 Extern::Table(tt)
             }
             ExternKind::Memory => {
-                let mt = MemoryType {
-                    limits: read_limits(r)?,
-                };
+                let mt = read_memory_type(r)?;
                 d.mem_space.push(mt);
                 Extern::Memory(mt)
             }
@@ -1435,9 +1531,7 @@ fn decode_memory_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
     let mut count = r.read_var_u32()?;
     while count > 0 {
         count -= 1;
-        let mt = MemoryType {
-            limits: read_limits(r)?,
-        };
+        let mt = read_memory_type(r)?;
         d.mem_space.push(mt);
     }
     Ok(())
@@ -2116,5 +2210,52 @@ mod tests {
         ]);
         let m2 = decode(&truncated).unwrap();
         assert_eq!(m2.func_name(0), None);
+    }
+
+    /// custom-page-sizes, at the DECODER — each boundary as wasm-tools 1.259 draws it: an exponent
+    /// that cannot be a size (`>= 64`) is malformed; one that can but is not 0/16 decodes (the
+    /// validator refuses it); a TABLE has no such flag bit; and limits are u64 whatever the index
+    /// type, so a 32-bit memory of 2^32 pages decodes and is refused as INVALID, not malformed.
+    #[test]
+    fn page_size_and_limits_are_decoded_as_wasm_tools_decodes_them() {
+        let mem = |e: u8| m(&[0x05, 0x04, 0x01, 0x08, 0x00, e]);
+        for e in [64u8, 65] {
+            assert_eq!(decode(&mem(e)).unwrap_err(), DecodeError::InvalidPageSize, "exponent {e}");
+        }
+        for (e, valid) in [(0u8, true), (16, true), (1, false), (17, false), (63, false)] {
+            let md = decode(&mem(e)).unwrap_or_else(|err| panic!("exponent {e} must decode: {err:?}"));
+            assert_eq!(md.memories[0].page_size_log2, Some(u32::from(e)));
+            assert_eq!(
+                crate::validate::validate(&md).is_ok(),
+                valid,
+                "exponent {e}: only 0 and 16 are page sizes"
+            );
+        }
+        // No flag, no page size — and 64 KiB is what that means.
+        let plain = decode(&m(&[0x05, 0x03, 0x01, 0x00, 0x01])).unwrap();
+        assert_eq!(plain.memories[0].page_size_log2, None);
+        assert_eq!(plain.memories[0].page_size_log2(), 16);
+        // A table's limits flag has no page-size bit.
+        assert_eq!(
+            decode(&m(&[0x04, 0x05, 0x01, 0x70, 0x08, 0x00, 0x00])).unwrap_err(),
+            DecodeError::MalformedFlag
+        );
+        // 2^32 pages on a 32-bit memory / 2^32 entries on a 32-bit table: decoded, then invalid.
+        for bytes in [
+            m(&[0x05, 0x07, 0x01, 0x00, 0x80, 0x80, 0x80, 0x80, 0x10]),
+            m(&[0x04, 0x08, 0x01, 0x70, 0x00, 0x80, 0x80, 0x80, 0x80, 0x10]),
+        ] {
+            let md = decode(&bytes).expect("u64 limits must decode");
+            assert_eq!(crate::validate::validate(&md), Err(crate::validate::ValidateError::InvalidLimits));
+        }
+    }
+
+    /// The one ceiling rule, at its four corners (wasm-tools' own wording in the comments).
+    #[test]
+    fn max_pages_is_the_ceiling_at_every_corner() {
+        assert_eq!(max_pages(false, 16), 0x1_0000); // "at most 0x10000 65536-byte pages"
+        assert_eq!(max_pages(false, 0), 0xFFFF_FFFF); // "at most 0xffffffff 1-byte pages"
+        assert_eq!(max_pages(true, 16), 0x1_0000_0000_0000);
+        assert_eq!(max_pages(true, 0), u64::MAX);
     }
 }
