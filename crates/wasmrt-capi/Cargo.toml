@@ -12,8 +12,18 @@ keywords = ["webassembly", "wasm", "runtime", "ffi", "c-api"]
 categories = ["wasm", "external-ffi-bindings", "development-tools"]
 
 [lib]
-# staticlib/cdylib = the shipped C-ABI artifacts; rlib so the surface is unit-testable.
-crate-type = ["staticlib", "cdylib", "rlib"]
+# staticlib/cdylib = the shipped C-ABI artifacts. NOTHING ELSE.
+#
+# ⚠️⚠️ `rlib` was in this list "so the surface is unit-testable", and it cost 62% of the cdylib: with an
+# rlib among the outputs, rustc does not internalise the crate's symbols for LTO, so dead code survives
+# the link — the text assembler and the `.wast` spec-test RUNNER shipped inside `wasmrt_capi.dll`,
+# which no C-ABI entry point reaches. Measured 2026-09-19, same host and `release` profile:
+#   ["staticlib","cdylib","rlib"]  dll 1,363,968 B   staticlib 21,993,550 B
+#   ["staticlib","cdylib"]         dll   521,216 B   staticlib  5,538,070 B
+# The rlib was never needed: the unit tests are `#[cfg(test)] mod tests` inside the crate, which
+# `cargo test` builds without one, there are no doctests, and no crate depends on this one.
+# 🔒 Do not add `rlib` back — a Rust consumer takes `wasmrt-core`, the native interface.
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 wasmrt-core = { workspace = true }

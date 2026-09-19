@@ -289,6 +289,9 @@ nothing while the gate said "agree"**; it now reports refused-by-both separately
   and `call_indirect`/SIMD/atomics emit their own operands — each path is enumerated and pinned by the
   external gate (13 hints across every folded route, byte-identical).
 
+✅ **Follow-up the same day: the cdylib cost below was the dead-code leak, since FIXED — `rlib` removed from
+`wasmrt-capi`'s crate-type; shipped dll 1,363,968 → 521,216 B, and the feature's cdylib cost is 0.** (T11.)
+
 📏 **SIZE — the honest cost, and a T11 lead.** Same host, same `release` profile, baseline `178414c29`:
 CLI **729,088 → 780,800 B (+51.7 KB)**, cdylib **1,304,064 → 1,363,968 B (+59.9 KB, +4.6%)**, core
 rlib 3.53 → 4.21 MB. ⚠️⚠️ **The cdylib should not have moved at all**: nothing reachable from the C ABI
@@ -2311,6 +2314,17 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   exact defect — its header advertised `TAIL_CALL = 14` while its C-ABI bound stopped at 13.)*
 
 - **T11 — Optimization review (a DISCUSSION, not a blind pass).** *(Owner, 2026-08-06.)* 🆕 **Ships as `1.0.3` (owner, 2026-08-19).** `[ ]`
+
+  ✅ **RESOLVED 2026-09-19 (owner: "research why the size optimization is not occurring … rectify").**
+  **Cause: `rlib` in `wasmrt-capi`'s `crate-type`.** With an rlib among the outputs rustc does not
+  internalise the crate's symbols for LTO, so unreachable code survives the link. Measured by crate-type
+  combination on one host: any list containing `rlib` → dll **1,363,968 B**; `["staticlib","cdylib"]` →
+  **521,216 B (−62%)**, and the staticlib **21,993,550 → 5,537,972 B (−75%)**. Same 74 exports; the
+  runner and assembler are gone from the dll. The rlib was never needed (in-crate unit tests, no
+  doctests, no dependent crate) and is removed. **The annotation feature now costs 0 bytes on the cdylib**
+  (byte-identical to `178414c29` built the fixed way). 🎓 *Measure the artifact the consumer receives, not
+  the one a script builds* — the 493.5 KiB on record was never what `cargo build` shipped. The original
+  lead, kept as the record:
 
   🆕 **LEAD (2026-09-19): the cdylib carries code NO C-ABI path reaches — the text assembler and the
   `.wast` spec-test runner** (their strings are in `wasmrt_capi.dll`, which exports only the 74 C-ABI
