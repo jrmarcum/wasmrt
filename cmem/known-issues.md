@@ -28,7 +28,16 @@ spec: `best-practices.md` §3.8b, exactly. **One `wasmtime compile` on our outpu
 wasmtime 48), raw bytes refused at decode, and the ops moved to internal tags above `0xff` so the
 byte space cannot claim them again.
 
-## 🟡 OPEN (owner decision) — `proposals/threads/memory.wast` contradicts the core `memory.wast`
+## ✅ CLOSED 2026-09-19 (owner: "Yes. Please write the patch") — `proposals/threads/memory.wast` contradicted the core `memory.wast`
+
+**Patched in the vendored wasmtk copy**, in day 3's form: the three `assert_malformed` cases removed and quoted in an
+annotated block giving the reason. `proposals/threads/` is **494 / 0 / 0**. Verified on wasmtime 48 as well: the three
+modules as `assert_invalid "memory size"` PASS there, and the removed `assert_malformed` form FAILS there. ⚠️ wasmtime's
+own runner stops earlier in this file, at line 67 — on reason WORDING ("…65536 pages (4GiB)" vs its "…0x10000
+65536-byte pages"), not a verdict; it never reaches the patch. ⚠️ **Uncommitted in the wasmtk tree on purpose**, and
+`update-testsuite.py` will overwrite it on the next sync — re-check then.
+
+*The entry as it stood:*
 
 Since limits are decoded as u64 (Wasm 3.0, 2026-09-19), `(memory 0x1_0000_0000)` is refused at VALIDATION —
 what the current core `memory.wast` asserts (`assert_invalid` "memory size") and what wasm-tools 1.259 does. The

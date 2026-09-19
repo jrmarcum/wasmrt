@@ -91,8 +91,8 @@ custom-page-sizes 166/0/0. **`tests/custom-page-size-bounds.wast`** — byte-gra
 run by `cargo test` via `regression_wast.rs`, and verified independently: `wasmtime wast -W
 custom-page-sizes=y,memory64=y,threads=y tests/custom-page-size-bounds.wast` exits 0. Re-run it on wasmtime
 whenever memory code changes. The runner now VALIDATES `(module definition …)` (it only assembled them).
-⚠️ `proposals/threads/memory.wast` 68 → 65: era-pinned contradiction with core `memory.wast`, owner decision
-(`known-issues.md`, top). Miri 32/32.
+`proposals/threads/memory.wast` 68 → 65 on an era-pinned contradiction with core `memory.wast`, then **PATCHED**
+(owner-directed) → 65/0/0, `proposals/threads/` **494/0/0**; suite **64,142 / 63 / 457**. Miri 32/32.
 
 ### 🆕 2026-09-19 — day 4: **64,087 / 65 / 530**, and a new EXTERNAL gate for custom sections
 

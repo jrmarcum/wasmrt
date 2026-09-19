@@ -31,7 +31,7 @@ than the thing the consumer uses.
 **T0–T8 DONE (published through v0.9.0); T9's eighteen passes landed 2026-08-14; 🆕 T13 — the
 CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 4 landed 2026-09-19 (track A done as the custom-annotations feature; the shipped cdylib −62% after `rlib` was found defeating LTO; the import type-use check #4 closed; TRACK P custom-page-sizes done — `PAGE_SIZE` deleted, byte-granular bounds cross-checked on wasmtime), all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,142 / 66 / 457** of 64,208 over **288**
+**embeddable from C** via `wasmrt.h`. Spec suite **99.9%** (**64,142 / 63 / 457** of 64,205 over **288**
 files), **522 workspace tests**, C-ABI gate PASSED, `.wat` corpus **528/532** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 31/31 PASSED on day 3** — ⚠️ 31, not the 28 on record; the crate gained tests and
 nobody re-counted.
 🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
@@ -67,7 +67,7 @@ casts). Our decoder accepted the same bytes, so the round trip was green. `wasmt
 output found it in one command (§3.8b). Now `0xFC 0x00`–`0x07`, verified.
 🚦 **PICKING UP TOMORROW? The handoff list is in `cmem/roadmap.md`, "HANDOFF — where to pick up".**
 Nothing is half-finished. The only work-in-progress anywhere is the threads patch sitting uncommitted
-in the **wasmtk** tree, on purpose, for wasmtk's own session to commit.
+in the **wasmtk** tree, on purpose, for wasmtk's own session to commit — now three passes on 2026-09-17 and 2026-09-19, both owner-directed: 8 era-pinned `assert_invalid` cases (multi-memory/multi-table) and 3 `assert_malformed` cases (`(memory 0x1_0000_0000)` — Wasm 3.0 makes it INVALID, as core `memory.wast` asserts).
 🔴 **A RECORDED DECISION TURNED OUT TO BE A NO-OP, and was then done properly.** The era-pinned
 `proposals/threads/` fix — "refresh the vendored snapshot" — could not be executed: the 08-20 sync
 **did not touch `proposals/threads/`**, so the vendored copy already IS upstream and upstream is the
@@ -76,8 +76,9 @@ stale one. 🎓 *Verifying the premise of an option is not verifying the option*
 removed assertions, and `proposals/threads/` is now **497 / 0 / 0**. ⚠️ The patch is **uncommitted in the
 wasmtk tree on purpose** (the write was authorised; committing in another repo is not) and is designed
 to be overwritten by the next corpus sync — **re-check after every sync.**
-🚦 **NEXT: track A (the `custom/` runner commands, 20 skips, no engine risk) → the two owner decisions
-above → track P → track D.** The 2026-08-20 scoping below is now the record of how it was planned; its
+🚦 **NEXT: TRACK D — custom-descriptors** (2026-09-19). Tracks A and P, #4, the cdylib dead-code leak and both
+threads-snapshot patches are DONE (`cmem/roadmap.md`, DAY 4 parts 1–3). *(Was: track A → the two owner decisions
+above → track P → track D.)* The 2026-08-20 scoping below is now the record of how it was planned; its
 cross-cutting items and track W are done. *(Superseded scoping follows.)* — `cmem/roadmap.md`, "THE REMAINING
 WORK, SCOPED". Three cross-cutting items first — **X1** refuse `(pagesize N)`, **X2** the `ModuleBuild`
 field-coverage sweep (T10a's open half), **X3** a proposal's `Feature` gate is a track DELIVERABLE

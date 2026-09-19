@@ -188,16 +188,16 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,142 / 66 / 457 over 288 files, 522 workspace tests, C-ABI gate PASSED, `.wat` corpus
+**State: 64,142 / 63 / 457 over 288 files, 522 workspace tests, C-ABI gate PASSED, `.wat` corpus
 528/532, Miri **32/32**, custom-sections gate **528 agree / 4 refused by both / 0 differ**, shipped cdylib **522,240 B**, everything committed and pushed.** Day 4
-(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. **Next: #6, track D** — plus 🚦 **an owner decision**: `proposals/threads/memory.wast` (the era-pinned snapshot) asserts `(memory 0x1_0000_0000)` MALFORMED, the current core `memory.wast` and wasm-tools say INVALID; 3 honest failures until the vendored copy is patched (a wasmtk-tree write — needs the owner).
+(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. The era-pinned `proposals/threads/memory.wast` contradiction was then PATCHED (owner-directed) — `proposals/threads/` 494/0/0. **Next: #6, track D.**
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
 
 | # | task | why it is next |
 | --- | --- | --- |
-| **1** | 🔒 **wasmtk commits the threads patch.** Two files modified in the wasmtk tree and nothing else: `proposals/threads/imports.wast`, `proposals/threads/memory.wast`. **Not committed from here on purpose** — the write was owner-authorised, committing in another repo is not. | It is the only work-in-progress anywhere. ⚠️ It is a deliberate deviation from upstream and `update-testsuite.py` WILL overwrite it on the next sync — re-check after every sync. |
+| **1** | 🔒 **wasmtk commits the threads patch.** Two files modified in the wasmtk tree and nothing else: `proposals/threads/imports.wast`, `proposals/threads/memory.wast` — three passes on 2026-09-17 and 2026-09-19, both owner-directed: 8 era-pinned `assert_invalid` cases (multi-memory/multi-table) and 3 `assert_malformed` cases (`(memory 0x1_0000_0000)` — Wasm 3.0 makes it INVALID, as core `memory.wast` asserts). **Not committed from here on purpose** — the write was owner-authorised, committing in another repo is not. | It is the only work-in-progress anywhere. ⚠️ It is a deliberate deviation from upstream and `update-testsuite.py` WILL overwrite it on the next sync — re-check after every sync. |
 | **2** | 📮 **Report the stale snapshot upstream** (the spec repo's `proposals/threads/` still asserts multi-memory and multi-table invalid). Not filed — needs the owner's account. | The only route that fixes it for everyone; until then the patch carries it. |
 | **3** | ✅ **Track A — DONE (2026-09-19, owner: "we do not want the lexer to throw away information … align with canonical wasmtime and wasm").** `custom/` **0/1/20 → 20/0/0**. The first scoping ("pure runner work, no engine risk") was false — wasmtime scores neither command and the lexer dropped every annotation — so it became the **custom-annotations feature**, built to MEASURED canonical behaviour: `@custom` → a custom section at its slot, `@name` + every `$id` → the `name` section (all 12 subsections), branch hints → `metadata.code.branch_hint`, malformed/misplaced → **module refused** (as wasm-tools refuses it), a hint on a non-branch → **emitted and reported, not refused**. See the day-4 entry. | — |
 | **4** | ✅ **DONE 2026-09-19 — see `known-issues.md` (top); refused with wasmtime's own reason, and a rule-free fourth copy of the type-use loop behind it.** ~~**The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
@@ -289,7 +289,7 @@ u64 whatever the index type** (Wasm 3.0 — `(memory 0x1_0000_0000)` is now inva
   it absent. Now `Feature::ALL` is checked against `Features`' field count, and a capi test PARSES `wasmrt.h`.
 * Custom-descriptors' exact import byte `0x20` is now `DecodeError::UnimplementedProposal` (a skip), not "malformed".
 
-🚦 **Owner decision pending:** `proposals/threads/memory.wast` lost 3 passes — its era-pinned snapshot asserts
+✅ **RESOLVED the same day — the owner directed the patch; `proposals/threads/` is 494/0/0 (`known-issues.md`).** Was: `proposals/threads/memory.wast` lost 3 passes — its era-pinned snapshot asserts
 `(memory 0x1_0000_0000)` MALFORMED ("i32 constant out of range"); the current core `memory.wast` asserts INVALID
 and wasm-tools agrees. They cannot both pass; the old u32 decoder "passed" both by refusing at decode, which the
 runner accepted for either. Patching the vendored copy is a write into the wasmtk tree.
