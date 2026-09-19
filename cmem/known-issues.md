@@ -44,7 +44,40 @@ makes both files right.
 (ref $t)` … in FLAT form were refused (the folded form takes a different path). Found writing D3's flat forms;
 the corpus is almost entirely folded. All 14 flat GC forms now byte-identical to wasm-tools' output.
 
-## 🟡 OPEN — the typed-`select` immediate reads each type as ONE RAW BYTE (found during D1, 2026-09-19)
+## ✅ CLOSED 2026-09-19 — a value type inside a function body: THREE decoder defects, not the two logged
+
+Both 🟡 OPEN entries below were fixed together, because they were one grammar read by two private tables —
+block types and typed `select` — that had drifted apart **in opposite directions**. Fixed by ONE reader,
+`opcode::read_value_type_from`, whose abstract shorthands come from `abstract_heap_type`, the same table
+`read_heap_type` uses. A concrete `(ref $t)` travels unresolved (`BlockType::ConcreteRef`/`ExactRef`) and the
+validator resolves both through one `resolve_value_type`.
+
+**Measured, not read:** every one-byte encoding `0x40..=0x7f`, as a block type AND as a `select` type, on
+wasm-tools (standard features, and `--features all`) against wasmrt:
+
+| | before | after |
+| --- | --- | --- |
+| INVALID encodings accepted (internal non-null tags read as wire bytes) | **20** — `select` `0x54`–`0x59` `0x61` `0x62` `0x65`–`0x68`; block `0x57`–`0x59` `0x61` `0x65`–`0x68` | 0 |
+| VALID block types refused — 🆕 **not in either entry** | **3** — `0x72`/`0x73`/`0x74` (`nullexternref`/`nullfuncref`/`nullexnref`: nobody had listed the hierarchy bottoms) | 0 |
+| `select (result (ref …))` long form (`0x63`/`0x64` + heap type) | **refused — all 9 valid modules probed**, `(ref any)` included | decoded, typed, runs; bytes identical to wasm-tools |
+
+⚠️ **The logged premise was half right.** "wasm-tools accepts `0x68` as a block type" is true only under
+`--features all` — it is stack-switching's `cont`, and the STANDARD refuses it (as wasmrt, which does not
+implement stack switching, now does). ⚠️ **The logged FIX was not buildable as written** — "read through
+`read_val_type`" needs the module's type table, which `decode_body` does not have; the working shape was
+the one block types already used. *A logged fix is a hypothesis too* (`best-practices.md` §1.1).
+
+**Pinned:** `tests/value-type-encodings.wast` (34 assertions; **wasmtime 48 passes the whole file** — its
+messages are wasmtime's own wording; the previous build scored 6/24/8 on it). Mutation-verified at 5 sites; a
+sixth guard (a byte-range check on `select`'s first byte) **could not fail** — every out-of-range byte already
+reaches no arm — so it was deleted rather than kept as decoration. The SIMD gate on a block/`select` result
+type was **pinned by nothing** (deleting it failed no test); two vectors added to
+`a_disabled_proposal_is_caught_through_a_type_not_just_an_opcode`. Suite output **byte-identical** — the corpus
+never reached these bytes, which is why they survived. Size: 0 B.
+
+*The two entries as they stood:*
+
+### ~~OPEN~~ — the typed-`select` immediate reads each type as ONE RAW BYTE (found during D1, 2026-09-19)
 
 `opcode.rs`'s `ImmKind::SelectTypes` does `ValType::from_bits(r.read_byte())` and accepts anything `is_valid` —
 which includes wasmrt's INTERNAL non-null tags (`0x54`–`0x68`), exactly the accept-invalid fixed in
@@ -52,7 +85,7 @@ which includes wasmrt's INTERNAL non-null tags (`0x54`–`0x68`), exactly the ac
 `select (result (ref $t))` (`0x63`/`0x64` + heap type) cannot be decoded at all. Fix: read through
 `read_val_type`. Logged rather than fixed in D1 to keep that change's scope honest.
 
-## 🟡 OPEN — block-type single bytes `-24`…`-41` map to internal non-null tags
+### ~~OPEN~~ — block-type single bytes `-24`…`-41` map to internal non-null tags
 
 `opcode.rs` block-type decoding maps `0x68`, `0x67`, … to wasmrt's internal `*_NN` tags. D1 removed the `0x62`
 arm (it is now the exact prefix; wasm-tools: "unexpected exact type"). The others are NOT simply wrong —
@@ -409,7 +442,12 @@ order.**
 Also blocked on it: `ref.host` as a value literal (`extern.wast`, 1 failure — item F7).
 
 
-## ⚠️⚠️ OPEN (proven 2026-08-19, fix ATTEMPTED AND REVERTED) — try_table catch labels resolve one frame too deep
+## ✅ CLOSED (fixed on day 2, 2026-08-20; this heading still read OPEN until 2026-09-19) — try_table catch labels resolved one frame too deep
+
+⚠️ **The heading was STALE.** The fix landed on day 2 with the non-null wire-format fix (see the entry above:
+*"both now fixed and pinned by tests that assert the BYTE"*), and `try_table.wast` is **61 / 0 / 0** in the
+2026-09-19 suite — but this heading was never updated, so the file carried an OPEN defect that did not exist.
+Relabelled during the part-7 memory sweep. *The entry below is the record as it stood before the fix.*
 
 **The defect is proven; the fix is not.** `try_table`’s catch-clause labels resolve **with the
 try_table’s own frame on the label stack**, when the spec resolves them in the context OUTSIDE it — a

@@ -32,8 +32,7 @@ than the thing the consumer uses.
 CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 4 landed 2026-09-19 (track A done as the custom-annotations feature; the shipped cdylib −62% after `rlib` was found defeating LTO; the import type-use check #4 closed; TRACK P custom-page-sizes done — `PAGE_SIZE` deleted, byte-granular bounds cross-checked on wasmtime; 🎯 **TRACK D (D1–D4) done — the corpus is at ZERO failed / ZERO skipped / ZERO unrun**), all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite 🎯 **100%** (**64,598 / 0 / 0** over **288**
-files — per-file feature sets, `wast::features_for_script`), **525 workspace tests**, clippy clean, C-ABI gate PASSED, `.wat` corpus **531/535** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 31/31 PASSED on day 3** — ⚠️ 31, not the 28 on record; the crate gained tests and
-nobody re-counted.
+files — per-file feature sets, `wast::features_for_script`), **525 workspace tests**, clippy clean, C-ABI gate PASSED, `.wat` corpus **531/535** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 32/32 PASSED (day 4, 2026-09-19)** — re-count it every run; it was 28 on record while the crate had 31.
 🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
 **0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; and **`proposals/threads/` is at
 497 / 0 / 0** after the owner-directed vendored patch. **custom-descriptors is now 65/451 — 98% of
@@ -76,7 +75,7 @@ stale one. 🎓 *Verifying the premise of an option is not verifying the option*
 removed assertions, and `proposals/threads/` is now **497 / 0 / 0**. ⚠️ The patch is **uncommitted in the
 wasmtk tree on purpose** (the write was authorised; committing in another repo is not) and is designed
 to be overwritten by the next corpus sync — **re-check after every sync.**
-🚦 **NEXT: the two 🟡 OPEN decoder defects at the top of `cmem/known-issues.md` (typed-`select` one-byte types; block-type bytes → internal tags — the last known format deviations), then `1.0.0` release prep.** TRACK D3/D4 DONE 2026-09-19: corpus **64,598 / 0 / 0**; `tests/descriptor-casts.wast` is the soundness checkpoint; ⚠️ core and proposal `br_on_cast.wast` contradict each other, so the runner now picks features PER FILE. *(Was: NEXT TRACK D3/D4 —* D1 (exact types) and D2 (descriptor/describes) DONE 2026-09-19; D2 removed 71 FALSE passes (modules that failed to assemble were scoring `assert_invalid` passes). D1 with its soundness checkpoint met (`tests/exact-type-confusion.wast`). ⚠️ wasmtime 48 has NO custom-descriptors: wasm-tools is the outside reader (encoding + validity). **TRACK D — custom-descriptors** (2026-09-19). Tracks A and P, #4, the cdylib dead-code leak and both
+🚦 **NEXT: `1.0.0` release prep** (`cmem/releasing.md`). ✅ The two 🟡 OPEN decoder defects are CLOSED (2026-09-19) — and were THREE: 20 invalid value-type encodings accepted, 3 valid block types refused, `select (result (ref …))` undecodable; one reader now (`opcode::read_value_type_from`), found by sweeping all 64 one-byte encodings rather than reading the table (`cmem/best-practices.md` §1.8); `tests/value-type-encodings.wast` is passed whole by wasmtime 48. TRACK D3/D4 DONE 2026-09-19: corpus **64,598 / 0 / 0**; `tests/descriptor-casts.wast` is the soundness checkpoint; ⚠️ core and proposal `br_on_cast.wast` contradict each other, so the runner now picks features PER FILE. *(Was: NEXT TRACK D3/D4 —* D1 (exact types) and D2 (descriptor/describes) DONE 2026-09-19; D2 removed 71 FALSE passes (modules that failed to assemble were scoring `assert_invalid` passes). D1 with its soundness checkpoint met (`tests/exact-type-confusion.wast`). ⚠️ wasmtime 48 has NO custom-descriptors: wasm-tools is the outside reader (encoding + validity). **TRACK D — custom-descriptors** (2026-09-19). Tracks A and P, #4, the cdylib dead-code leak and both
 threads-snapshot patches are DONE (`cmem/roadmap.md`, DAY 4 parts 1–3). *(Was: track A → the two owner decisions
 above → track P → track D.)* The 2026-08-20 scoping below is now the record of how it was planned; its
 cross-cutting items and track W are done. *(Superseded scoping follows.)* — `cmem/roadmap.md`, "THE REMAINING
@@ -323,7 +322,7 @@ findings as an **annex** for wazmrt to fold in. **Regime B starts once wasmrt al
 ⚠️⚠️ **That is a gate at a stage boundary, not a background activity** — reconcile against code that has
 stopped moving. 🎓 **A CONTRACT VERSION is a PIN, not a LOCK**: it makes drift detectable and cannot
 prevent a simultaneous write, which is why three mid-edit collisions happened in one session on
-2026-08-19. **wasmrt is two stages from regime B** (`1.0.0`, the clear-out, is not started).
+2026-08-19. **wasmrt is two stages from regime B** (`1.0.0`, the clear-out, is at its conformance target — release prep is next).
 
 **One word, binding.** When the owner says **"coordinate"**, synchronise this project with the sibling
 runtime through [`cmem/interop.md`](cmem/interop.md) — the swappability contract, versioned and kept

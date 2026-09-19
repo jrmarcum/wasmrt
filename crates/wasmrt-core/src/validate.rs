@@ -1465,13 +1465,32 @@ impl<'a> FuncValidator<'a> {
         }
     }
 
+    /// Resolve a decoded VALUE type — a block result or a typed `select` result — to a `ValType`,
+    /// and gate it. The one place both go through, so a `select` result is exactly as legal as the
+    /// same type as a block result.
+    fn resolve_value_type(&self, bt: opcode::BlockType) -> ValidateResult<V> {
+        let t = match bt {
+            opcode::BlockType::Value(t) => t,
+            opcode::BlockType::ConcreteRef { nullable, type_index } => ref_type_val_type(
+                self.module,
+                RefType { nullable, heap: HeapType::Concrete(type_index) },
+            )?,
+            opcode::BlockType::ExactRef { nullable, type_index } => ref_type_val_type(
+                self.module,
+                RefType { nullable, heap: HeapType::Exact(type_index) },
+            )?,
+            // Not a value type; the decoder never produces these where a value type is read.
+            opcode::BlockType::Empty | opcode::BlockType::TypeIndex(_) => {
+                return Err(ValidateError::TypeMismatch);
+            }
+        };
+        gate_val_type(t, self.features)?;
+        Ok(t)
+    }
+
     fn block_sig(&self, bt: opcode::BlockType) -> ValidateResult<(Vec<V>, Vec<V>)> {
         match bt {
             opcode::BlockType::Empty => Ok((Vec::new(), Vec::new())),
-            opcode::BlockType::Value(t) => {
-                gate_val_type(t, self.features)?;
-                Ok((Vec::new(), vec![t]))
-            }
             opcode::BlockType::TypeIndex(i) => {
                 let ft = self.module.func_sig(i).ok_or(ValidateError::UndefinedType)?;
                 // A block signature that takes parameters, or returns more than one value,
@@ -1483,36 +1502,9 @@ impl<'a> FuncValidator<'a> {
                 }
                 Ok((ft.params, ft.results))
             }
-            // `(ref null? $t)` as a block result — the decoder leaves the index unresolved
+            // A single value type — including `(ref null? $t)`, which the decoder leaves unresolved
             // because only the module's type section says which family `$t` belongs to.
-            opcode::BlockType::ConcreteRef {
-                nullable,
-                type_index,
-            } => {
-                let t = ref_type_val_type(
-                    self.module,
-                    RefType {
-                        nullable,
-                        heap: HeapType::Concrete(type_index),
-                    },
-                )?;
-                gate_val_type(t, self.features)?;
-                Ok((Vec::new(), vec![t]))
-            }
-            opcode::BlockType::ExactRef {
-                nullable,
-                type_index,
-            } => {
-                let t = ref_type_val_type(
-                    self.module,
-                    RefType {
-                        nullable,
-                        heap: HeapType::Exact(type_index),
-                    },
-                )?;
-                gate_val_type(t, self.features)?;
-                Ok((Vec::new(), vec![t]))
-            }
+            vt => Ok((Vec::new(), vec![self.resolve_value_type(vt)?])),
         }
     }
 
@@ -1526,17 +1518,13 @@ impl<'a> FuncValidator<'a> {
         // the family-level answer.
         if self.features != &Features::all() {
             gate(op_feature(instr.op), self.features)?;
-            match &instr.imm {
-                Imm::Simd(s) => gate(Some(simd_sub_feature(s.sub)), self.features)?,
-                // A typed `select` names its result type outright, so `(select (result
-                // v128) …)` must answer to SIMD as well as to reference-types.
-                Imm::SelectTypes(ts) => {
-                    for &t in ts {
-                        gate_val_type(t, self.features)?;
-                    }
-                }
-                _ => {}
+            if let Imm::Simd(s) = &instr.imm {
+                gate(Some(simd_sub_feature(s.sub)), self.features)?;
             }
+            // A typed `select` names its result type outright, so `(select (result v128) …)` must
+            // answer to SIMD as well as to reference-types. That gate is applied where the type is
+            // RESOLVED (`resolve_value_type`, from the `SelectT` arm): a concrete one has no
+            // `ValType` until then.
         }
         match instr.op {
             Op::Unreachable => self.set_unreachable(),
@@ -1838,7 +1826,7 @@ impl<'a> FuncValidator<'a> {
                 if tys.len() != 1 {
                     return Err(ValidateError::TypeMismatch);
                 }
-                let t = tys[0];
+                let t = self.resolve_value_type(tys[0])?;
                 self.pop_expect(V::I32)?;
                 self.pop_expect(t)?;
                 self.pop_expect(t)?;
@@ -4109,6 +4097,11 @@ mod tests {
             "(module (global (mut v128) (v128.const i32x4 0 0 0 0)))",
             "(module (func (param v128)))",
             "(module (type $t (func (result v128))))",
+            // A block result and a typed `select` result, with no v128 OPCODE anywhere (`unreachable`
+            // supplies the operands). Both are gated in `resolve_value_type`, which nothing pinned
+            // until 2026-09-19 — deleting the gate there failed no test.
+            "(module (func (block (result v128) (unreachable)) (drop)))",
+            "(module (func (select (result v128) (unreachable)) (drop)))",
         ] {
             assert_eq!(
                 validate_with_features(&decode_wat(src), &fs),

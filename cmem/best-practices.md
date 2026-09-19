@@ -119,6 +119,20 @@ feature motivating it. And when a design rests on a size or layout claim ("this 
 fits in existing padding"), **pin it with a `size_of` test** so the day the claim stops holding is a
 build failure, not a silent regression.
 
+### 1.8 When the input space is SMALL, ENUMERATE it — do not read the table
+
+Two 🟡 entries described value-type decoding in function bodies, each written carefully from the code. A
+sweep of **every** one-byte encoding (`0x40..=0x7f`, 64 values) in both positions (block type, typed
+`select`), against wasm-tools at two feature settings, took one script and found **three** defects: the two
+logged (20 invalid encodings accepted) and one neither entry mentioned — **3 valid block types refused**,
+because the table had never listed the hierarchy bottoms. It also showed one entry's premise ("wasm-tools
+accepts `0x68`") held only under `--features all`.
+
+Reading a table tells you what it contains; only enumerating the domain tells you what it is MISSING.
+**Apply:** when an encoding space is small enough to list (opcode bytes, value-type bytes, flag
+combinations), sweep all of it against the outside reader and diff — before fixing, so the fix is scoped by
+the measurement rather than by the entry. Record the referee's FEATURE SETTING with every verdict (§2.3a).
+
 ---
 
 ## 2. What to distrust
@@ -869,6 +883,16 @@ finding, not an obstacle.
 The const-expr sweep must key on a segment's **mode**: a *passive* segment has no offset expression,
 while an *active* one with none is malformed. Filtering on `is_empty()` conflates them and excuses the
 second. The test is written so the sloppy version fails.
+
+### 5.4a An invalid-module test must be invalid for exactly ONE reason
+
+`tests/value-type-encodings.wast` asserted a `select (result (ref $s))` over `(ref null $s)` operands
+INVALID. Mutating the validator to type every concrete result as nullable — which should make that module
+valid — **failed nothing**, because the function's own result was also `(ref $s)`: the module stayed invalid
+for a second, untouched reason. The assertion was true and tested nothing.
+**Apply:** in an `assert_invalid`, make everything except the construct under test maximally permissive
+(nullable results, supertypes, `unreachable` operands), then mutation-verify — a surviving mutation on an
+invalid-module test usually means the module is invalid twice.
 
 ### 5.5 Skips are never folded into passes
 

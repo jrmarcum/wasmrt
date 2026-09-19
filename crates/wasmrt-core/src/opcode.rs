@@ -458,7 +458,10 @@ pub enum Imm {
     /// Raw little-endian bit pattern (`f64.const`).
     F64(u64),
     /// Result types of a typed `select` (`0x1c`).
-    SelectTypes(Vec<ValType>),
+    /// A typed `select`'s result types. Each is a VALUE type — only [`BlockType::Value`],
+    /// [`BlockType::ConcreteRef`] or [`BlockType::ExactRef`] — held as a `BlockType` because
+    /// a concrete `(ref $t)` must travel unresolved exactly as a block result does (see there).
+    SelectTypes(Vec<BlockType>),
     /// Heap type of `ref.null` (`0xd0`).
     RefType(HeapType),
     /// A GC type index (`struct.new` / `array.new` / `array.get` / …).
@@ -687,8 +690,7 @@ const MAX_SIMD_SUB: u32 = 0x113;
 /// Highest `0xFE` atomic sub-opcode wasmrt decodes (`i64.atomic.rmw32.cmpxchg_u`).
 const MAX_ATOMIC_SUB: u32 = 0x4e;
 
-/// Decode a block type (§5.3.6): an s33 — negative values encode empty/valtype, a
-/// non-negative value is a type index.
+/// Decode a block type (§5.3.6): `0x40` (empty), a value type, or a non-negative s33 type index.
 fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
     let v = r.read_var_s33()?;
     if v >= 0 {
@@ -697,37 +699,34 @@ fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
         }
         return Ok(BlockType::TypeIndex(v as u32));
     }
+    if v == -64 {
+        return Ok(BlockType::Empty);
+    }
+    read_value_type_from(r, v)
+}
+
+/// A VALUE TYPE as the binary spells it (§5.3.4–5), whose first byte has already been read as the
+/// negative s33 `v`: a numeric/vector type, an abstract heap-type SHORTHAND — which is always
+/// **nullable** (`0x70` is `(ref null func)`) — or the long forms `0x63 ht` / `0x64 ht`.
+///
+/// 🔒 **The one reader for a value type inside a function body** — block types and typed `select`
+/// both come here. Each had its own table until 2026-09-19, and the two had drifted apart in
+/// opposite directions: both ACCEPTED wasmrt's internal non-null tags (`0x54`–`0x68`) as if they
+/// were wire bytes — no binary spells `(ref any)` as one byte; §5.3.5 has only `0x64 ht` — and the
+/// block-type table REFUSED three valid shorthands (`0x72`/`0x73`/`0x74`, the hierarchy bottoms)
+/// because nobody had listed them. The shorthands now come from [`abstract_heap_type`], the same
+/// table [`read_heap_type`] uses, so the two cannot disagree about which bytes are heap types.
+///
+/// A concrete `$t` travels unresolved as [`BlockType::ConcreteRef`]/[`BlockType::ExactRef`]:
+/// `decode_body` has no module context, and only the type section says which family `$t` is.
+fn read_value_type_from(r: &mut Reader, v: i64) -> DecodeResult<BlockType> {
     Ok(match v {
-        -64 => BlockType::Empty,
         -1 => BlockType::Value(ValType::I32),
         -2 => BlockType::Value(ValType::I64),
         -3 => BlockType::Value(ValType::F32),
         -4 => BlockType::Value(ValType::F64),
         -5 => BlockType::Value(ValType::V128),
-        -16 => BlockType::Value(ValType::FUNCREF),
-        -17 => BlockType::Value(ValType::EXTERNREF),
-        -18 => BlockType::Value(ValType::ANYREF),
-        -19 => BlockType::Value(ValType::EQREF),
-        -20 => BlockType::Value(ValType::I31REF),
-        -21 => BlockType::Value(ValType::STRUCTREF),
-        -22 => BlockType::Value(ValType::ARRAYREF),
-        -23 => BlockType::Value(ValType::EXNREF),
-        -15 => BlockType::Value(ValType::NULLREF),
-        -24 => BlockType::Value(ValType::FUNCREF_NN),
-        -25 => BlockType::Value(ValType::EXTERNREF_NN),
-        -26 => BlockType::Value(ValType::ANYREF_NN),
-        -27 => BlockType::Value(ValType::EQREF_NN),
-        // ⚠️ `-30` is the byte `0x62`, which was mapped here to wasmrt's INTERNAL `(ref i31)` tag — a
-        // value no binary spells that way. Since custom-descriptors it is the EXACT prefix, which
-        // cannot stand alone as a block type: wasm-tools refuses it, "unexpected exact type".
-        -31 => BlockType::Value(ValType::STRUCTREF_NN),
-        -39 => BlockType::Value(ValType::ARRAYREF_NN),
-        -40 => BlockType::Value(ValType::NULLREF_NN),
-        -41 => BlockType::Value(ValType::EXNREF_NN),
-        // The long forms `0x63 ht` / `0x64 ht` — as s33, `0x63` reads as -29 and `0x64` as
-        // -28. A block result of concrete reference type has no other encoding, so without
-        // these two arms the heap-type byte was re-read as an opcode and a perfectly valid
-        // module was rejected as an unsupported instruction.
+        // `0x63` (-29) nullable / `0x64` (-28) non-null, then a heap type.
         -29 | -28 => {
             let nullable = v == -29;
             match read_heap_type(r)? {
@@ -742,7 +741,12 @@ fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
                 ht => BlockType::Value(abstract_heap_val_type(ht, nullable)),
             }
         }
-        _ => return Err(DecodeError::UnsupportedOpcode),
+        // ⚠️ The exact prefix `0x62` (-30) is NOT here: it prefixes a heap type and cannot stand
+        // alone as a value type (wasm-tools: "unexpected exact type").
+        _ => match abstract_heap_type(v) {
+            Some(ht) => BlockType::Value(abstract_heap_val_type(ht, true)),
+            None => return Err(DecodeError::UnsupportedOpcode),
+        },
     })
 }
 
@@ -797,7 +801,13 @@ pub fn read_heap_type(r: &mut Reader) -> DecodeResult<HeapType> {
         }
         return Ok(HeapType::Exact(ti));
     }
-    Ok(match v {
+    abstract_heap_type(v).ok_or(DecodeError::UnsupportedOpcode)
+}
+
+/// The abstract heap type a negative s33 encodes, if any — THE table of abstract heap-type codes,
+/// shared by [`read_heap_type`] and the value-type shorthands in [`read_value_type_from`].
+fn abstract_heap_type(v: i64) -> Option<HeapType> {
+    Some(match v {
         -0x10 => HeapType::Func,
         -0x11 => HeapType::Extern,
         -0x12 => HeapType::Any,
@@ -810,7 +820,7 @@ pub fn read_heap_type(r: &mut Reader) -> DecodeResult<HeapType> {
         -0x0e => HeapType::NoExtern,
         -0x0c => HeapType::NoExn,
         -0x17 => HeapType::Exn,
-        _ => return Err(DecodeError::UnsupportedOpcode),
+        _ => return None,
     })
 }
 
@@ -1204,13 +1214,16 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                 let n = r.read_vec_len()?;
                 let mut tys = Vec::with_capacity(n as usize);
                 for _ in 0..n {
-                    let t = ValType::from_bits(r.read_byte()? as u32);
-                    // A single byte can't encode a concrete `(ref $t)` (bit 31 clear),
-                    // so `is_valid` is exactly the abstract/numeric set here.
-                    if !t.is_valid() {
-                        return Err(DecodeError::UnsupportedOpcode);
-                    }
-                    tys.push(t);
+                    // A value type's first byte is one LEB byte in `0x40..=0x7f` — a negative
+                    // s33 — so it reads exactly as a block type's does, minus the index and
+                    // `0x40` cases a value type cannot be. No range check: any other byte maps
+                    // to a value no arm of `read_value_type_from` accepts (a range guard here
+                    // was written, mutation-tested, and could not fail — so it is not here).
+                    // ⚠️ This read the byte as `ValType::from_bits` until 2026-09-19, which
+                    // accepted wasmrt's INTERNAL tags as wire bytes and could not read the long
+                    // form `0x63`/`0x64` at all, so `select (result (ref $t))` never decoded.
+                    let b = r.read_byte()?;
+                    tys.push(read_value_type_from(&mut r, i64::from(b) - 0x80)?);
                 }
                 Imm::SelectTypes(tys)
             }
@@ -1325,7 +1338,7 @@ mod tests {
         // A valid typed select (i32 = 0x7f) still decodes.
         let ok = decode_body(&[0x1c, 0x01, 0x7f, 0x0b]).unwrap();
         assert_eq!(ok[0].op, Op::SelectT);
-        assert_eq!(ok[0].imm, Imm::SelectTypes(vec![ValType::I32]));
+        assert_eq!(ok[0].imm, Imm::SelectTypes(vec![BlockType::Value(ValType::I32)]));
     }
 
     #[test]

@@ -195,11 +195,9 @@ refused by both / 0 differ**, shipped cdylib **531,968 B**, everything committed
 the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4, did track P, patched the
 era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
 
-🚦 **T13's conformance numbers are at their target.** What stands between here and `1.0.0` is no longer the
-corpus: items 1–2 below (not ours to execute), the two 🟡 OPEN decoder accept-invalid defects at the top of
-`known-issues.md` (typed-`select` one-byte types; block-type bytes mapping to internal tags — real
-deviations from the binary format that the corpus happens not to reach, so *zero deliberate deviations* is
-not yet true), then the `releasing.md` checklist.
+🚦 **T13's conformance numbers are at their target, and the last KNOWN format deviations are closed**
+(item 7, 2026-09-19 — three decoder defects, one more than logged). What stands between here and `1.0.0`:
+items 1–2 below (not ours to execute), then the `releasing.md` checklist (item 8).
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -212,7 +210,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | **4** | ✅ **DONE 2026-09-19 — see `known-issues.md` (top); refused with wasmtime's own reason, and a rule-free fourth copy of the type-use loop behind it.** ~~**The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
 | **5** | ✅ **DONE 2026-09-19 — custom-page-sizes 5 files 166/0/0 (was 110/0/79); byte-granular bounds verified on every access path and CROSS-CHECKED ON WASMTIME 48; `PAGE_SIZE` deleted so no 64 KiB assumption can compile. See DAY 4 part 3.** ~~**Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
 | **6** | ✅ **DONE 2026-09-19 — D1–D4, custom-descriptors 100% clean. See DAY 4 parts 4–6.** ~~**Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test.~~ | — |
-| **7** | 🟡 **The two OPEN decoder defects** (`known-issues.md`, top): typed-`select` reads each type as one raw byte; block-type bytes `-24`…`-41` map to internal non-null tags. Both accept INVALID binaries. | The last known deviations from the format. Small, and each wants an outside-reader check (wasm-tools refusing the same bytes). |
+| **7** | ✅ **DONE 2026-09-19 — see DAY 4 part 7.** ~~**The two OPEN decoder defects** (`known-issues.md`, top): typed-`select` reads each type as one raw byte; block-type bytes `-24`…`-41` map to internal non-null tags. Both accept INVALID binaries.~~ The sweep found a THIRD (valid block types refused). | — |
 | **8** | **`1.0.0` release prep** per `releasing.md` — after 1, 7 and a fresh corpus re-measure. | T13's exit. |
 
 ⚠️ **Two predictions still standing, so honest movement is not read as regression:**
@@ -259,6 +257,31 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### ✅ DAY 4, part 7 — a value type inside a function body: ONE reader, and three defects where two were logged. `[x]`
+
+Suite **64,598 / 0 / 0, byte-identical** (the corpus never reached these bytes). 525 tests, clippy clean, C-ABI
+PASSED, Miri 32/32, wasm32 builds, `.wat` corpus 531/535, custom-sections 531/4/0. **Size: 0 B.**
+
+Block types and typed `select` each had a private table for the same grammar, and they had drifted in
+**opposite directions**. Swept every one-byte encoding `0x40..=0x7f` in both positions against wasm-tools:
+**20 invalid encodings accepted** (wasmrt's internal non-null tags read as wire bytes), **3 valid block types
+refused** (`0x72`/`0x73`/`0x74` — 🆕 in neither logged entry), and **`select (result (ref …))` undecodable**
+(all 9 valid long-form modules probed were refused). Now one reader, `opcode::read_value_type_from`, drawing
+its shorthands from the same `abstract_heap_type` table as `read_heap_type`; one validator resolver,
+`resolve_value_type`. Detail and the before/after table: `known-issues.md` (top).
+
+`tests/value-type-encodings.wast` — 34 assertions, **passed whole by wasmtime 48**, 6/24/8 on the previous build.
+Mutation-verified at 5 sites. Two things the mutations taught:
+* 🎓 **An invalid-module test must be invalid for exactly ONE reason** (`best-practices.md` §5.4a). "Concrete
+  result forced nullable" SURVIVED: the test module's function result was also `(ref $s)`, so it stayed
+  invalid for a second reason. Fixed by making everything but the construct under test permissive.
+* A range check on `select`'s first byte could not fail — every out-of-range byte already reaches no arm — so
+  it was **deleted, not kept** (§4.1). And the SIMD gate on block/`select` result types was pinned by NOTHING
+  (deleting it failed no test, before or after this change); now pinned.
+
+🎓 **When the input space is small, ENUMERATE it** (`best-practices.md` §1.8): 64 bytes × 2 positions × 3
+referee configurations is one script, and it found a defect class the two careful entries had not.
 
 ##### ✅ DAY 4, part 6 — TRACK D3/D4: the `*_desc` instructions, and the corpus at ZERO. `[x]`
 

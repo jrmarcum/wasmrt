@@ -85,6 +85,17 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🆕 2026-09-19 — day 4, part 7: **64,598 / 0 / 0, byte-identical** (value types in function bodies)
+
+**`tests/value-type-encodings.wast`** (34 assertions) — every one-byte value-type encoding as a block type
+and as a typed-`select` type, the `0x63`/`0x64` long form in both (and running), and invalid `select` typing.
+🔒 **wasmtime 48 passes this file whole** — `wasmtime wast -W gc=y,function-references=y,exceptions=y
+tests/value-type-encodings.wast` exits 0; re-run it whenever value-type decoding changes. Its failure messages
+are wasmtime's own wording so that wasmtime can referee every line (our runner does not compare messages).
+`tests/` is now **13 files / 199 assertions**, all clean. The one-byte sweep that produced it
+(every byte `0x40..=0x7f` × block/select × wasm-tools standard/all × wasmrt) is the method to reuse for any
+small encoding space — see `best-practices.md` §1.8.
+
 ### 🎯 2026-09-19 — day 4, part 6: **64,598 / 0 / 0** — ZERO failed, ZERO skipped, ZERO unrun (track D3/D4)
 
 All 288 files run and every one is clean. **The runner now picks FEATURES PER FILE** (`wast::features_for_script`):
