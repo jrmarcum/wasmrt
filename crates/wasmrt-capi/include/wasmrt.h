@@ -19,6 +19,14 @@
  * threads/atomics, memory64 or exception handling internally and run correctly; the host
  * surface simply never hands those types across the boundary.
  *
+ * AUTHENTICITY IS NOT CHECKED HERE, AND THAT IS DELIBERATE. The CLI verifies a module
+ * against a root-owned pin database before executing it (`wasmrt pin`, `--verify`); this
+ * API does not, because it never opens a file — it receives bytes the embedder already
+ * chose, so only the embedder can say where they came from. If your host loads modules
+ * from disk or a network, authorize them BEFORE calling wasmrt_module_decode(), and hash
+ * exactly the buffer you pass in. Stated here rather than left implicit: an undocumented
+ * gap gets found twice.
+ *
  * ---------------------------------------------------------------------------------------
  * Handles and ownership
  * ---------------------------------------------------------------------------------------

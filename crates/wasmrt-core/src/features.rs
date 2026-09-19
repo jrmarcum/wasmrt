@@ -147,6 +147,44 @@ impl Feature {
             Feature::CustomDescriptors => "custom-descriptors",
         }
     }
+
+    /// Resolve a proposal NAME, as a command line spells it.
+    ///
+    /// 🔒 **Both vocabularies, because `--features` is a swappability surface** (`interop.md` §2.2).
+    /// wazmrt spells these `sign_extension`, `bulk_memory`, `exceptions`; wasmrt and wasm-tools use
+    /// the proposal repositories' own `sign-extension-ops`, `bulk-memory-operations`,
+    /// `exception-handling`. A list written for either runtime has to work under both, so both
+    /// spellings resolve — the same "both accept both" resolution the `--dir` separator took, and
+    /// for the same reason: converging on one would break working command lines of the other.
+    ///
+    /// `-` and `_` are interchangeable, and case is ignored.
+    #[must_use]
+    pub fn from_name(s: &str) -> Option<Feature> {
+        let n = s.trim().to_ascii_lowercase().replace('-', "_");
+        Some(match n.as_str() {
+            "sign_extension" | "sign_extension_ops" => Feature::SignExtension,
+            "saturating_float_to_int" | "nontrapping_float_to_int_conversions" => {
+                Feature::SaturatingFloatToInt
+            }
+            "multi_value" => Feature::MultiValue,
+            "reference_types" => Feature::ReferenceTypes,
+            "bulk_memory" | "bulk_memory_operations" => Feature::BulkMemory,
+            "extended_const" => Feature::ExtendedConst,
+            "simd" => Feature::Simd,
+            "relaxed_simd" => Feature::RelaxedSimd,
+            "threads" => Feature::Threads,
+            "multi_memory" => Feature::MultiMemory,
+            "memory64" => Feature::Memory64,
+            "function_references" => Feature::FunctionReferences,
+            "gc" => Feature::Gc,
+            "exceptions" | "exception_handling" => Feature::Exceptions,
+            "tail_call" => Feature::TailCall,
+            "wide_arithmetic" => Feature::WideArithmetic,
+            "custom_page_sizes" => Feature::CustomPageSizes,
+            "custom_descriptors" => Feature::CustomDescriptors,
+            _ => return None,
+        })
+    }
 }
 
 impl fmt::Display for Feature {
@@ -521,6 +559,30 @@ mod tests {
             assert!(Features::all().has(f), "all() must enable {f}");
             assert!(!Features::mvp().has(f), "mvp() must disable {f}");
         }
+    }
+
+    #[test]
+    fn every_feature_name_resolves_in_both_vocabularies() {
+        for f in Feature::ALL {
+            assert_eq!(Feature::from_name(f.name()), Some(f), "{f} by its own name");
+            assert_eq!(
+                Feature::from_name(&f.name().replace('-', "_")),
+                Some(f),
+                "{f} with underscores — the sibling runtime's spelling"
+            );
+            assert_eq!(Feature::from_name(&f.name().to_uppercase()), Some(f));
+        }
+        // The sibling's short spellings, which are NOT our canonical names.
+        for (n, f) in [
+            ("sign_extension", Feature::SignExtension),
+            ("saturating_float_to_int", Feature::SaturatingFloatToInt),
+            ("bulk_memory", Feature::BulkMemory),
+            ("exceptions", Feature::Exceptions),
+        ] {
+            assert_eq!(Feature::from_name(n), Some(f), "{n} is wazmrt's spelling");
+        }
+        assert_eq!(Feature::from_name("bogus"), None);
+        assert_eq!(Feature::from_name(""), None);
     }
 
     #[test]
