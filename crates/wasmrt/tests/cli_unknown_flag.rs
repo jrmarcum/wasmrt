@@ -3,6 +3,13 @@
 //! names it, and the exit status is 1. Guest positions — after `--`, or after the first non-flag
 //! argument following the module path — are never examined.
 //!
+//! ⚠️ **A SINGLE-DASH token immediately after the module path is the GUEST's** (owner, 2026-09-19:
+//! *"I want the first option, but I do not want the 'looks like' part"*). Every host flag that can
+//! appear there is double-dash, so a single-dash token cannot be one, and `prog.wasm -la` needs no
+//! `--`. Where no guest argv exists — before the path, or in `wast`/`wat`/summarize — nothing can own
+//! it and it is an unknown flag. **No heuristic anywhere:** a token is judged by its POSITION and by
+//! whether the command knows it, never by resembling a flag name.
+//!
 //! Measured before the rule, on BOTH runtimes: an unknown flag was silently ignored after the path
 //! (summarize), anywhere in `wast`, after the file in `wat`, and misreported as "cannot read `--x`" in
 //! front of a path. Every row below was one of those.
@@ -71,10 +78,18 @@ fn run_refuses_a_flag_where_the_path_or_function_goes_but_not_in_its_arguments()
 fn wasi_refuses_in_host_positions_and_leaves_guest_positions_alone() {
     let m = write_temp("wasmrt_uf_wasi.wat", COMMAND);
     assert_unknown_flag(&["wasi", "--bogus", &m], "--bogus");
-    assert_unknown_flag(&["wasi", &m, "-x"], "-x"); // leading run after the path: a host position
+    assert_unknown_flag(&["wasi", &m, "--bogus"], "--bogus"); // a `--flag` there could be ours
     // Guest positions: after the first guest argument, and after `--`.
     assert_eq!(wasmrt(&["wasi", &m, "arg", "--bogus"]).status.code(), Some(0));
     assert_eq!(wasmrt(&["wasi", &m, "--", "--bogus"]).status.code(), Some(0));
+    // ⚠️ A SINGLE-DASH token right after the path is the guest's, with no `--` and no warning —
+    // and that includes one that resembles a host flag (`-dir`), because there is no heuristic.
+    assert_eq!(wasmrt(&["wasi", &m, "-la"]).status.code(), Some(0), "`-la` is the guest's");
+    assert_eq!(wasmrt(&["wasi", &m, "-dir", "."]).status.code(), Some(0), "no `looks like` rule");
+    // …but BEFORE the path there is no guest to own it.
+    assert_unknown_flag(&["wasi", "-la", &m], "-la");
+    // A real host flag in that position still applies.
+    assert_eq!(wasmrt(&["wasi", &m, "--allow-symlink"]).status.code(), Some(0));
 }
 
 #[test]

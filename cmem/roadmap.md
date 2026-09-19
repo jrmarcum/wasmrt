@@ -270,7 +270,15 @@ as owner decisions with **no version number** (regime A: the pen-holder numbers 
   recognise → `unknown flag`, rc 1. Host positions: the first argument, anything before the path, the
   leading run after the path, and every argument of `wast`/`wat`/summarize. Guest positions (after `--`,
   after the first non-flag argument following the path) are never examined. It resolves Z2's tension
-  **by position**. ⚠️ Consequence: `prog.wasm -la` now needs `prog.wasm -- -la`, and the help says so.
+  **by position**. 🔻 **NARROWED the same day, on the owner's question — "why do we need the extra `--`
+  when we have a single `-` cli option?"** The answer was that we do not: **every** host flag that can
+  follow the module path is double-dash, so a single-dash token there cannot be one. After the path,
+  `-flag` is now the guest's (`prog.wasm -la` runs) and only an unknown `--flag` errors; everywhere
+  without guest argv, both dash forms still error. ⚠️ The cost is recorded: a `-dir` typo of `--dir`
+  reaches the guest silently. 🔒 **The owner refused a "looks like a host flag" warning for it** —
+  *"If it is not a proper cli option throw the error"* — so nothing in the rule guesses. 🎓 *A rule
+  wider than its justification is paid for by ordinary command lines: `-la` is far more common than a
+  mistyped `-dir`.*
 * **§2.5, a validity claim in the output must match the verdict (Z3).** It is the one exception §0 now
   carves out of "output text is out of scope".
 * **§2.3 gains a Z1 row**: naming an export the module lacks is a failure.

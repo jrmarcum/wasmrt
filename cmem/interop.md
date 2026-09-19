@@ -417,7 +417,7 @@ fixing them is wazmrt's call in wazmrt's tree:
   to the guest"*. ⚠️ **Not a simple fix on either side.** wazmrt's flags-after-path form cannot tell a
   mistyped host flag from a guest argument without `--`, and §2.4 already records why that is dangerous
   (`… install --yes`). ✅ **DECIDED by the owner the same day → §2.4a**, which resolves the tension by
-  *position*: host-flag positions error, guest positions are never examined.
+  *position* and, after the path, by *dash count*: an unknown `--flag` errors, a `-flag` is the guest's.
 * **Z3 — output text, out of scope (§0), recorded anyway.** wazmrt's summary header reads *"valid wasm
   v1, N section(s)"* for a module whose last line reports `validation: FAILED`. The exit code is right
   (1); the first line a human reads is not.
@@ -457,19 +457,37 @@ before anything executes**:
 * everything after an explicit **`--`**;
 * everything after the **first non-flag argument** that follows the module path. That is the export
   name and its arguments (so `-1` stays a value), or a WASI program's argv (so `prog.wasm install --yes`
-  is unaffected).
+  is unaffected);
+* 🆕 **a SINGLE-DASH token in position 3** — the run immediately after the module path, in a mode that
+  has guest argv. It is the guest's and needs no `--`: `prog.wasm -la` runs.
 
-⚠️ **The consequence to know about.** A guest's OWN short option placed *directly* after the path is
-now in a host position: `prog.wasm -la` → `unknown flag '-la'`, and it must be written
-`prog.wasm -- -la`. This is the rule working as intended, since a mistyped host flag there is exactly
-what used to vanish. The CLI help says so on wasmrt. **H7 is unchanged and complementary.** A **known**
-host flag stranded in a guest position still only *warns* (it may be the guest's own); an **unknown** one
-in a host position *errors*.
+🆕 **Why position 3 splits by dash count** (owner, 2026-09-19, narrowing the rule the same day it was
+written): **every host flag that can appear after the module path is double-dash** — `--dir`,
+`--ro-dir`, `--env`, `--max-*`, `--pins`, `--verify`, `--no-verify`, `--yes`, `--features`,
+`--allow-symlink`. The single-dash names (`-h`, `-v`) are first-argument-only (§2.4), and the
+subcommand flags (`wast -v`, `wat -o`) belong to modes with **no guest argv**. So a single-dash token
+there **cannot be a host flag**, there is nothing to disambiguate, and demanding `--` would only make
+`prog.wasm -la` longer. A `--flag` in that position genuinely could be either, so an unknown one errors.
+
+⚠️ **What that costs, recorded rather than smoothed over.** A mistyped host flag with one dash —
+`-dir /tmp` for `--dir /tmp` — reaches the guest silently, so the preopen is never granted and nothing
+says so. 🔒 **The owner considered a "looks like a host flag" warning for exactly this case and refused
+it** (*"I do not want the 'looks like' part. If it is not a proper cli option throw the error"*): a
+token is judged by its POSITION and by whether the command knows it, **never by resembling a flag
+name**. A near-miss list is itself a thing that would drift between the two runtimes.
+
+⚠️ **The other consequence, which stands:** a guest's own `--help` directly after the path is an
+unknown flag — `prog.wasm -- --help` is the spelling. That is the rule doing its job, since `--dirr`
+must not slip past silently. The CLI help says so on wasmrt.
+
+**H7 is unchanged and complementary.** A **known** host flag stranded in a guest position still only
+*warns* (it may be the guest's own); an **unknown** `--flag` in a host position *errors*.
 
 | | wazmrt (measured 2026-09-19, 1.0.1) | wasmrt | status |
 | --- | --- | --- | --- |
-| first argument / before the path | rc 1, but reported as *"cannot read '--bogus'"* | ✅ `unknown flag` | ⚠️ **wazmrt: the wording** |
-| leading run after the path | **rc 0 — ignored / handed to the guest** | ✅ `unknown flag` | ⚠️⚠️ **wazmrt must adopt** |
+| first argument / before the path (either dash form) | rc 1, but reported as *"cannot read '--bogus'"* | ✅ `unknown flag` | ⚠️ **wazmrt: the wording** |
+| leading run after the path, **`--flag`** | **rc 0 — handed to the guest** | ✅ `unknown flag` | ⚠️⚠️ **wazmrt must adopt** |
+| leading run after the path, **`-flag`** | rc 0 — the guest's | ✅ rc 0 — the guest's | ✅ **AGREED** (both already) |
 | `.wast` script flags | **rc 0 — ignored** | ✅ `unknown flag` | ⚠️⚠️ **wazmrt must adopt** |
 | guest positions (after `--`, after the first guest arg) | untouched | untouched | ✅ **AGREED** |
 
@@ -501,7 +519,7 @@ forbids writing into wazmrt's tree. For wazmrt's own session to adopt in wazmrt'
 | # | issue | contract item | wazmrt action | verify by running |
 | --- | --- | --- | --- | --- |
 | **Z1** | an unmatched export name is silently ignored (rc 0) | §2.3, new row | fail with rc 1 and name the export, when the argument can only be an export name | `wazmrt m.wasm nosuch` → rc 1 |
-| **Z2** | unknown flags are ignored or misreported | **§2.4a** (owner decision) | `unknown flag`, rc 1, in every host-flag position | `wazmrt m.wasm --bogus`, `wazmrt --bogus m.wasm` and `wazmrt s.wast --bogus` → `unknown flag`, rc 1; `wazmrt m.wasm -- --bogus` → untouched |
+| **Z2** | unknown flags are ignored or misreported | **§2.4a** (owner decision) | `unknown flag`, rc 1, in every host-flag position — but after the module path ONLY for a `--flag`: a single-dash token there is the guest’s (and no “looks like” guessing anywhere) | `wazmrt m.wasm --bogus`, `wazmrt --bogus m.wasm` and `wazmrt s.wast --bogus` → `unknown flag`, rc 1; `wazmrt m.wasm -- --bogus` and `wazmrt m.wasm -la` → untouched |
 | **Z3** | the summary header says "valid" for an invalid module | **§2.5** (owner decision) | neutral header wording until validation has passed | `wazmrt invalid.wasm` → no line claims validity; rc 1 |
 
 ⚠️ **Z1 needs care on wazmrt's side.** Its bare path runs `_start` when the module exports one, so a

@@ -65,6 +65,11 @@ fn is_flag(a: &str) -> bool {
 /// `wast`, summarize) — every argument. Guest positions (after `--`, or after the first non-flag
 /// argument that follows the path) are never examined.
 ///
+/// ⚠️ One exception, decided with the rule: **a single-dash token immediately after the module path is
+/// the GUEST's**, because every host flag that can appear there is double-dash. No heuristic goes with
+/// it — a `-dir` typo of `--dir` reaches the guest silently, which the owner chose over a "looks like"
+/// warning that would guess.
+///
 /// Measured before this existed: an unknown flag was SILENTLY IGNORED after the path on summarize, in
 /// `wast` and in `wat`, and misreported as "cannot read `--x`" in front of a path. Both runtimes.
 fn unknown_flag(arg: &str, guest_hint: bool) -> ExitCode {
@@ -139,7 +144,16 @@ fn warn_misplaced_host_flags(guest_argv: &[String]) {
 /// is an **error**, not a module path: treating it as the path is how a typo becomes
 /// "cannot read '--dir'" instead of a usable message, and how a misplaced restriction flag
 /// disappears silently.
-fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, bool, &[String]), String> {
+///
+/// `guest_follows` says whether the GUEST's argv begins where this run ends — true only for the run
+/// immediately after the module path. It decides what a **single-dash** token means there
+/// (`interop.md` §2.4a, owner 2026-09-19): every host flag in this position is double-dash, so a
+/// single-dash token cannot be one and is simply the guest's (`prog.wasm -la`). Before the path, or
+/// in a command with no guest argv, there is no guest to own it, so it is an unknown flag.
+fn take_dir_flags(
+    args: &[String],
+    guest_follows: bool,
+) -> Result<(Vec<Preopen>, bool, &[String]), String> {
     let mut out = Vec::new();
     let mut allow_symlink = false;
     let mut i = 0;
@@ -160,9 +174,12 @@ fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, bool, &[String]), St
             // ⚠️ An unrecognised `--flag` is an ERROR, not the module path. Falling through
             // made `wasmrt wasi --typo x.wasm` report "cannot read '--typo'", and — the half
             // that matters — let a misplaced restriction flag vanish without a word.
-            // §2.4a: `unknown flag`, single- or double-dash.
-            other if is_flag(other) => {
+            other if other.starts_with("--") => {
                 return Err(format!("unknown flag `{other}` (use `--` to pass it to the guest)"));
+            }
+            // A single-dash token: the guest's where a guest follows, an unknown flag otherwise.
+            other if is_flag(other) && !guest_follows => {
+                return Err(format!("unknown flag `{other}`"));
             }
             _ => break,
         };
@@ -189,7 +206,7 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
     // the same thing under either runtime with only the program name changed, and flag
     // POSITION is part of an argument shape. Everything after the trailing run — or after an
     // explicit `--` — is the guest's argv.
-    let (mut dirs, mut allow_symlink, rest) = match take_dir_flags(rest) {
+    let (mut dirs, mut allow_symlink, rest) = match take_dir_flags(rest, false) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("wasmrt: {e}");
@@ -204,7 +221,7 @@ fn run_wasi_module(rest: &[String]) -> ExitCode {
     };
     let path = path.clone();
     // The TRAILING run of host flags, immediately after the module path (wazmrt's spelling).
-    let guest_argv: Vec<String> = match take_dir_flags(&rest[1..]) {
+    let guest_argv: Vec<String> = match take_dir_flags(&rest[1..], true) {
         Ok((more, sym, tail)) => {
             dirs.extend(more);
             allow_symlink |= sym;
@@ -610,8 +627,9 @@ fn print_help() {
          With no --dir, every path call returns BADF — there is no implicit cwd.\n\n\
          <file> is a `.wasm` binary or `.wat` text; text is assembled first, then validated\n\
          and run exactly like a binary.\n\n\
-         An unrecognised flag is an error (`unknown flag`, exit 1). To hand a flag-like\n\
-         argument to the guest, put it after `--`: wasmrt wasi prog.wasm -- -la",
+         An unrecognised flag is an error (`unknown flag`, exit 1). After the module path a\n\
+         single-dash argument is the GUEST's (wasmrt wasi prog.wasm -la); use `--` to hand it\n\
+         a `--flag` of its own: wasmrt wasi prog.wasm -- --help",
         wasmrt_core::VERSION
     );
 }
