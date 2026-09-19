@@ -245,7 +245,7 @@ impl Runner {
         };
         let list = cmd.as_list().unwrap_or(&[]);
         match kw {
-            "module" => self.define_module(list),
+            "module" => self.define_module(cmd),
             "assert_return" => self.assert_return(list),
             "assert_trap" => self.assert_trap(list),
             "assert_exhaustion" => self.assert_exhaustion(list),
@@ -253,6 +253,8 @@ impl Runner {
             "assert_invalid" => self.assert_rejected(list, Rejection::Invalid),
             "assert_malformed" => self.assert_rejected(list, Rejection::Malformed),
             "assert_unlinkable" => self.assert_unlinkable(list),
+            "assert_malformed_custom" => self.assert_malformed_custom(list),
+            "assert_invalid_custom" => self.assert_invalid_custom(list),
             "invoke" | "get" => match self.run_action(cmd) {
                 Ok(_) => self.summary.passed += 1,
                 Err(ActionErr::NoTarget) => {
@@ -296,7 +298,8 @@ impl Runner {
     }
 
     /// Assemble a `(module …)` form to bytes. Handles the `binary` and `quote` variants.
-    fn module_binary(form: &[Sexpr]) -> Result<Vec<u8>, wat::Error> {
+    fn module_binary(node: &Sexpr) -> Result<Vec<u8>, wat::Error> {
+        let form = node.as_list().unwrap_or(&[]);
         let quote_at = form.iter().position(|s| s.as_atom() == Some("quote"));
         if let Some(q) = quote_at {
             let mut body = Vec::new();
@@ -306,7 +309,7 @@ impl Runner {
             }
             return wat::assemble(&Self::quoted_module_source(body));
         }
-        wat::assemble_module(form)
+        wat::assemble_form(node)
     }
 
     /// The `.wat` source a `(module quote "…")` denotes. The text is EITHER a module's fields
@@ -424,8 +427,8 @@ impl Runner {
             })
     }
 
-    fn build(&mut self, form: &[Sexpr]) -> Result<InstanceId, BuildErr> {
-        let bytes = Self::module_binary(form).map_err(BuildErr::Assemble)?;
+    fn build(&mut self, node: &Sexpr) -> Result<InstanceId, BuildErr> {
+        let bytes = Self::module_binary(node).map_err(BuildErr::Assemble)?;
         self.instantiate_bytes(&bytes)
     }
 
@@ -449,8 +452,8 @@ impl Runner {
     /// **The misreport is corpus-wide and would resurface the moment another file pairs an
     /// unresolvable import with a validity assertion**, which is why this is fixed on its own
     /// merits rather than waiting for the snapshot refresh to hide it.
-    fn build_to_validation(&mut self, form: &[Sexpr]) -> Result<(), BuildErr> {
-        let bytes = Self::module_binary(form).map_err(BuildErr::Assemble)?;
+    fn build_to_validation(&mut self, node: &Sexpr) -> Result<(), BuildErr> {
+        let bytes = Self::module_binary(node).map_err(BuildErr::Assemble)?;
         let md = crate::module::decode(&bytes).map_err(BuildErr::Decode)?;
         crate::validate::validate(&md).map_err(BuildErr::Validate)
     }
@@ -477,7 +480,8 @@ impl Runner {
     /// ⚠️ A `definition` is **assembled but NOT instantiated** — that is the whole distinction,
     /// and instantiating it here would make `instance.wast`'s generativity assertions pass for
     /// the wrong reason by giving every `instance` the definition's own state.
-    fn try_module_definition_or_instance(&mut self, list: &[Sexpr]) -> bool {
+    fn try_module_definition_or_instance(&mut self, node: &Sexpr) -> bool {
+        let list = node.as_list().unwrap_or(&[]);
         // The optional `$name` may precede the keyword: `(module $M definition …)` does not
         // occur, but `(module definition $M …)` does, so scan both positions.
         let kw_at = list
@@ -495,9 +499,17 @@ impl Runner {
             .map(str::to_string);
         if kw == "definition" {
             // Assemble the remaining fields as an ordinary module, but only STORE the bytes.
+            let skip = k + 1 + usize::from(name.is_some());
             let mut form: Vec<Sexpr> = alloc::vec![Sexpr::Atom(String::from("module"))];
-            form.extend(list[k + 1 + usize::from(name.is_some())..].iter().cloned());
-            match crate::wat::assemble_module(&form) {
+            form.extend(list[skip..].iter().cloned());
+            // The fields keep their annotations, shifted to where the fields now stand.
+            let annots = node
+                .annotations()
+                .iter()
+                .filter(|a| a.before >= skip)
+                .map(|a| sexpr::Annot { before: a.before - skip + 1, ..a.clone() })
+                .collect();
+            match crate::wat::assemble_form(&Sexpr::List(form, annots)) {
                 Ok(bytes) => {
                     if let Some(n) = name {
                         self.definitions.push((n, bytes));
@@ -543,12 +555,13 @@ impl Runner {
         true
     }
 
-    fn define_module(&mut self, list: &[Sexpr]) {
-        if self.try_module_definition_or_instance(list) {
+    fn define_module(&mut self, node: &Sexpr) {
+        let list = node.as_list().unwrap_or(&[]);
+        if self.try_module_definition_or_instance(node) {
             return;
         }
         self.last_build_failed = false;
-        match self.build(list) {
+        match self.build(node) {
             Ok(inst) => {
                 // Track by textual `$name` for later `$M` references.
                 if let Some(name) = list.get(1).and_then(Sexpr::as_atom) {
@@ -706,7 +719,7 @@ impl Runner {
         // `assert_trap (module …)` — instantiation itself must trap (an active data or
         // element segment out of bounds, say). It does not become the current module.
         if operand.keyword() == Some("module") {
-            match self.build(operand.as_list().unwrap_or(&[])) {
+            match self.build(operand) {
                 Ok(_) => self.fail("assert_trap: module instantiated without trapping".to_string()),
                 Err(BuildErr::Instantiate(_)) => self.summary.passed += 1,
                 Err(e) if e.is_unsupported() => {
@@ -785,7 +798,7 @@ impl Runner {
             self.skip(format!("{kind:?}: operand is not a (module …)"));
             return;
         };
-        match self.build_to_validation(inner.as_list().unwrap_or(&[])) {
+        match self.build_to_validation(inner) {
             // Quote the spec's own reason string. Without it every over-acceptance in a file
             // reads identically and triaging means hand-matching failures back to source.
             Ok(_) => self.fail(format!(
@@ -824,7 +837,7 @@ impl Runner {
             self.skip(String::from("Unlinkable: operand is not a (module …)"));
             return;
         };
-        match self.build(inner.as_list().unwrap_or(&[])) {
+        match self.build(inner) {
             Ok(_) => self.fail(format!(
                 "Unlinkable: module linked (should fail to link: {})",
                 match form.get(2) {
@@ -840,6 +853,170 @@ impl Runner {
             Err(e) => self.fail(format!("Unlinkable: rejected before linking ({e})")),
         }
     }
+
+    /// `assert_malformed_custom (module …) "reason"` — a CUSTOM ANNOTATION in the module is
+    /// malformed or misplaced.
+    ///
+    /// 🔒 Only [`wat::Error::Annotation`] satisfies it. Any other rejection means the module was
+    /// refused for something else and the annotation rule was never reached — the shape of the
+    /// 112 false passes the whole-module-quote wrapper produced on 2026-09-19.
+    ///
+    /// The module is REFUSED, not merely warned about, because that is what canonical tooling
+    /// does: wasm-tools (the `wat` crate wasmtime reads text with) raises a parse error for every
+    /// case in the spec suite. wasmtime's own `wast` runner parses this command and declines to
+    /// score it (`unimplemented wast directives`).
+    fn assert_malformed_custom(&mut self, form: &[Sexpr]) {
+        let reason = reason_text(form.get(2));
+        let Some(inner) = form.get(1).filter(|s| s.keyword() == Some("module")) else {
+            self.skip(String::from("assert_malformed_custom: operand is not a (module …)"));
+            return;
+        };
+        match Self::module_binary(inner) {
+            // The RULE must be the one asserted, not merely some annotation rule — the reason
+            // is prefix-matched, as the reference interpreter matches it.
+            Err(wat::Error::Annotation(why)) if why.starts_with(reason.as_str()) => {
+                self.summary.passed += 1;
+            }
+            Err(wat::Error::Annotation(why)) => self.fail(format!(
+                "assert_malformed_custom: refused by the wrong rule (`{why}`; expected: {reason})"
+            )),
+            Ok(_) => self.fail(format!(
+                "assert_malformed_custom: module was accepted (should be rejected: {reason})"
+            )),
+            Err(e) if BuildErr::Assemble(e.clone()).is_unsupported() => {
+                self.skip(format!("assert_malformed_custom: unsupported ({e})"));
+            }
+            Err(e) => self.fail(format!(
+                "assert_malformed_custom: rejected for a non-annotation reason ({e}; expected: {reason})"
+            )),
+        }
+    }
+
+    /// `assert_invalid_custom (module …) "reason"` — the module is VALID, and one of its custom
+    /// sections is not.
+    ///
+    /// Both halves are checked. A custom section's errors must not invalidate a module, so the
+    /// module has to build and validate; then [`branch_hint_diagnostics`] — the only custom
+    /// section with validity rules wasmrt knows — has to find the problem. A module refused
+    /// outright fails the assertion: that would be the wrong answer to "is this module valid?".
+    fn assert_invalid_custom(&mut self, form: &[Sexpr]) {
+        let reason = reason_text(form.get(2));
+        let Some(inner) = form.get(1).filter(|s| s.keyword() == Some("module")) else {
+            self.skip(String::from("assert_invalid_custom: operand is not a (module …)"));
+            return;
+        };
+        let built = Self::module_binary(inner)
+            .map_err(BuildErr::Assemble)
+            .and_then(|bytes| {
+                let md = crate::module::decode(&bytes).map_err(BuildErr::Decode)?;
+                crate::validate::validate(&md).map_err(BuildErr::Validate)?;
+                Ok(branch_hint_diagnostics(&bytes, &md))
+            });
+        match built {
+            Ok(d) if d.iter().any(|m| m.starts_with(reason.as_str())) => self.summary.passed += 1,
+            Ok(d) => self.fail(format!(
+                "assert_invalid_custom: no matching custom-section problem ({d:?}; expected: {reason})"
+            )),
+            Err(e) if e.is_unsupported() => {
+                self.skip(format!("assert_invalid_custom: unsupported ({e})"));
+            }
+            Err(e) => self.fail(format!(
+                "assert_invalid_custom: the module itself was refused ({e}), but a custom section's \
+                 errors must not invalidate it (expected: {reason})"
+            )),
+        }
+    }
+}
+
+/// An assertion's reason string, for a failure message.
+fn reason_text(s: Option<&Sexpr>) -> String {
+    match s {
+        Some(Sexpr::Str(b)) => String::from_utf8_lossy(b).into_owned(),
+        Some(Sexpr::Atom(a)) => a.clone(),
+        _ => String::from("<no reason given>"),
+    }
+}
+
+/// Problems in a module's `metadata.code.branch_hint` section, as the branch-hinting proposal
+/// defines them: a hint must name a DEFINED function, and must stand on the first byte of an
+/// `if` or `br_if` in that function's body. Each problem is one message; empty means sound.
+///
+/// ⚠️ **Reported, never enforced.** A custom section's errors must not invalidate a module, and
+/// wasm-tools accepts `(@metadata.code.branch_hint "\01") i32.eq` — so this answers the spec
+/// suite's `assert_invalid_custom` without changing whether wasmrt runs anything.
+///
+/// Kept in the runner rather than the decoder: it is a diagnostic, not an engine rule, and the
+/// engine's size is what the contest is judged on.
+fn branch_hint_diagnostics(bytes: &[u8], md: &crate::module::Module) -> Vec<String> {
+    use crate::types::SectionId;
+    use crate::opcode::Op;
+    let mut out = Vec::new();
+    let uleb = |b: &[u8], p: &mut usize| -> Option<usize> {
+        let (mut v, mut shift) = (0usize, 0u32);
+        loop {
+            let x = *b.get(*p)?;
+            *p += 1;
+            v |= usize::from(x & 0x7f).checked_shl(shift)?;
+            if x & 0x80 == 0 {
+                return Some(v);
+            }
+            shift += 7;
+        }
+    };
+    // Each body's ENTRY start (just past its size): hint offsets count from there, locals included.
+    let mut entry_starts = Vec::new();
+    if let Some(code) = md.section(SectionId::Code) {
+        let mut p = code.offset;
+        let n = uleb(bytes, &mut p).unwrap_or(0);
+        for _ in 0..n {
+            let Some(size) = uleb(bytes, &mut p) else { break };
+            entry_starts.push(p);
+            p += size;
+        }
+    }
+    let first_def = md.imported_func_count() as usize;
+    for s in md.sections.iter().filter(|s| s.id == SectionId::Custom) {
+        let payload = &bytes[s.offset..s.offset + s.size];
+        let mut p = 0;
+        let Some(nlen) = uleb(payload, &mut p) else { continue };
+        if payload.get(p..p + nlen) != Some(crate::wat::BRANCH_HINT_SECTION) {
+            continue;
+        }
+        p += nlen;
+        let funcs = uleb(payload, &mut p).unwrap_or(0);
+        for _ in 0..funcs {
+            let (Some(f), Some(k)) = (uleb(payload, &mut p), uleb(payload, &mut p)) else {
+                out.push(String::from("branch hint section: truncated"));
+                return out;
+            };
+            let def = f.checked_sub(first_def).filter(|&d| d < md.code.len());
+            for _ in 0..k {
+                let (Some(off), Some(size)) = (uleb(payload, &mut p), uleb(payload, &mut p)) else {
+                    out.push(String::from("branch hint section: truncated"));
+                    return out;
+                };
+                p += size;
+                let Some(d) = def else {
+                    out.push(format!(
+                        "@metadata.code.branch_hint annotation: function {f} is not a defined function"
+                    ));
+                    continue;
+                };
+                let at = entry_starts.get(d).map(|s| s + off);
+                let code = &md.code[d];
+                let hits = code.ir.iter().any(|i| {
+                    matches!(i.op, Op::If | Op::BrIf)
+                        && Some(code.body_offset as usize + i.offset as usize) == at
+                });
+                if !hits {
+                    out.push(format!(
+                        "@metadata.code.branch_hint annotation: invalid target (function {f}, offset {off})"
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Which rejection stage an assertion demands.
@@ -1670,5 +1847,45 @@ mod tests {
         // `assert_malformed`. Under the old wrapper this scored a pass.
         let s = run(r#"(assert_malformed (module quote "(module (func))") "anything")"#);
         assert_eq!((s.passed, s.failed), (0, 1), "a wrapper refusal must not score as a pass");
+    }
+
+    /// `assert_malformed_custom` passes on the ASSERTED annotation rule only — not on some
+    /// other annotation rule, not on any other refusal, and not on acceptance.
+    #[test]
+    fn assert_malformed_custom_needs_the_asserted_rule() {
+        let s = run(
+            r#"(assert_malformed_custom (module quote "(@custom)") "@custom annotation: missing section name")"#,
+        );
+        assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
+        for bad in [
+            // wrong annotation rule
+            r#"(assert_malformed_custom (module quote "(@custom)") "@custom annotation: malformed placement")"#,
+            // refused, but not for an annotation
+            r#"(assert_malformed_custom (module quote "(func (nop nop))") "@custom annotation: missing section name")"#,
+            // accepted
+            r#"(assert_malformed_custom (module quote "(@custom \"x\")") "@custom annotation: missing section name")"#,
+        ] {
+            let s = run(bad);
+            assert_eq!((s.passed, s.failed), (0, 1), "{bad} must fail: {:?}", s.failures);
+        }
+    }
+
+    /// `assert_invalid_custom`: the module is valid AND a custom section is not. A hint on a
+    /// non-branch instruction is the case: emitted (as wasm-tools emits it), then reported.
+    #[test]
+    fn assert_invalid_custom_needs_a_valid_module_with_a_bad_hint() {
+        let good = r#"(assert_invalid_custom
+            (module (func (param i32) (result i32)
+              (local.get 0) (@metadata.code.branch_hint "\01") (i32.eqz)))
+            "@metadata.code.branch_hint annotation: invalid target")"#;
+        let s = run(good);
+        assert_eq!((s.passed, s.failed), (1, 0), "{:?}", s.failures);
+        // A hint on a real branch is sound, so the assertion must fail.
+        let s = run(
+            r#"(assert_invalid_custom
+                (module (func (@metadata.code.branch_hint "\01") (if (i32.const 0) (then))))
+                "@metadata.code.branch_hint annotation: invalid target")"#,
+        );
+        assert_eq!((s.passed, s.failed), (0, 1), "{:?}", s.failures);
     }
 }

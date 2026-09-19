@@ -85,6 +85,20 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🆕 2026-09-19 — day 4: **64,087 / 65 / 530**, and a new EXTERNAL gate for custom sections
+
+`custom/` **0/1/20 → 20/0/0** (the custom-annotations feature); earlier the same day the whole-module
+quote fix moved 64,068/66/549 → 64,067/65/550 by removing six FALSE passes. 514 workspace tests.
+⚠️ **C-ABI gate needs `CC=gcc` on this host** (no `cc` on PATH): `CC=gcc bash scripts/c-gate.sh`.
+
+**`scripts/custom-sections-diff.py <wasmrt.exe> <file.wat | @list.txt>…`** — assembles each file with
+`wasmrt wat` AND `wasm-tools parse` and compares section order plus every custom section's bytes
+(`@custom` placement, the `name` section, branch hints normalised past the locals vector). **Run it
+whenever the assembler's output changes.** Baseline: `.wat` corpus **528 compared byte-for-byte and
+agree, 2 refused by both** (the `anyfunc` corpus defects), **2 differ** (item #4, the import type-use
+check). Needs `wasm-tools` on PATH and `python` (not `python3`, which is a Store stub here and hangs).
+wasmrt's own decoder cannot be this gate: it reads the name section leniently and ignores the rest.
+
 ### 🔬 2026-09-17 — A THIRD HOLE IN THE PER-FILE GATE: a clean file has no row
 
 `scripts/conformance-diff.sh` enforces *no file lost a pass*, and its header already records two holes

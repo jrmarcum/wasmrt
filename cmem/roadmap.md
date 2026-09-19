@@ -188,9 +188,9 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,067 / 65 / 550 over 288 files, 506 workspace tests, C-ABI gate PASSED, `.wat` corpus
-528/532, Miri **31/31**, everything committed and pushed.** Day 4 (below) found the runner manufacturing
-passes; track A is **blocked on an owner scope decision**, so the next unblocked item is **#4**.
+**State: 64,087 / 65 / 530 over 288 files, 514 workspace tests, C-ABI gate PASSED, `.wat` corpus
+528/532, Miri **31/31**, the new custom-sections gate 528/532 byte-identical to wasm-tools, everything committed and pushed.** Day 4
+(below) found the runner manufacturing passes, then did track A as the custom-annotations feature. **Next: #4.**
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -199,7 +199,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | --- | --- | --- |
 | **1** | 🔒 **wasmtk commits the threads patch.** Two files modified in the wasmtk tree and nothing else: `proposals/threads/imports.wast`, `proposals/threads/memory.wast`. **Not committed from here on purpose** — the write was owner-authorised, committing in another repo is not. | It is the only work-in-progress anywhere. ⚠️ It is a deliberate deviation from upstream and `update-testsuite.py` WILL overwrite it on the next sync — re-check after every sync. |
 | **2** | 📮 **Report the stale snapshot upstream** (the spec repo's `proposals/threads/` still asserts multi-memory and multi-table invalid). Not filed — needs the owner's account. | The only route that fixes it for everyone; until then the patch carries it. |
-| **3** | 🚦 **Track A — the `custom/` directory — BLOCKED ON AN OWNER SCOPE DECISION (2026-09-19).** ⚠️⚠️ **The premise "pure runner work, no engine risk" was FALSE**, and checking it was the day's first act (§8.4). (a) **wasmtime 48 does not score these either** — it parses both directives and refuses them as `unimplemented wast directives`. (b) **wasmrt's lexer drops every annotation as trivia** (`sexpr::skip_annotation`), so no `(@custom …)` / `(@name …)` / `(@metadata.code.branch_hint …)` ever reaches the assembler — there is nothing for a runner arm to adjudicate. Honest verdicts require **implementing custom annotations**: surface them from the lexer, emit `@custom` as custom sections with `(before|after <section>)` placement, `@name` into the name section, branch hints into `metadata.code.branch_hint`, and report their errors on a channel that does **not** fail the module (the spec says a malformed custom section must not invalidate one). Options for the owner: **implement** (20 verdicts; assembler code, which is size) · **leave skipped with a recorded reason**, as wasmtime does (breaks T13's zero-skip bar) · ⛔ *not* "pass if the module assembles" — that verifies nothing. The **1 failure** was not Track A at all: see the day-4 entry. | Smallest item left in *count*, not in *work*. |
+| **3** | ✅ **Track A — DONE (2026-09-19, owner: "we do not want the lexer to throw away information … align with canonical wasmtime and wasm").** `custom/` **0/1/20 → 20/0/0**. The first scoping ("pure runner work, no engine risk") was false — wasmtime scores neither command and the lexer dropped every annotation — so it became the **custom-annotations feature**, built to MEASURED canonical behaviour: `@custom` → a custom section at its slot, `@name` + every `$id` → the `name` section (all 12 subsections), branch hints → `metadata.code.branch_hint`, malformed/misplaced → **module refused** (as wasm-tools refuses it), a hint on a non-branch → **emitted and reported, not refused**. See the day-4 entry. | — |
 | **4** | **The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
 | **5** | **Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
 | **6** | **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
@@ -248,6 +248,56 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### ✅ DAY 4, part 2 — TRACK A became the CUSTOM-ANNOTATIONS feature (owner-directed). `[x]`
+
+**64,067 / 65 / 550 → 64,087 / 65 / 530** — `custom/` **0/1/20 → 20/0/0**, no other file moved.
+514 workspace tests, C-ABI PASSED, Miri 31/31, `.wat` corpus 528/532. Three commits: the lexer
+(suite byte-identical), then the assembler + runner.
+
+🎯 **Owner's direction: don't throw away information; align with canonical wasmtime/wasm.** Every
+behaviour below was **MEASURED against wasm-tools 1.259** (the `wat` crate wasmtime 48 reads text
+with) before it was built, not read off the spec:
+
+| annotation | canonical, measured | wasmrt now |
+| --- | --- | --- |
+| `@custom` | custom section at its `(before\|after X)` slot, default `(after last)`; `after` anchors precede `before` anchors in a gap; `datacount` is NOT an anchor | same — laid out in one pass over the finished module (`wat/annot.rs::lay_out`) |
+| `$id`s | written to the `name` section **by default**, all 12 subsections, labels numbered over EVERY block (`(block (block $b))` → label 1) | same. ⚠️ wasmrt wrote **no name section at all** before — its own traps printed `name=(none)` for named functions |
+| `@name` | overrides the `$id`; module/func/param/local/type/table/memory/global/elem/data/tag/label; **refused on a struct field** | same |
+| branch hint | `metadata.code.branch_hint` just before `code`, offset from body start (locals included); malformed → refused | same |
+| hint on a non-branch | **accepted and emitted** | same, plus a **non-fatal** diagnostic (runner-side) that answers `assert_invalid_custom` |
+| malformed / misplaced | **module refused** (a parse error, not a warning) | `wat::Error::Annotation(reason)`, worded as the suite words it; the runner prefix-matches the reason |
+| unknown `(@foo …)` | ignored | ignored |
+
+🔬 **The EXTERNAL gate — `scripts/custom-sections-diff.py`.** Assembles each file with both tools and
+compares section ORDER and every custom section's bytes (hint offsets normalised past the locals
+vector, whose packing legitimately differs). **528/532 of the `.wat` corpus byte-identical**; the other
+four are the known corpus defects (2 refused by both) and item #4 (2 wasm-tools refuses). ⚠️ Its first
+version counted "both refused" as agreement — **two of my own probes were malformed and tested
+nothing while the gate said "agree"**; it now reports refused-by-both separately. Mutation-verified.
+
+⚠️ **Findings on the way:**
+* 🔴 **The lexer refactor OVERFLOWED THE STACK on the paren-bomb test** — one extra frame per nesting
+  level on the list-recursion path turned `MAX_DEPTH` from a refusal into a host kill. Fixed; the
+  annotation body paths have their own bomb test.
+* The runner passed a module's ITEMS around, dropping annotations — `build`, `build_to_validation`,
+  `module_binary` and `(module definition …)` now pass the node.
+* A hint the emitter never reaches (before a flat immediate) would have vanished silently; every body
+  now asserts **recorded = present**, and wasm-tools refuses the same inputs.
+* 🔴 **The first placement design was one call-level from half its inputs AGAIN**: folded forms record a
+  hint at their OWN opcode (after operands for most, after the condition for `if`, first for blocks),
+  and `call_indirect`/SIMD/atomics emit their own operands — each path is enumerated and pinned by the
+  external gate (13 hints across every folded route, byte-identical).
+
+📏 **SIZE — the honest cost, and a T11 lead.** Same host, same `release` profile, baseline `178414c29`:
+CLI **729,088 → 780,800 B (+51.7 KB)**, cdylib **1,304,064 → 1,363,968 B (+59.9 KB, +4.6%)**, core
+rlib 3.53 → 4.21 MB. ⚠️⚠️ **The cdylib should not have moved at all**: nothing reachable from the C ABI
+calls the assembler — and **the BASELINE cdylib already contains the text assembler AND the `.wast`
+runner** (their strings are in the dll; 74 exports, all C-ABI). `-Wl,--gc-sections` changes nothing.
+**Unexplained, and it is exactly the artifact wasmrt is behind on** (wazmrt 222 KB). Handed to T11:
+if the runner and assembler can be kept out of the embed artifact, this feature's cdylib cost is zero
+and the cdylib shrinks by far more than 60 KB.
+
 
 ##### ✅ DAY 3 (2026-09-17) — X1, X2, X3, the M/A residue, **TRACK W**, the threads patch and the **`Op`→u16** move. `[x]`
 
@@ -2261,6 +2311,14 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   exact defect — its header advertised `TAIL_CALL = 14` while its C-ABI bound stopped at 13.)*
 
 - **T11 — Optimization review (a DISCUSSION, not a blind pass).** *(Owner, 2026-08-06.)* 🆕 **Ships as `1.0.3` (owner, 2026-08-19).** `[ ]`
+
+  🆕 **LEAD (2026-09-19): the cdylib carries code NO C-ABI path reaches — the text assembler and the
+  `.wast` spec-test runner** (their strings are in `wasmrt_capi.dll`, which exports only the 74 C-ABI
+  symbols; `-Wl,--gc-sections` does not remove them; host `x86_64-pc-windows-gnu`, `release` =
+  `opt-level="z"` + LTO + strip). Measured 1,363,968 B here vs the **493.5 KiB on record** — so either
+  the recorded figure is from another configuration or the artifact has grown; **re-measure in the
+  recorded configuration first**. If dead code is surviving the link, this is the largest cdylib lever
+  found so far, and the annotation feature's +59.9 KB there disappears with it.
 
   **The deliverable is options presented to the owner with measurements and trade-offs — then a
   decision — not unilateral optimization.** Scope: making the code more efficient, faster and smaller,

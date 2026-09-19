@@ -26,13 +26,19 @@
 //! hard [`Error::Unsupported`]; emitting wrong bytes on a fall-through is the worst
 //! possible failure mode, so there is no silent default anywhere.
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::sexpr::{self, Sexpr};
+use crate::sexpr::{self, Annot, Sexpr};
 use crate::types::ValType;
+
+mod annot;
+
+/// The custom section a branch hint lands in (the branch-hinting proposal).
+pub const BRANCH_HINT_SECTION: &[u8] = b"metadata.code.branch_hint";
 
 type V = ValType;
 
@@ -112,6 +118,13 @@ pub enum Error {
     /// assembler used to keep the LAST one silently, so `(start $a) (start $b)` built a module
     /// that ran only `$b` — a module the text did not describe, and one wasmtime refuses.
     MultipleStart,
+    /// A malformed or misplaced CUSTOM annotation — `@custom`, `@name`, or a branch hint. The
+    /// payload is the reason, worded as the spec suite words it. Its own variant because the
+    /// stage is the verdict: `assert_malformed_custom` is satisfied by this and nothing else.
+    ///
+    /// ⚠️ These annotations were discarded as trivia until 2026-09-19, so every one of them —
+    /// malformed or not — was accepted, where wasm-tools refuses the module.
+    Annotation(&'static str),
     /// A text construct this release does not assemble yet. Loud by design.
     Unsupported(&'static str),
 }
@@ -126,6 +139,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Parse(e) => write!(f, "s-expression parse error: {e}"),
+            Error::Annotation(why) => write!(f, "annotation: {why}"),
             Error::Unsupported(what) => write!(f, "unsupported text construct: {what}"),
             // The whole point of a dedicated variant: the input is LEGACY, not nonsense, so the
             // message keeps the compatibility hint even though the acceptance does not.
@@ -998,6 +1012,8 @@ struct Func {
     local_names: Vec<Option<String>>,
     locals: Vec<V>,
     body: Vec<Sexpr>,
+    /// The function list's annotations that stand in its body, indexed into `body`.
+    body_annots: Vec<Annot>,
 }
 
 #[derive(Debug, Clone)]
@@ -1175,17 +1191,30 @@ struct ModuleBuild {
 pub fn assemble(src: &[u8]) -> Result<Vec<u8>> {
     for form in sexpr::parse_all(src)? {
         if form.keyword() == Some("module") {
-            return assemble_module(want_list(&form)?);
+            return assemble_form(&form);
         }
     }
     Err(Error::NotAModule)
 }
 
-/// Assemble an already-parsed `(module …)` form (`module[0]` is the `module` keyword).
+/// Assemble an already-parsed `(module …)` NODE, honouring the annotations written in it.
+///
+/// # Errors
+/// Returns an [`Error`] describing the first problem found.
+pub fn assemble_form(module: &Sexpr) -> Result<Vec<u8>> {
+    assemble_parts(want_list(module)?, module.annotations())
+}
+
+/// Assemble an already-parsed `(module …)` form's ITEMS (`module[0]` is the `module` keyword).
+/// A bare item slice carries no annotations — prefer [`assemble_form`].
 ///
 /// # Errors
 /// Returns an [`Error`] describing the first problem found.
 pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
+    assemble_parts(module, &[])
+}
+
+fn assemble_parts(module: &[Sexpr], annots: &[Annot]) -> Result<Vec<u8>> {
     // Skip the optional module `$name`. ⚠️ Computed BEFORE the `binary` check, because
     // `(module $M binary "…")` is legal and the name sits between the two — checking
     // `module[1]` for `binary` missed the named form and fell through to the field parser,
@@ -1201,6 +1230,10 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         return Ok(out);
     }
     let fields = module.get(start..).unwrap_or(&[]);
+
+    // Every annotation is checked BEFORE any field is parsed, so a malformed one is what the
+    // module is refused for even when something else is wrong with it too.
+    let plan = annot::plan(module, annots)?;
 
     let mut b = ModuleBuild::default();
 
@@ -1252,7 +1285,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         }
         match kw {
             "type" | "rec" => {} // handled in the pre-passes
-            "func" => parse_func_field(items, &mut b)?,
+            "func" => parse_func_field(items, field.annotations(), &mut b)?,
             "memory" => parse_memory_field(items, &mut b)?,
             "global" => parse_global_field(items, &mut b)?,
             "table" => parse_table_field(items, &mut b)?,
@@ -1311,8 +1344,13 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
     // encoded, so the type section is only complete once the last body is done.
     let funcs = core::mem::take(&mut b.funcs);
     let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(funcs.len());
+    let mut body_hints: Vec<Vec<(u32, u8)>> = Vec::with_capacity(funcs.len());
+    let mut body_labels: Vec<NameMap> = Vec::with_capacity(funcs.len());
     for f in &funcs {
-        bodies.push(encode_body(f, &mut b)?);
+        let body = encode_body(f, &mut b)?;
+        bodies.push(body.bytes);
+        body_hints.push(body.hints);
+        body_labels.push(body.labels);
     }
     let globals = core::mem::take(&mut b.globals);
     let mut global_inits: Vec<Vec<u8>> = Vec::with_capacity(globals.len());
@@ -1383,7 +1421,7 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         check_unique_names(names)?;
     }
 
-    emit_module(
+    let bytes = emit_module(
         &b,
         &func_sigs,
         &bodies,
@@ -1393,7 +1431,170 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
         &elem_bytes,
         &datas,
         &data_offsets,
-    )
+    )?;
+    let module_id = module.get(1).filter(|s| is_id(s)).and_then(Sexpr::as_atom);
+    let first_def = b.func_imports.len() as u32;
+    let hints = branch_hint_section(first_def, &body_hints);
+    let names = name_section(&b, &funcs, &plan, module_id, &body_labels);
+    Ok(annot::lay_out(&bytes, &plan.customs, hints.as_deref(), names.as_deref()))
+}
+
+/// The `metadata.code.branch_hint` payload: for each function with hints (by function index,
+/// ascending), its hints as `(offset, size = 1, value)` in offset order. `None` when no hint
+/// was written, so a module without one is byte-for-byte what it was.
+fn branch_hint_section(first_def: u32, per_func: &[Vec<(u32, u8)>]) -> Option<Vec<u8>> {
+    let with: Vec<(usize, &Vec<(u32, u8)>)> =
+        per_func.iter().enumerate().filter(|(_, h)| !h.is_empty()).collect();
+    if with.is_empty() {
+        return None;
+    }
+    let mut c = Vec::new();
+    uleb(&mut c, with.len() as u64);
+    for (i, hs) in with {
+        uleb(&mut c, u64::from(first_def) + i as u64);
+        uleb(&mut c, hs.len() as u64);
+        for &(off, v) in hs {
+            uleb(&mut c, u64::from(off));
+            uleb(&mut c, 1);
+            c.push(v);
+        }
+    }
+    Some(c)
+}
+
+/// A name map: `(index, name)`, ascending by index.
+type NameMap = Vec<(u32, Vec<u8>)>;
+/// An indirect name map: `(outer index, its name map)` — locals and labels per function.
+type IndirectNameMap = Vec<(u32, NameMap)>;
+
+/// A name map from an index space's `$id`s, with `@name` overrides for subsection `sub` laid
+/// over them — ascending by index, as the name section requires.
+fn name_map(ids: &[Option<String>], sub: u8, over: &[(u8, u32, Vec<u8>)]) -> NameMap {
+    let mut m: BTreeMap<u32, Vec<u8>> = ids
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| n.as_deref().map(|n| (i as u32, id_text(n))))
+        .collect();
+    for (s, i, n) in over {
+        if *s == sub {
+            m.insert(*i, n.clone());
+        }
+    }
+    m.into_iter().collect()
+}
+
+fn put_name_map(c: &mut Vec<u8>, m: &[(u32, Vec<u8>)]) {
+    uleb(c, m.len() as u64);
+    for (i, n) in m {
+        uleb(c, u64::from(*i));
+        name_bytes(c, n);
+    }
+}
+
+fn put_subsection(out: &mut Vec<u8>, id: u8, c: &[u8]) {
+    out.push(id);
+    uleb(out, c.len() as u64);
+    out.extend_from_slice(c);
+}
+
+/// The `name` section — what wasm-tools writes by default: every `$id` in every index space,
+/// with any `@name` taking precedence. Subsections in id order, each omitted when empty; the
+/// whole section `None` when there is nothing to name.
+///
+/// ⚠️ Until 2026-09-19 wasmrt wrote NO name section, so every `$id` in the source was lost at
+/// assembly — which is why its own trap backtraces printed `name=(none)` for functions the
+/// source had named.
+fn name_section(
+    b: &ModuleBuild,
+    funcs: &[Func],
+    plan: &annot::Plan,
+    module_id: Option<&str>,
+    labels: &[NameMap],
+) -> Option<Vec<u8>> {
+    use annot::sub;
+    let first_def = b.func_imports.len() as u32;
+    let mut out = Vec::new();
+
+    if let Some(n) = plan.module_name.clone().or_else(|| module_id.map(id_text)) {
+        let mut c = Vec::new();
+        name_bytes(&mut c, &n);
+        put_subsection(&mut out, sub::MODULE, &c);
+    }
+    let simple = |out: &mut Vec<u8>, id: u8, ids: &[Option<String>]| {
+        let m = name_map(ids, id, &plan.names);
+        if !m.is_empty() {
+            let mut c = Vec::new();
+            put_name_map(&mut c, &m);
+            put_subsection(out, id, &c);
+        }
+    };
+    // An indirect map: (outer index, name map) for each outer entry that has one.
+    let indirect = |out: &mut Vec<u8>, id: u8, maps: &[(u32, NameMap)]| {
+        if maps.is_empty() {
+            return;
+        }
+        let mut c = Vec::new();
+        uleb(&mut c, maps.len() as u64);
+        for (i, m) in maps {
+            uleb(&mut c, u64::from(*i));
+            put_name_map(&mut c, m);
+        }
+        put_subsection(out, id, &c);
+    };
+
+    simple(&mut out, sub::FUNC, &b.func_names);
+
+    // Locals. A declaration's `@name` becomes a local index only now: the params of a
+    // `(type $t)` with no inline params sit in front of every declaration.
+    let mut locals = Vec::new();
+    for (i, f) in funcs.iter().enumerate() {
+        let fi = first_def + i as u32;
+        let mut m: BTreeMap<u32, Vec<u8>> = f
+            .local_names
+            .iter()
+            .enumerate()
+            .filter_map(|(j, n)| n.as_deref().map(|n| (j as u32, id_text(n))))
+            .collect();
+        for (pf, decl, total, n) in &plan.locals {
+            if *pf == fi {
+                let shift = (f.local_names.len() as u32).saturating_sub(*total);
+                m.insert(decl + shift, n.clone());
+            }
+        }
+        if !m.is_empty() {
+            locals.push((fi, m.into_iter().collect()));
+        }
+    }
+    indirect(&mut out, sub::LOCAL, &locals);
+
+    let label_maps: IndirectNameMap = labels
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.is_empty())
+        .map(|(i, l)| (first_def + i as u32, l.clone()))
+        .collect();
+    indirect(&mut out, sub::LABEL, &label_maps);
+
+    simple(&mut out, sub::TYPE, &b.type_names);
+    simple(&mut out, sub::TABLE, &b.table_names);
+    simple(&mut out, sub::MEMORY, &b.mem_names);
+    simple(&mut out, sub::GLOBAL, &b.global_names);
+    simple(&mut out, sub::ELEM, &b.elem_names);
+    simple(&mut out, sub::DATA, &b.data_names);
+
+    let mut fields = Vec::new();
+    for (ti, names) in b.field_names.iter().enumerate() {
+        // Fields take no `@name` (wasm-tools refuses it), so there is nothing to lay over.
+        let m = name_map(names, sub::FIELD, &[]);
+        if !m.is_empty() {
+            fields.push((ti as u32, m));
+        }
+    }
+    indirect(&mut out, sub::FIELD, &fields);
+
+    simple(&mut out, sub::TAG, &b.tag_names);
+
+    (!out.is_empty()).then_some(out)
 }
 
 /// The `$name` of a `(type $n …)` definition, if any.
@@ -1766,7 +1967,7 @@ fn zero_offset_of(is64: bool) -> Vec<Sexpr> {
     ])]
 }
 
-fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
+fn parse_func_field(items: &[Sexpr], annots: &[Annot], b: &mut ModuleBuild) -> Result<()> {
     let mut j = 1;
     let name = opt_name(items, &mut j);
     let import = find_import(items)?;
@@ -1904,6 +2105,13 @@ fn parse_func_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             local_names,
             locals,
             body: items[k..].to_vec(),
+            // Rebased onto `body`. Those before `k` stand in the header, which `annot::plan`
+            // has already refused or recorded.
+            body_annots: annots
+                .iter()
+                .filter(|a| a.before >= k)
+                .map(|a| Annot { before: a.before - k, ..a.clone() })
+                .collect(),
         });
     }
     b.func_names.push(name);
@@ -2833,6 +3041,22 @@ struct Ctx<'a> {
     labels: Vec<Option<String>>,
     /// The open FLAT legacy `try` frames, innermost last — see [`Ctx::flat_try_clause`].
     flat_tries: Vec<FlatTry>,
+    /// This body's branch hints and label `@name`s, keyed by the ADDRESS of the item each applies
+    /// to (`annot::body_marks`). Looked up in `emit_one`, the one function every instruction item
+    /// passes through, so no emitter path can skip the lookup.
+    hint_at: &'a BTreeMap<usize, u8>,
+    label_at: &'a BTreeMap<usize, Vec<u8>>,
+    /// A hint for the folded form `emit_one` is about to hand to `emit_folded`.
+    armed: Option<u8>,
+    /// Hints for folded `call_indirect` / SIMD / atomic forms, which emit their own operands and
+    /// so record at their own opcode themselves. A stack because such forms nest.
+    own_hints: Vec<Option<u8>>,
+    /// Recorded hints: (offset of the instruction from the start of the body, value).
+    hints: Vec<(u32, u8)>,
+    /// Block-like instructions opened so far — the name section's label index space, which
+    /// counts EVERY block, named or not (`(block (block $b))` names label 1).
+    label_count: u32,
+    label_names: Vec<(u32, Vec<u8>)>,
     /// Written through to [`ModuleBuild::needs_data_count`] when this body emits
     /// `memory.init`/`data.drop`. A `&mut` to one field, borrowed disjointly from the name
     /// tables — the same trick that lets a body intern a block signature.
@@ -2893,6 +3117,49 @@ impl Ctx<'_> {
     }
 }
 
+static NO_HINTS: BTreeMap<usize, u8> = BTreeMap::new();
+static NO_LABELS: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+
+/// A `$id` as the name section spells it — without the `$`.
+fn id_text(id: &str) -> Vec<u8> {
+    id.strip_prefix('$').unwrap_or(id).as_bytes().to_vec()
+}
+
+impl Ctx<'_> {
+    fn record_hint(&mut self, hint: Option<u8>) {
+        if let Some(v) = hint {
+            self.hints.push((self.out.len() as u32, v));
+        }
+    }
+
+    /// The hint `emit_folded` handed to a form that emits its own operands, recorded now that
+    /// its opcode is next. Every folded call of such a form pushes exactly one entry.
+    fn record_own_hint(&mut self) {
+        let h = self.own_hints.pop().flatten();
+        self.record_hint(h);
+    }
+
+    /// Open a block-like instruction's label: the depth cap, the label stack, and the name
+    /// section's label index — one place, so no block form can count differently from another.
+    /// `key` is the form's keyword atom, which is what a label `@name` is keyed on.
+    fn open_label(&mut self, label: Option<String>, key: &Sexpr) -> Result<()> {
+        if self.labels.len() >= MAX_CTRL_DEPTH {
+            return Err(Error::NestingTooDeep);
+        }
+        let idx = self.label_count;
+        self.label_count += 1;
+        let name = match self.label_at.get(&annot::addr(key)) {
+            Some(n) => Some(n.clone()),
+            None => label.as_deref().map(id_text),
+        };
+        if let Some(n) = name {
+            self.label_names.push((idx, n));
+        }
+        self.labels.push(label);
+        Ok(())
+    }
+}
+
 /// An open flat legacy `try`: the label depth its own label sits at, and how far through the
 /// handler grammar it has got.
 struct FlatTry {
@@ -2929,6 +3196,13 @@ macro_rules! ctx_for {
             local_names: $locals,
             labels: Vec::new(),
             flat_tries: Vec::new(),
+            hint_at: &NO_HINTS,
+            label_at: &NO_LABELS,
+            armed: None,
+            own_hints: Vec::new(),
+            hints: Vec::new(),
+            label_count: 0,
+            label_names: Vec::new(),
             needs_data_count: &mut $b.needs_data_count,
         }
     };
@@ -2936,7 +3210,7 @@ macro_rules! ctx_for {
 
 /// Encode one function body: the locals vector, the instruction sequence, then the
 /// implicit `end`.
-fn encode_body(f: &Func, b: &mut ModuleBuild) -> Result<Vec<u8>> {
+fn encode_body(f: &Func, b: &mut ModuleBuild) -> Result<Body> {
     let mut out = Vec::new();
     // One (count = 1, type) group per declared local — simple and always correct.
     uleb(&mut out, f.locals.len() as u64);
@@ -2945,10 +3219,29 @@ fn encode_body(f: &Func, b: &mut ModuleBuild) -> Result<Vec<u8>> {
         emit_val_type(&mut out, t)?;
     }
     let locals = f.local_names.clone();
+    let marks = annot::body_marks(&f.body, &f.body_annots);
     let mut ctx = ctx_for!(b, &locals, out);
+    ctx.hint_at = &marks.hints;
+    ctx.label_at = &marks.labels;
     emit_seq(&mut ctx, &f.body)?;
     ctx.out.push(0x0b); // implicit function end
-    Ok(ctx.out)
+    // 🔒 Every hint in the body must have been recorded. One standing where no instruction
+    // begins — before a flat immediate, say — is never looked up, and would otherwise vanish
+    // from the output without a word: exactly the silent drop these annotations suffered when
+    // the lexer threw them away.
+    if ctx.hints.len() != marks.expected_hints {
+        return Err(Error::Annotation(
+            "@metadata.code.branch_hint annotation: must precede an instruction",
+        ));
+    }
+    Ok(Body { bytes: ctx.out, hints: ctx.hints, labels: ctx.label_names })
+}
+
+/// One encoded function body, with what it contributes to the custom sections.
+struct Body {
+    bytes: Vec<u8>,
+    hints: Vec<(u32, u8)>,
+    labels: NameMap,
 }
 
 /// Emit a constant expression (a global initializer, or a data/element offset), terminated
@@ -2974,22 +3267,42 @@ fn emit_seq(ctx: &mut Ctx, items: &[Sexpr]) -> Result<()> {
 /// Emit one instruction (flat or folded) starting at `items[i]`; return the index of the
 /// next one.
 fn emit_one(ctx: &mut Ctx, items: &[Sexpr], i: usize) -> Result<usize> {
+    // A branch hint applies to the instruction this item begins. A flat instruction's opcode is
+    // the next byte out; a folded one's comes after its operands, so it is handed on.
+    let hint = if ctx.hint_at.is_empty() {
+        None
+    } else {
+        ctx.hint_at.get(&annot::addr(&items[i])).copied()
+    };
     match &items[i] {
         Sexpr::List(l, _) => {
+            ctx.armed = hint;
             emit_folded(ctx, l)?;
             Ok(i + 1)
         }
-        Sexpr::Atom(name) => emit_flat(ctx, items, i, &name.clone()),
+        Sexpr::Atom(name) => {
+            ctx.record_hint(hint);
+            emit_flat(ctx, items, i, &name.clone())
+        }
         Sexpr::Str(_) => Err(Error::UnknownInstr),
     }
 }
 
 /// A folded instruction: `(op operand* )` — the operands are emitted first, then the op.
 fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
+    // A branch hint on a folded form marks the form's OWN opcode — which for a block comes
+    // first, for `if` comes after the condition, and for everything else comes after all the
+    // operands (wasm-tools: `(@hint) (i32.eqz (if …))` hints the `i32.eqz`, not the `if`).
+    // Taken now, before any operand can see it.
+    let hint = ctx.armed.take();
     let kw = nth(l, 0)?.as_atom().ok_or(Error::UnknownInstr)?.to_string();
     match kw.as_str() {
+        "block" | "loop" | "try_table" | "try" => ctx.record_hint(hint),
+        _ => {}
+    }
+    match kw.as_str() {
         "block" | "loop" => return emit_folded_block(ctx, &kw, l),
-        "if" => return emit_folded_if(ctx, l),
+        "if" => return emit_folded_if(ctx, l, hint),
         "try_table" => return emit_try_table(ctx, l),
         // The legacy folded `try` is structural — `(do …)` plus clause lists — so it is
         // intercepted here rather than going through the opcode table.
@@ -3004,10 +3317,12 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     // The prefixed families are looked up before the single-byte table — their members
     // have no `Op` of their own.
     if let Some((sub, imm)) = lookup_simd(&kw) {
+        ctx.own_hints.push(hint);
         emit_simd(ctx, sub, imm, l, 1, true)?;
         return Ok(());
     }
     if let Some(sub) = lookup_atomic(&kw) {
+        ctx.own_hints.push(hint);
         emit_atomic(ctx, sub, l, 1, true)?;
         return Ok(());
     }
@@ -3016,6 +3331,7 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     use crate::opcode::Op as O;
     if op == O::CallIndirect || op == O::ReturnCallIndirect {
         let opcode = if op == O::CallIndirect { 0x11 } else { 0x13 };
+        ctx.own_hints.push(hint);
         return emit_call_indirect(ctx, l, 1, true, opcode).map(|_| ());
     }
     // `(select (result t) a b c)` — the reference-types typed form. Its `(result …)` is an
@@ -3027,6 +3343,7 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
         for k in j..l.len() {
             emit_one(ctx, l, k)?;
         }
+        ctx.record_hint(hint);
         emit_select(ctx, &tys);
         return Ok(());
     }
@@ -3038,6 +3355,7 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
             for j in imm_end..l.len() {
                 emit_one(ctx, l, j)?;
             }
+            ctx.record_hint(hint);
             return emit_op_with_immediates(ctx, op, &l[..imm_end], 1);
         }
         O::BrOnCast | O::BrOnCastFail => {
@@ -3045,6 +3363,7 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
             for j in imm_end..l.len() {
                 emit_one(ctx, l, j)?;
             }
+            ctx.record_hint(hint);
             return emit_op_with_immediates(ctx, op, &l[..imm_end], 1);
         }
         _ => {}
@@ -3060,6 +3379,7 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     for j in imm_end..l.len() {
         emit_one(ctx, l, j)?;
     }
+    ctx.record_hint(hint);
     // `br_table`'s label vector is variable-length, so it cannot go through
     // `emit_op_with_immediates` — which is what silently dropped it here before.
     if op == O::BrTable {
@@ -3231,6 +3551,7 @@ fn emit_call_indirect(ctx: &mut Ctx, l: &[Sexpr], start: usize, folded: bool, op
         for k in j..l.len() {
             emit_one(ctx, l, k)?;
         }
+        ctx.record_own_hint();
         j = l.len();
     }
     ctx.out.push(opcode);
@@ -3246,10 +3567,7 @@ fn emit_folded_block(ctx: &mut Ctx, kw: &str, l: &[Sexpr]) -> Result<()> {
     let bt = parse_block_type(ctx, l, &mut j)?;
     ctx.out.push(op);
     emit_block_type(ctx, bt)?;
-    if ctx.labels.len() >= MAX_CTRL_DEPTH {
-        return Err(Error::NestingTooDeep);
-    }
-    ctx.labels.push(label);
+    ctx.open_label(label, &l[0])?;
     emit_seq(ctx, &l[j..])?;
     ctx.labels.pop();
     ctx.out.push(0x0b);
@@ -3311,10 +3629,7 @@ fn emit_try_table(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     // 🎓 Three components agreeing is not evidence when all three learned it from each other;
     // only an outside reader can tell a convention from a bug.
     emit_catch_clauses(ctx, l, &mut j)?;
-    if ctx.labels.len() >= MAX_CTRL_DEPTH {
-        return Err(Error::NestingTooDeep);
-    }
-    ctx.labels.push(label);
+    ctx.open_label(label, &l[0])?;
     emit_seq(ctx, &l[j..])?;
     ctx.out.push(0x0b);
     ctx.labels.pop();
@@ -3341,10 +3656,7 @@ fn emit_folded_try(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
 
     ctx.out.push(0x06); // try
     emit_block_type(ctx, bt)?;
-    if ctx.labels.len() >= MAX_CTRL_DEPTH {
-        return Err(Error::NestingTooDeep);
-    }
-    ctx.labels.push(label);
+    ctx.open_label(label, &l[0])?;
     emit_seq(ctx, &do_form[1..])?;
 
     // `(delegate $l)` forwards an exception to an enclosing try instead of running local
@@ -3391,7 +3703,7 @@ fn emit_folded_try(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     Ok(())
 }
 
-fn emit_folded_if(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
+fn emit_folded_if(ctx: &mut Ctx, l: &[Sexpr], hint: Option<u8>) -> Result<()> {
     let mut j = 1;
     let label = opt_name(l, &mut j);
     let bt = parse_block_type(ctx, l, &mut j)?;
@@ -3404,12 +3716,10 @@ fn emit_folded_if(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     for k in j..then_at {
         emit_one(ctx, l, k)?;
     }
+    ctx.record_hint(hint);
     ctx.out.push(0x04);
     emit_block_type(ctx, bt)?;
-    if ctx.labels.len() >= MAX_CTRL_DEPTH {
-        return Err(Error::NestingTooDeep);
-    }
-    ctx.labels.push(label);
+    ctx.open_label(label, &l[0])?;
     emit_seq(ctx, &want_list(&l[then_at])?[1..])?;
     if let Some(els) = l.get(then_at + 1).filter(|s| eq_kw(s, "else")) {
         ctx.out.push(0x05);
@@ -3437,10 +3747,7 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             let bt = parse_block_type(ctx, items, &mut j)?;
             ctx.out.push(op as u8);
             emit_block_type(ctx, bt)?;
-            if ctx.labels.len() >= MAX_CTRL_DEPTH {
-                return Err(Error::NestingTooDeep);
-            }
-            ctx.labels.push(label);
+            ctx.open_label(label, &items[i])?;
             Ok(j)
         }
         O::TryLegacy => {
@@ -3450,10 +3757,7 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             let bt = parse_block_type(ctx, items, &mut j)?;
             ctx.out.push(0x06);
             emit_block_type(ctx, bt)?;
-            if ctx.labels.len() >= MAX_CTRL_DEPTH {
-                return Err(Error::NestingTooDeep);
-            }
-            ctx.labels.push(label);
+            ctx.open_label(label, &items[i])?;
             ctx.flat_tries.push(FlatTry { depth: ctx.labels.len(), phase: TryPhase::Body });
             Ok(j)
         }
@@ -3489,10 +3793,7 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             ctx.out.push(0x1f);
             emit_block_type(ctx, bt)?;
             emit_catch_clauses(ctx, items, &mut j)?;
-            if ctx.labels.len() >= MAX_CTRL_DEPTH {
-                return Err(Error::NestingTooDeep);
-            }
-            ctx.labels.push(label);
+            ctx.open_label(label, &items[i])?;
             Ok(j)
         }
         // §6.5.2: `else` and `end` may REPEAT the enclosing block's label — `(block $l … end $l)`.
@@ -4548,6 +4849,7 @@ fn emit_simd(
         while j < items.len() {
             j = emit_one(ctx, items, j)?;
         }
+        ctx.record_own_hint();
     }
     ctx.out.push(0xfd);
     uleb(&mut ctx.out, u64::from(sub));
@@ -4582,6 +4884,7 @@ fn emit_atomic(
             while j < items.len() {
                 j = emit_one(ctx, items, j)?;
             }
+            ctx.record_own_hint();
         }
         ctx.out.push(0xfe);
         uleb(&mut ctx.out, u64::from(sub));
@@ -4593,6 +4896,7 @@ fn emit_atomic(
         while j < items.len() {
             j = emit_one(ctx, items, j)?;
         }
+        ctx.record_own_hint();
     }
     ctx.out.push(0xfe);
     uleb(&mut ctx.out, u64::from(sub));
@@ -4856,6 +5160,35 @@ mod tests {
         assemble(src.as_bytes())
     }
 
+    /// [`asm`] without the `name` section — for tests comparing a `$named` spelling with a
+    /// numbered one, which since 2026-09-19 differ in exactly that section and nowhere else.
+    fn asm_unnamed(src: &str) -> Result<Vec<u8>> {
+        let m = asm(src)?;
+        let mut out = m[..8].to_vec();
+        let mut p = 8;
+        while p < m.len() {
+            let start = p;
+            let id = m[p];
+            p += 1;
+            let (mut len, mut shift) = (0usize, 0);
+            loop {
+                let b = m[p];
+                p += 1;
+                len |= usize::from(b & 0x7f) << shift;
+                shift += 7;
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            let is_name = id == 0 && m.get(p..p + 5) == Some(&b"\x04name"[..]);
+            if !is_name {
+                out.extend_from_slice(&m[start..p + len]);
+            }
+            p += len;
+        }
+        Ok(out)
+    }
+
     #[test]
     fn assembles_the_module_binary_form() {
         let m = asm(r#"(module binary "\00asm\01\00\00\00")"#).unwrap();
@@ -4866,13 +5199,13 @@ mod tests {
     /// form the omission must not make the assembler eat the next instruction's atoms.
     #[test]
     fn assembles_the_table_index_shorthands() {
-        let bare = asm(
+        let bare = asm_unnamed(
             r#"(module (table 3 funcref) (elem $e funcref (ref.null func))
                  (func (table.copy (i32.const 0) (i32.const 1) (i32.const 1))
                        (table.init $e (i32.const 0) (i32.const 0) (i32.const 1))))"#,
         )
         .unwrap();
-        let explicit = asm(
+        let explicit = asm_unnamed(
             r#"(module (table $t 3 funcref) (elem $e funcref (ref.null func))
                  (func (table.copy $t $t (i32.const 0) (i32.const 1) (i32.const 1))
                        (table.init $t $e (i32.const 0) (i32.const 0) (i32.const 1))))"#,
@@ -5369,7 +5702,8 @@ mod tests {
               (i32.mul (local.get $x) (i32.const 3))))"#;
         let numbered = r#"(module (func (export "f") (param i32) (result i32)
               (i32.mul (local.get 0) (i32.const 3))))"#;
-        assert_eq!(asm(named).unwrap(), asm(numbered).unwrap());
+        assert_eq!(asm_unnamed(named).unwrap(), asm_unnamed(numbered).unwrap());
+        assert_ne!(asm(named).unwrap(), asm(numbered).unwrap(), "only `named` has a name section");
     }
 
     #[test]
@@ -7274,6 +7608,97 @@ mod emitter_coverage_tests {
         ] {
             let m = assemble(src.as_bytes()).unwrap_or_else(|e| panic!("{src} must assemble: {e:?}"));
             crate::module::decode(&m).unwrap_or_else(|e| panic!("{src} must decode: {e:?}"));
+        }
+    }
+
+    // --- custom annotations (2026-09-19) ---------------------------------------------------
+    //
+    // Each expected module below is wasm-tools 1.259's output for the same source, BYTE FOR
+    // BYTE — for these three, wasmrt's encoding of everything else coincides with it, so the
+    // whole module can be compared rather than a section. The corpus-scale check, which cannot
+    // compare whole modules, is `scripts/custom-sections-diff.py`.
+
+    fn asm(src: &str) -> Result<Vec<u8>> {
+        assemble(src.as_bytes())
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        s.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
+    }
+
+    /// `$id`s reach the name section, as wasm-tools writes them by default: module (0),
+    /// function (1) and local (2) subsections here.
+    #[test]
+    fn ids_are_written_to_the_name_section() {
+        assert_eq!(
+            asm(r"(module $M (func $f (param $p i32)))").unwrap(),
+            hex("00 61 73 6d 01 00 00 00 01 05 01 60 01 7f 00 03 02 01 00 0a 04 01 02 00 0b \
+                 00 17 04 6e 61 6d 65 00 02 01 4d 01 04 01 00 01 66 02 06 01 00 01 00 01 70")
+        );
+    }
+
+    /// A branch hint lands in `metadata.code.branch_hint`, just before `code`, at the offset
+    /// of its instruction counted from the start of the body (locals included): the `if` at 5
+    /// and the flat `br_if` at 10.
+    #[test]
+    fn branch_hints_are_emitted_at_their_instruction() {
+        assert_eq!(
+            asm(r#"(module (func (local i32)
+                     (@metadata.code.branch_hint "\01") (if (i32.const 1) (then))
+                     i32.const 0 (@metadata.code.branch_hint "\00") br_if 0))"#)
+            .unwrap(),
+            hex("00 61 73 6d 01 00 00 00 01 04 01 60 00 00 03 02 01 00 00 23 19 6d 65 74 61 64 \
+                 61 74 61 2e 63 6f 64 65 2e 62 72 61 6e 63 68 5f 68 69 6e 74 01 00 02 05 01 01 \
+                 0a 01 00 0a 0f 01 0d 01 01 7f 41 01 04 40 0b 41 00 0d 00 0b")
+        );
+    }
+
+    /// `@custom` lands at its slot, and the slot — not the source order — decides: `b` is
+    /// written first but belongs after `func`, `a` before it.
+    #[test]
+    fn custom_sections_are_placed_by_slot() {
+        assert_eq!(
+            asm(r#"(module (@custom "b" (after func) "2") (@custom "a" (before func) "1") (func))"#)
+                .unwrap(),
+            hex("00 61 73 6d 01 00 00 00 01 04 01 60 00 00 00 03 01 61 31 03 02 01 00 00 03 01 \
+                 62 32 0a 04 01 02 00 0b")
+        );
+    }
+
+    /// Every malformed or misplaced annotation REFUSES the module — what wasm-tools does for
+    /// each of these — and names the rule, worded as the spec suite words it. A hint the
+    /// emitter never reaches (before an immediate) is refused too rather than dropped.
+    #[test]
+    fn a_malformed_or_misplaced_annotation_refuses_the_module() {
+        for (src, why) in [
+            (r"(module (@custom))", "@custom annotation: missing section name"),
+            (r#"(module (@custom "\df"))"#, "@custom annotation: malformed UTF-8 encoding"),
+            (r#"(module (@custom "a" here))"#, "@custom annotation: unexpected token"),
+            (r#"(module (@custom "a" (type)))"#, "@custom annotation: malformed placement"),
+            (r#"(module (@custom "a" (before types)))"#, "@custom annotation: malformed section kind"),
+            (r#"(module (@custom "a" (before datacount)))"#, "@custom annotation: malformed section kind"),
+            (r#"(module (func (@custom "a")))"#, "misplaced @custom annotation"),
+            (r#"(module (@name "A") (@name "B"))"#, "@name annotation: multiple module"),
+            (r#"(module (func) (@name "M"))"#, "misplaced @name annotation"),
+            (r#"(module (type (struct (field $x (@name "X") i32))))"#, "misplaced @name annotation"),
+            (r#"(module (@metadata.code.branch_hint "\01") (func))"#,
+             "@metadata.code.branch_hint annotation: not in a function"),
+            (r#"(module (func (@metadata.code.branch_hint "\02") (if (i32.const 0) (then))))"#,
+             "@metadata.code.branch_hint annotation: invalid value"),
+            (r#"(module (func nop (@metadata.code.branch_hint "\01")))"#,
+             "@metadata.code.branch_hint annotation: must precede an instruction"),
+            (r#"(module (func i32.const (@metadata.code.branch_hint "\01") 0 drop))"#,
+             "@metadata.code.branch_hint annotation: must precede an instruction"),
+        ] {
+            assert_eq!(asm(src).unwrap_err(), Error::Annotation(why), "{src}");
+        }
+        // Accepted, as wasm-tools accepts them: an unknown annotation anywhere, and a hint in a
+        // constant expression (dropped there, as wasm-tools drops it).
+        for src in [
+            r"(module (@foo bar) (func (@baz) nop))",
+            r#"(module (global i32 (@metadata.code.branch_hint "\01") (i32.const 0)))"#,
+        ] {
+            asm(src).unwrap_or_else(|e| panic!("{src} must assemble: {e:?}"));
         }
     }
 }

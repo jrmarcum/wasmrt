@@ -8544,6 +8544,10 @@ mod backtrace_tests {
     }
 
     /// Names come from the name section when there is one.
+    ///
+    /// ⚠️ This asserted `None` until 2026-09-19, with the comment "the assembler emits no name
+    /// section" — a test pinning a GAP. The assembler now writes the `$id`s, as wasm-tools does,
+    /// so a function the source named is named in its own trap.
     #[test]
     fn frames_resolve_to_names_when_the_module_has_them() {
         let (mut store, id) = store_with(
@@ -8552,7 +8556,13 @@ mod backtrace_tests {
         let boom = func_index(&store, id, "boom");
         let _ = store.invoke_index(id, boom, &[]);
         let frame = store.backtrace()[0];
-        // The assembler emits no name section, so this must report None rather than guess.
+        assert_eq!(store.frame_name(&frame), Some(&b"boom"[..]));
+
+        // No `$id`, no name — reported as absent rather than guessed.
+        let (mut store, id) = store_with(br#"(module (func (export "boom") (unreachable)))"#);
+        let boom = func_index(&store, id, "boom");
+        let _ = store.invoke_index(id, boom, &[]);
+        let frame = store.backtrace()[0];
         assert_eq!(store.frame_name(&frame), None);
     }
 }

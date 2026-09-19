@@ -753,6 +753,15 @@ succeeds. The oracle monitor reported `tests: GREEN` regardless of what the buil
 underwrote every parity claim in the port. **Verify that a gate fails when it should**, by breaking the
 thing it guards.
 
+### 4.1a A comparison gate's "agree" must count only what it COMPARED
+
+`scripts/custom-sections-diff.py` (2026-09-19) scored a file both tools refused as agreement — reasonable
+for a corpus with known-bad files, and fatal for a probe: **two of my own probes were malformed, both
+tools refused them, and the gate reported "7/7 agree" having compared no bytes at all**. The headline
+now reads *"N compared byte-for-byte and agree, M refused by both, K differ"*. 🎓 An outcome that does
+not exercise the property is not a pass, whatever the ratio says — the same shape as a skip folded into
+a pass (§5.5).
+
 ### 4.2 Mutation-verify any check that matters
 
 Delete the check, confirm the test fails, restore. Done for: the C-ABI store-tag check, `Op::MemorySize`
