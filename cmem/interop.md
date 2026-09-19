@@ -464,7 +464,7 @@ before anything executes**:
 🚨 **TIMING — READ BEFORE MIRRORING FROM wazmrt.** The handoff reached wazmrt BEFORE this narrowing, and
 wazmrt folded the WIDE text in as **CONTRACT VERSION 11** (with §2.5 as v12 and the §2.3m annex as v13).
 Seen 2026-09-19 in their tree, **uncommitted and in flight**, so their v11 §2.4a still says 
-must be written . ⚠️ **The narrowing below post-dates their fold-in and is the owner’s
+must be written . ✅ **RELAYED — the owner passed the narrowing on the same day and wazmrt is adjusting** (owner, 2026-09-19), so this loop is closing on their side. ⚠️ **The narrowing below post-dates their fold-in and is the owner’s
 current decision** — it has to reach them before they implement the wide rule in their CLI. 🔒 wasmrt does
 not mirror their v11–v13 yet: the file is mid-edit over there, and *reconcile against code that has
 stopped moving* (§1d). Mirror after they commit AND adopt the narrowing.

@@ -266,7 +266,7 @@ guards are mutation-verified (each mutation confirmed applied before its test wa
 The owner relayed the handoff, and wazmrt adopted all three items the same hour: **v11 §2.4a**, **v12 §2.5**,
 **v13** the §2.3m annex + the Z1 row (seen in their tree, **uncommitted**). ⚠️ **Their v11 is the WIDE rule** —
 the owner narrowed it minutes later (single dash after the path = the guest’s), and that narrowing has NOT
-reached them. **Next coordination step:** relay the narrowing, then mirror their v11–v13 **after they commit**
+reached them. ✅ **The owner relayed the narrowing the same day and wazmrt is adjusting to it.** **Next coordination step:** mirror their v11–v13 **after they commit**
 (§1d: reconcile against code that has stopped moving). Our copy stays at v10 + unnumbered owner decisions
 until then; the mismatch is a normal in-flight state, not an error.
 
