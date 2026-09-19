@@ -27,15 +27,55 @@ pub enum Sexpr {
     Atom(String),
     /// A string literal, decoded to its byte values (escapes resolved).
     Str(Vec<u8>),
-    List(Vec<Sexpr>),
+    /// A list: its items, and the [`Annot`]ations written between them.
+    ///
+    /// The annotations ride BESIDE the items rather than among them, so every positional
+    /// reader of a form (`nth(items, 1)`, the `$id` slot, the type-use clause order) sees
+    /// exactly what it saw when annotations were thrown away, and only code that asks for
+    /// them with [`Sexpr::annotations`] is affected.
+    List(Vec<Sexpr>, Vec<Annot>),
+}
+
+/// The annotation ids wasmrt ACTS on. Every other `(@id …)` is ignored, which is what the
+/// annotations proposal asks of a tool that does not understand one (and what wasm-tools does).
+pub const KNOWN_ANNOTATIONS: [&str; 3] = ["custom", "name", "metadata.code.branch_hint"];
+
+/// A recognised annotation — one of [`KNOWN_ANNOTATIONS`] — kept with its position.
+///
+/// ⚠️ These were discarded as trivia until 2026-09-19, so `(@custom …)`, `(@name …)` and branch
+/// hints assembled to a module WITHOUT the sections the text asked for, and malformed ones were
+/// accepted — both where wasm-tools emits the section or refuses the module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Annot {
+    /// Index, in the enclosing list, of the item this annotation PRECEDES (`items.len()` when it
+    /// is the last thing in the list). Placement is the whole meaning of `@name` and a hint.
+    pub before: usize,
+    pub id: String,
+    /// The body, lexed as ordinary values.
+    pub body: Vec<Sexpr>,
 }
 
 impl Sexpr {
+    /// A list with no annotations — the form every synthesized list takes.
+    #[must_use]
+    pub fn list(items: Vec<Sexpr>) -> Sexpr {
+        Sexpr::List(items, Vec::new())
+    }
+
+    /// For a list, the recognised annotations written inside it; empty for anything else.
+    #[must_use]
+    pub fn annotations(&self) -> &[Annot] {
+        match self {
+            Sexpr::List(_, a) => a,
+            _ => &[],
+        }
+    }
+
     /// For a list, its leading atom (the "keyword"), else `None`.
     #[must_use]
     pub fn keyword(&self) -> Option<&str> {
         match self {
-            Sexpr::List(items) => match items.first() {
+            Sexpr::List(items, _) => match items.first() {
                 Some(Sexpr::Atom(a)) => Some(a),
                 _ => None,
             },
@@ -62,7 +102,7 @@ impl Sexpr {
     #[must_use]
     pub fn as_list(&self) -> Option<&[Sexpr]> {
         match self {
-            Sexpr::List(l) => Some(l),
+            Sexpr::List(l, _) => Some(l),
             _ => None,
         }
     }
@@ -184,18 +224,29 @@ type Result<T> = core::result::Result<T, ParseError>;
 /// Returns a [`ParseError`] on malformed input (unterminated list/string, bad escape,
 /// excessive nesting, or a stray character).
 pub fn parse_all(src: &[u8]) -> Result<Vec<Sexpr>> {
+    parse_all_annotated(src).map(|(forms, _)| forms)
+}
+
+/// [`parse_all`], also returning the recognised annotations written at the TOP level, each
+/// tagged with the index of the top-level form it precedes — which a script's **inline module**
+/// (bare fields with the `(module …)` wrapper left off) needs, since its fields ARE top level.
+///
+/// # Errors
+/// As [`parse_all`].
+pub fn parse_all_annotated(src: &[u8]) -> Result<(Vec<Sexpr>, Vec<Annot>)> {
     let mut p = Parser {
         src,
         pos: 0,
         depth: 0,
     };
     let mut forms = Vec::new();
-    p.skip_trivia()?;
+    let mut annots = Vec::new();
+    p.skip_trivia_into(Some(&mut annots), 0)?;
     while p.pos < src.len() {
         forms.push(p.parse_value()?);
-        p.skip_trivia()?;
+        p.skip_trivia_into(Some(&mut annots), forms.len())?;
     }
-    Ok(forms)
+    Ok((forms, annots))
 }
 
 struct Parser<'a> {
@@ -217,8 +268,45 @@ impl Parser<'_> {
     }
 
     fn skip_trivia(&mut self) -> Result<()> {
+        self.skip_trivia_into(None, 0)
+    }
+
+    /// Skip trivia; a recognised annotation met on the way is parsed into `into`, tagged as
+    /// preceding item `before`. With `into` absent (the top level of a script) every annotation
+    /// is ignored.
+    fn skip_trivia_into(&mut self, mut into: Option<&mut Vec<Annot>>, before: usize) -> Result<()> {
         while self.pos < self.src.len() {
-            let c = self.src[self.pos];
+            if self.peek(0) == b'(' && self.peek(1) == b'@' {
+                if let Some(v) = into.as_deref_mut() {
+                    let mark = self.pos;
+                    self.pos += 2;
+                    let id = self.read_annotation_id()?;
+                    if KNOWN_ANNOTATIONS.contains(&id.as_str()) {
+                        self.depth += 1;
+                        if self.depth > MAX_DEPTH {
+                            return Err(self.err(ParseErrorKind::NestingTooDeep));
+                        }
+                        // The body is ordinary values — a nested annotation inside one has no
+                        // meaning in any proposal, so it is dropped with the body's own list.
+                        let (body, _) = self.parse_items()?;
+                        self.depth -= 1;
+                        v.push(Annot { before, id, body });
+                        continue;
+                    }
+                    self.pos = mark;
+                }
+            }
+            if !self.skip_one_trivia()? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Consume one piece of trivia; `false` when the next byte begins a value.
+    fn skip_one_trivia(&mut self) -> Result<bool> {
+        let c = self.src[self.pos];
+        {
             if matches!(c, b' ' | b'\t' | b'\r' | b'\n') {
                 self.pos += 1;
             } else if c == b';' && self.peek(1) == b';' {
@@ -243,10 +331,10 @@ impl Parser<'_> {
             } else if c == b'(' && self.peek(1) == b'@' {
                 self.skip_annotation()?;
             } else {
-                break;
+                return Ok(false);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn parse_value(&mut self) -> Result<Sexpr> {
@@ -312,9 +400,16 @@ impl Parser<'_> {
             return Err(self.err(ParseErrorKind::NestingTooDeep));
         }
         self.pos += 1; // consume '('
+        // ⚠️ The loop is written out here rather than calling `parse_items`, and that is
+        // load-bearing: the recursion for nested lists is `parse_list → parse_value →
+        // parse_list`, and one extra frame per level took a `MAX_DEPTH`-deep paren bomb from
+        // "refused" to a STACK OVERFLOW (caught by `caps_nesting_depth` in a debug build) —
+        // a host-process kill under `panic = "abort"`. The cap is only a guard while every
+        // level fits.
         let mut items = Vec::new();
+        let mut annots = Vec::new();
         loop {
-            self.skip_trivia()?;
+            self.skip_trivia_into(Some(&mut annots), items.len())?;
             if self.pos >= self.src.len() {
                 return Err(self.err(ParseErrorKind::UnterminatedList));
             }
@@ -325,7 +420,27 @@ impl Parser<'_> {
             items.push(self.parse_value()?);
         }
         self.depth -= 1;
-        Ok(Sexpr::List(items))
+        Ok(Sexpr::List(items, annots))
+    }
+
+    /// The items of an ANNOTATION BODY up to and including its `)`. Kept apart from
+    /// `parse_list` so that ordinary nesting pays no extra frame (see there); a body's own
+    /// nesting is depth-counted by its caller and pinned by `caps_annotation_nesting_depth`.
+    fn parse_items(&mut self) -> Result<(Vec<Sexpr>, Vec<Annot>)> {
+        let mut items = Vec::new();
+        let mut annots = Vec::new();
+        loop {
+            self.skip_trivia_into(Some(&mut annots), items.len())?;
+            if self.pos >= self.src.len() {
+                return Err(self.err(ParseErrorKind::UnterminatedList));
+            }
+            if self.src[self.pos] == b')' {
+                self.pos += 1;
+                break;
+            }
+            items.push(self.parse_value()?);
+        }
+        Ok((items, annots))
     }
 
     /// Consume an annotation's **id**, which must follow `@` with nothing in between.
@@ -341,23 +456,22 @@ impl Parser<'_> {
     /// a run of `idchar`, or a quoted **name** — which still has to be non-empty and still has to
     /// be a name, so `(@"")`, `(@"<raw newline>")` and `(@"\ef")` are all refused, each by the
     /// rule that already governs the equivalent `$`-identifier.
-    fn read_annotation_id(&mut self) -> Result<()> {
+    fn read_annotation_id(&mut self) -> Result<String> {
         match self.src.get(self.pos) {
             Some(b'"') => {
                 let s = self.parse_string()?;
                 if s.is_empty() {
                     return Err(self.err(ParseErrorKind::EmptyAnnotationId));
                 }
-                if core::str::from_utf8(&s).is_err() {
-                    return Err(self.err(ParseErrorKind::MalformedUtf8));
-                }
-                Ok(())
+                String::from_utf8(s).map_err(|_| self.err(ParseErrorKind::MalformedUtf8))
             }
             Some(&c) if is_idchar(c) => {
+                let start = self.pos;
                 while self.src.get(self.pos).is_some_and(|&c| is_idchar(c)) {
                     self.pos += 1;
                 }
-                Ok(())
+                // `idchar` is ASCII by construction.
+                Ok(String::from_utf8(self.src[start..self.pos].to_vec()).unwrap_or_default())
             }
             // Whitespace, `(`, `)`, end of input — the id is missing. ⚠️ A *space* is the
             // interesting one: `(@ a)` looks like an annotation named `a` and is not one.
@@ -619,7 +733,7 @@ mod tests {
     #[test]
     fn a_quoted_identifier_is_a_single_token() {
         let v = parse(r#"(func $"a b" nop)"#).expect("quoted identifier parses");
-        let Sexpr::List(items) = &v[0] else {
+        let Sexpr::List(items, _) = &v[0] else {
             panic!("expected a list")
         };
         assert_eq!(items[1], Sexpr::Atom(String::from("$a b")));
@@ -634,7 +748,7 @@ mod tests {
     #[test]
     fn annotations_are_skipped_as_trivia() {
         let v = parse(r#"(module (@custom "x") (func (@a 1) nop))"#).expect("parses");
-        let Sexpr::List(items) = &v[0] else {
+        let Sexpr::List(items, _) = &v[0] else {
             panic!("expected a list")
         };
         assert_eq!(items.len(), 2, "the annotation must not become an item");
@@ -648,6 +762,32 @@ mod tests {
         ] {
             assert!(parse(src).is_ok(), "should skip `{src}`");
         }
+    }
+
+    /// A RECOGNISED annotation is kept — beside the items, never among them — tagged with the
+    /// index of the item it precedes. An unrecognised one is still ignored.
+    #[test]
+    fn known_annotations_are_kept_beside_the_items() {
+        let v = parse(r#"(module (@custom "x" (after func) "d") (func $f (@name "F") (@a 1) nop) (@custom "y"))"#)
+            .expect("parses");
+        let items = v[0].as_list().unwrap();
+        assert_eq!(items.len(), 2, "annotations must not become items");
+        let a = v[0].annotations();
+        assert_eq!(a.len(), 2);
+        assert_eq!((a[0].id.as_str(), a[0].before), ("custom", 1));
+        assert_eq!(a[0].body.len(), 3);
+        assert_eq!((a[1].id.as_str(), a[1].before), ("custom", 2), "trailing = items.len()");
+        let func = &items[1];
+        assert_eq!(func.as_list().unwrap().len(), 3, "`func $f nop`");
+        let fa = func.annotations();
+        assert_eq!(fa.len(), 1, "`@a` is unknown and ignored");
+        assert_eq!((fa[0].id.as_str(), fa[0].before), ("name", 2));
+        assert_eq!(fa[0].body, [Sexpr::Str(b"F".to_vec())]);
+
+        // Top level: kept by the annotated entry point, ignored by the plain one.
+        let (forms, top) = parse_all_annotated(br#"(func) (@custom "z")"#).unwrap();
+        assert_eq!((forms.len(), top.len(), top[0].before), (1, 1, 1));
+        assert!(parse_all(br#"(@custom "z")"#).unwrap().is_empty());
     }
 
     #[test]
@@ -733,6 +873,21 @@ mod tests {
             parse(&src).unwrap_err().kind,
             ParseErrorKind::NestingTooDeep
         );
+    }
+
+    /// Recognised annotations are PARSED now, and their bodies recurse through more frames per
+    /// level than a plain list — so the bomb is re-run through every path that can nest: a
+    /// chain of annotations, annotations alternating with lists, and lists inside a body.
+    #[test]
+    fn caps_annotation_nesting_depth() {
+        for unit in ["(@custom ", "((@name ", "(@metadata.code.branch_hint ("] {
+            let src = alloc::format!("(module {}", unit.repeat(MAX_DEPTH + 5));
+            assert_eq!(
+                parse(&src).unwrap_err().kind,
+                ParseErrorKind::NestingTooDeep,
+                "{unit}"
+            );
+        }
     }
 
     #[test]

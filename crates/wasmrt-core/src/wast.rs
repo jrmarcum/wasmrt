@@ -103,7 +103,7 @@ const MAX_RECORDED_SKIPS: usize = 512;
 /// Returns [`Error::Parse`] if the source is not well-formed s-expressions. Command-level
 /// problems are counted in the [`Summary`] rather than returned.
 pub fn run_script(src: &[u8]) -> Result<Summary, Error> {
-    let forms = sexpr::parse_all(src)?;
+    let (forms, top_annots) = sexpr::parse_all_annotated(src)?;
     let mut r = Runner::default();
     let mut i = 0;
     while i < forms.len() {
@@ -122,7 +122,14 @@ pub fn run_script(src: &[u8]) -> Result<Summary, Error> {
             }
             let mut inline = alloc::vec![Sexpr::Atom(String::from("module"))];
             inline.extend_from_slice(&forms[start..i]);
-            r.command(&Sexpr::List(inline));
+            // Annotations between the fields belong to the module they sit in, shifted one
+            // place for the `module` keyword prepended above.
+            let annots = top_annots
+                .iter()
+                .filter(|a| (start..=i).contains(&a.before))
+                .map(|a| sexpr::Annot { before: a.before - start + 1, ..a.clone() })
+                .collect();
+            r.command(&Sexpr::List(inline, annots));
             continue;
         }
         r.command(&forms[i]);
@@ -946,7 +953,7 @@ fn render(form: &Sexpr) -> String {
     match form {
         Sexpr::Atom(a) => a.clone(),
         Sexpr::Str(b) => format!("\"{}\"", String::from_utf8_lossy(b)),
-        Sexpr::List(l) => {
+        Sexpr::List(l, _) => {
             let inner: Vec<String> = l.iter().map(render).collect();
             format!("({})", inner.join(" "))
         }

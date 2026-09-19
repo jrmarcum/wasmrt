@@ -1760,7 +1760,7 @@ fn skip_inline_clauses(items: &[Sexpr], j: &mut usize) {
 /// 2026-08-19, so `(memory i64 (data "…"))` assembled a module whose own data segment did not
 /// type-check — the shorthand produced an offset the memory could not accept.
 fn zero_offset_of(is64: bool) -> Vec<Sexpr> {
-    vec![Sexpr::List(vec![
+    vec![Sexpr::list(vec![
         Sexpr::Atom(if is64 { "i64.const" } else { "i32.const" }.to_string()),
         Sexpr::Atom("0".to_string()),
     ])]
@@ -2152,7 +2152,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
                 if s.as_list().is_some() {
                     vec![s.clone()]
                 } else {
-                    vec![Sexpr::List(vec![
+                    vec![Sexpr::list(vec![
                         Sexpr::Atom("ref.func".to_string()),
                         s.clone(),
                     ])]
@@ -2426,7 +2426,7 @@ fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
             entries.push(vec![s.clone()]);
             use_exprs = true;
         } else {
-            entries.push(vec![Sexpr::List(vec![
+            entries.push(vec![Sexpr::list(vec![
                 Sexpr::Atom("ref.func".to_string()),
                 s.clone(),
             ])]);
@@ -2975,7 +2975,7 @@ fn emit_seq(ctx: &mut Ctx, items: &[Sexpr]) -> Result<()> {
 /// next one.
 fn emit_one(ctx: &mut Ctx, items: &[Sexpr], i: usize) -> Result<usize> {
     match &items[i] {
-        Sexpr::List(l) => {
+        Sexpr::List(l, _) => {
             emit_folded(ctx, l)?;
             Ok(i + 1)
         }
