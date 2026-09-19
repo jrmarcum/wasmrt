@@ -50,6 +50,26 @@ fn summarize_exits_nonzero_on_an_invalid_module() {
     assert_eq!(code(&[p.to_str().unwrap()]), Some(1));
 }
 
+/// 🔒 `interop.md` §2.5 (owner, 2026-09-19 — Z3): the summary must never describe a module as valid
+/// unless it validated. The exit status and every validity claim in the output agree.
+#[test]
+fn the_summary_never_calls_an_invalid_module_valid() {
+    let p = write_temp("wasmrt_exit_z3.wat", INVALID);
+    let out = Command::new(env!("CARGO_BIN_EXE_wasmrt")).arg(&p).output().expect("spawn");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text.contains("validation FAILED"), "the verdict must be stated; got: {text}");
+    for line in text.lines() {
+        let l = line.to_ascii_lowercase();
+        let claims_valid = l.contains("validation ok") || (l.contains("valid") && !l.contains("invalid") && !l.contains("validation"));
+        assert!(!claims_valid, "a line claims validity for an invalid module: {line:?}");
+    }
+    // …and a VALID module says so, so the check above is not passing on silence.
+    let ok = write_temp("wasmrt_exit_z3_ok.wat", VALID);
+    let out = Command::new(env!("CARGO_BIN_EXE_wasmrt")).arg(&ok).output().expect("spawn");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("validation OK"));
+}
+
 #[test]
 fn no_arguments_is_a_usage_error() {
     assert_eq!(code(&[]), Some(1));

@@ -34,6 +34,10 @@ security checks are the same they are also swappable."*
 - **Performance and size.** These are what the two are *competing on*; aligning them would defeat the
   purpose. A contract row must never be justified by "the other one is faster".
 - **Conformance internals** — each project's own test harness, scoring and baselines.
+- **Output text** — wording, layout and summaries, **with the ONE exception the owner made on
+  2026-09-19: §2.5.** A validity claim a human reads must match the verdict. That is a
+  correctness property, not a matter of style, so it is in scope. Everything else a command prints
+  remains out of scope.
 
 ---
 
@@ -363,6 +367,7 @@ invocations of the other, which is the opposite of swappable.
 | a WASI guest's `proc_exit(n)` becomes the process exit status (`n & 0xff`) | ✅ **AGREED** — verified in both, 2026-08-19 |
 | success → 0, host-side failure (bad args, unreadable file, invalid module, refused by policy) → non-zero | ✅ **AGREED** |
 | **specific non-zero codes per failure kind** | ⬜ **UNVERIFIED** — neither has been compared; a script that branches on a specific code is not yet portable |
+| 🆕 **naming an export the module does not have is a failure** — non-zero, with a message naming it; never a silent fall-back to summarizing (Z1, §2.3m) | 🔒 **OWNER DECISION 2026-09-19** — recorded by wasmrt; ⏳ **awaiting fold-in by the pen-holder (wazmrt, regime A), who assigns its version number**. Owner: *"pass all three issues to the wazmrt team"*. It is a case of row 2 (a bad argument), stated separately because wazmrt breaks it: `wazmrt m.wasm nosuch` prints the summary and exits **0**. wasmrt's `run` already complies (rc 1, *"no exported function `nosuch`"*). ⚠️ **wasmrt's bare-path form still has F1** (`wasmrt m.wasm f` summarizes, rc 0). That is the same class on wasmrt's side, and it stays open under §2.1. |
 
 #### 🔬 2.3m — §2.3 MEASURED by running both binaries (wasmrt session, 2026-09-19) — 📎 ANNEX, offered for fold-in
 
@@ -411,7 +416,8 @@ fixing them is wazmrt's call in wazmrt's tree:
   goes to the guest). wasmrt refuses an unknown option in either position: rc 1, *"use `--` to pass it
   to the guest"*. ⚠️ **Not a simple fix on either side.** wazmrt's flags-after-path form cannot tell a
   mistyped host flag from a guest argument without `--`, and §2.4 already records why that is dangerous
-  (`… install --yes`). 🚦 **Needs a decision from the owner / pen-holder**, and possibly a §2.4 row.
+  (`… install --yes`). ✅ **DECIDED by the owner the same day → §2.4a**, which resolves the tension by
+  *position*: host-flag positions error, guest positions are never examined.
 * **Z3 — output text, out of scope (§0), recorded anyway.** wazmrt's summary header reads *"valid wasm
   v1, N section(s)"* for a module whose last line reports `validation: FAILED`. The exit code is right
   (1); the first line a human reads is not.
@@ -428,6 +434,81 @@ behaviour are now covered. wazmrt also accepts `.wat` on its summarize and call 
   before `--`" is **not** sufficient: the common WASI form has no `--` at all
   (`… prog.wasm install --yes`), so the guest's own arguments get searched and a `--yes` meant for the
   guest **silently disables verification**. wazmrt paid for this; wasmrt must not re-buy it.
+
+### 2.4a 🆕 Unknown flags — **an error, `unknown flag`** · 🔒 **OWNER DECISION 2026-09-19** — recorded by wasmrt; ⏳ **awaiting fold-in by the pen-holder (wazmrt, regime A), who assigns its version number**
+
+> Owner, 2026-09-19: *"I do want an 'unknown flag' rule in the contract that throws an 'unknown flag' error."*
+
+**The rule.** A flag-shaped argument (one beginning with `-`, other than `-` alone and the `--` marker)
+that appears in a **host-flag position** and is not a flag that command recognises **stops the run
+before anything executes**:
+
+* stderr contains the words **`unknown flag`** and names the argument;
+* the exit status is **1** (§2.3).
+
+**Host-flag positions** (checked):
+1. the **first argument**, apart from `-h`/`--help`/`-v`/`--version` (§2.4);
+2. **anything before the module path**;
+3. the **leading run of flags immediately after the module path**, which is wazmrt's flag position.
+   Both runtimes accept flags there under §2.2;
+4. **every argument** of a command that has no guest argv: summarize, `.wast`, and `wat`.
+
+**Guest positions** (never examined — the guest's argv, verbatim):
+* everything after an explicit **`--`**;
+* everything after the **first non-flag argument** that follows the module path. That is the export
+  name and its arguments (so `-1` stays a value), or a WASI program's argv (so `prog.wasm install --yes`
+  is unaffected).
+
+⚠️ **The consequence to know about.** A guest's OWN short option placed *directly* after the path is
+now in a host position: `prog.wasm -la` → `unknown flag '-la'`, and it must be written
+`prog.wasm -- -la`. This is the rule working as intended, since a mistyped host flag there is exactly
+what used to vanish. The CLI help says so on wasmrt. **H7 is unchanged and complementary.** A **known**
+host flag stranded in a guest position still only *warns* (it may be the guest's own); an **unknown** one
+in a host position *errors*.
+
+| | wazmrt (measured 2026-09-19, 1.0.1) | wasmrt | status |
+| --- | --- | --- | --- |
+| first argument / before the path | rc 1, but reported as *"cannot read '--bogus'"* | ✅ `unknown flag` | ⚠️ **wazmrt: the wording** |
+| leading run after the path | **rc 0 — ignored / handed to the guest** | ✅ `unknown flag` | ⚠️⚠️ **wazmrt must adopt** |
+| `.wast` script flags | **rc 0 — ignored** | ✅ `unknown flag` | ⚠️⚠️ **wazmrt must adopt** |
+| guest positions (after `--`, after the first guest arg) | untouched | untouched | ✅ **AGREED** |
+
+wasmrt is pinned by `crates/wasmrt/tests/cli_unknown_flag.rs` (mutation-verified). Before the rule,
+**both** runtimes silently ignored an unknown flag in at least one host position.
+
+### 2.5 🆕 A validity claim in the output must match the verdict (Z3) · 🔒 **OWNER DECISION 2026-09-19** — recorded by wasmrt; ⏳ **awaiting fold-in by the pen-holder (wazmrt, regime A), who assigns its version number**
+
+> Owner, 2026-09-19: *"we also need a contract item for Z3"*.
+
+**The rule.** No line a command prints may describe a module as **valid** unless it validated. The
+exit status (§2.3), any verdict line, and any header or summary wording must **agree**. A summary that
+prints before validation finishes must use neutral wording ("WebAssembly module", "wasm v1", section
+counts), never "valid". **Only validity claims are in scope** (§0); the rest of the output text is not.
+
+| | wazmrt (measured 2026-09-19, 1.0.1) | wasmrt | status |
+| --- | --- | --- | --- |
+| summary of an INVALID module | ⚠️ header `…: valid wasm v1, 4 section(s)`, then `validation: FAILED …`, rc 1 | header `…: WebAssembly module (version 1)`, then `validation FAILED: …`, rc 1 | ⚠️ **wazmrt must adopt** (the header) |
+
+wasmrt is pinned by `cli_exit_codes.rs::the_summary_never_calls_an_invalid_module_valid`. That test
+**fails when wazmrt's header wording is injected into wasmrt's summary** (mutation-verified), so it
+checks exactly this.
+
+### 📬 2.5h — HANDOFF TO wazmrt (owner-directed, 2026-09-19)
+
+Owner: *"lets pass all three issues to the wazmrt team."* Passed **through this file**, because §1a
+forbids writing into wazmrt's tree. For wazmrt's own session to adopt in wazmrt's own commit:
+
+| # | issue | contract item | wazmrt action | verify by running |
+| --- | --- | --- | --- | --- |
+| **Z1** | an unmatched export name is silently ignored (rc 0) | §2.3, new row | fail with rc 1 and name the export, when the argument can only be an export name | `wazmrt m.wasm nosuch` → rc 1 |
+| **Z2** | unknown flags are ignored or misreported | **§2.4a** (owner decision) | `unknown flag`, rc 1, in every host-flag position | `wazmrt m.wasm --bogus`, `wazmrt --bogus m.wasm` and `wazmrt s.wast --bogus` → `unknown flag`, rc 1; `wazmrt m.wasm -- --bogus` → untouched |
+| **Z3** | the summary header says "valid" for an invalid module | **§2.5** (owner decision) | neutral header wording until validation has passed | `wazmrt invalid.wasm` → no line claims validity; rc 1 |
+
+⚠️ **Z1 needs care on wazmrt's side.** Its bare path runs `_start` when the module exports one, so a
+following word may be guest argv rather than an export name. The failure applies when the word **can
+only be** an export name: the module has no `_start`, or the word is in the export position of an
+explicit call form. How wazmrt draws that line is its design call; the observable requirement is only
+*"never silently succeed at something other than what was asked"*.
 
 ---
 
@@ -660,7 +741,9 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 | 5 | **When does wasmrt land the execution bound** (§3.7a) | until it does, swapping wasmrt in **silently removes** the protection — no error, the workload just never returns |
 | 6 | **Attribution of commit `7ce0dcd2` in the wasmrt repo** | wasmrt reports it committed **wazmrt's** §3.7a rewrite into its tree as if it were its own, before the collision was noticed. ⚠️ **wazmrt cannot fix this — §1a forbids writing to that tree**, and rewriting another repo's history is not an agent's call anyway. It is exactly the tracking-integrity problem the boundary was added to prevent, and it is now **behind** the rule rather than in front of it. Options: leave it with the collision documented in row 3b, or have the wasmrt session amend/annotate it **in its own tree** |
 | 7 | **Whether coordination should run in ONE session at a time** (§1c) | §1a removes the cross-tree risk by construction, but two sessions editing the *same* copy still resolve last-write-wins with nothing to detect it. wasmrt proposed the discipline; it costs nothing and closes the residual gap |
-| 4 | **Exit-code table** (§2.3) | only needed if scripts are expected to branch on specific codes |
+| 4 | **Exit-code table** (§2.3) | only needed if scripts are expected to branch on specific codes. 📎 *wasmrt measured (§2.3m): both already use 1 for every host failure and every trap, so this may close with no table.* |
+| ~~8~~ | ~~**Unknown flags**~~ (§2.4a) | ✅ **DECIDED by the owner 2026-09-19**: an error saying `unknown flag`, rc 1, in every host-flag position. wasmrt complies; wazmrt to adopt. |
+| ~~9~~ | ~~**Truthful validity claims in output (Z3)**~~ (§2.5) | ✅ **DECIDED by the owner 2026-09-19**: in scope as the one output-text exception. wasmrt complies; wazmrt to adopt. |
 
 ---
 
@@ -668,6 +751,7 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 
 | version | date | change |
 | --- | --- | --- |
+| **owner decisions** 🔒 | 2026-09-19 | *(Recorded by wasmrt; NOT a version number. Regime A: the pen-holder numbers them on fold-in.)* **§2.4a unknown-flag rule** and **§2.5 truthful validity claims** decided by the owner. **§2.3 gains a Z1 row.** **§0** carves §2.5 out of "output text is out of scope". **§2.5h hands Z1–Z3 to wazmrt** (owner: *"pass all three issues to the wazmrt team"*). wasmrt already complies with all three, pinned by `cli_unknown_flag.rs` and `cli_exit_codes.rs`. |
 | **annex** 📎 | 2026-09-19 | *(wasmrt contribution, NOT a version — offered for fold-in.)* 🔬 **§2.3 MEASURED by running both (§2.3m).** Copies byte-identical at v10 beforehand. **Row 2: wasmrt was in breach three times** (summarize of an invalid module, no arguments, `wast` on failures), all exiting 0 where wazmrt exits 1. **Fixed on wasmrt's side with no contract change**, pinned by `cli_exit_codes.rs`; an 18-row matrix now agrees throughout. **Row 3: both already use 1 for every host failure and every trap** → proposed promotion to ✅ AGREED, which closes §5 #4. **For wazmrt:** Z1, an unmatched export name is silently ignored with rc 0 (F1's mirror); Z2, unknown flags have no row and diverge (🚦 owner/pen-holder); Z3, the header says "valid" for an invalid module (text, out of scope). |
 | **annex** 📎 | 2026-08-19 | *(wasmrt contribution, NOT a version — wazmrt leads and holds the pen; offered for fold-in.)* |
 | *(annex detail)* | 2026-08-19 | 🔬 **§4 CHECK 5 RUN FOR THE FIRST TIME — the CLI rows verified by RUNNING both binaries, not by reading either** (§2.1m). wasmrt 0.9.0 vs wazmrt 1.0.0, same box. **Five findings.** ⚠⚠ **F1: the two “call an export” gaps fail in OPPOSITE directions** — `wasmrt add.wat add 2 3` exits **0** printing a summary and silently ignoring the export and its arguments, while `wazmrt run …` exits **1** and says why; same missing capability, and wasmrt's half is the silent-wrong-output one, so it outranks the other. **F2: the “summarize” row was marked ✅ AGREED and the output text is NOT identical** (behaviour and exit code do agree) — the word “identical” had been written from reading. 🆕 **F3: FLAG POSITION differs and had no row at all** — wazmrt's flags follow the module path, wasmrt's precede it, and ⚠⚠ **a trailing `--dir` under wasmrt is passed to the GUEST, so the sandbox is silently never granted.** 🔻 **F4: a CORRECTION — §2.2’s claim that a single-colon `--dir` “does not error, it preopens the wrong thing” is FALSE; measured, it fails loudly** (`errno 29`, rc=1). That claim had been carried as ⚠⚠ since v1 and was written from reading the code. **F5: `-v` output shape differs** (1 line vs 2). ⚠ Everything check 5 did not reach — the `.wast` row, `--ro-dir`, `--allow-symlink`, `--env`, the ceiling flags, `--`, and all of §2.3’s per-failure exit codes — stays ⬜ UNVERIFIED and **may not be quoted as agreed.** |

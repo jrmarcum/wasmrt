@@ -85,6 +85,12 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🔒 2026-09-19 — day 4, part 9: the unknown-flag rule and Z3, pinned (**535 tests**)
+
+`crates/wasmrt/tests/cli_unknown_flag.rs` — `interop.md` §2.4a: `unknown flag` + rc 1 in every host-flag
+position of every command, with guest positions untouched and `-1` still a value.
+`cli_exit_codes.rs::the_summary_never_calls_an_invalid_module_valid` — §2.5. Both mutation-verified.
+
 ### 🤝 2026-09-19 — day 4, part 8: the CLI exit status is the verdict (coordinated with wazmrt)
 
 `wasmrt <file>` exits **1** on an invalid module, and so do `wasmrt` with no arguments and `wasmrt wast`

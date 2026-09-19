@@ -199,7 +199,8 @@ era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
 (item 7, 2026-09-19 — three decoder defects, one more than logged). The CLI exit-code breach of the
 contract is closed too, **coordinated** (part 8; `interop.md` §2.3m). What stands between here and
 `1.0.0`: items 1–2 below (not ours to execute), then the `releasing.md` checklist (item 8). 🤝 **wazmrt
-has an unadopted annex to read** (§2.3m: Z1–Z3, and the row-3 promotion); **Z2 needs the owner.**
+has an unadopted annex and two OWNER DECISIONS to fold in** (§2.3m, §2.4a unknown flags, §2.5 truthful
+validity claims, and the §2.5h handoff of Z1–Z3). wasmrt complies with all of them already.
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -259,6 +260,29 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### 🔒 DAY 4, part 9 — two OWNER DECISIONS in the contract, and Z1–Z3 handed to wazmrt. `[x]`
+
+Owner: *"pass all three issues to the wazmrt team. I do want an 'unknown flag' rule in the contract that
+throws an 'unknown flag' error. we also need a contract item for Z3."* Recorded in our copy of `interop.md`
+as owner decisions with **no version number** (regime A: the pen-holder numbers them on fold-in):
+* **§2.4a, unknown flags.** A flag-shaped argument in a HOST-FLAG position that the command does not
+  recognise → `unknown flag`, rc 1. Host positions: the first argument, anything before the path, the
+  leading run after the path, and every argument of `wast`/`wat`/summarize. Guest positions (after `--`,
+  after the first non-flag argument following the path) are never examined. It resolves Z2's tension
+  **by position**. ⚠️ Consequence: `prog.wasm -la` now needs `prog.wasm -- -la`, and the help says so.
+* **§2.5, a validity claim in the output must match the verdict (Z3).** It is the one exception §0 now
+  carves out of "output text is out of scope".
+* **§2.3 gains a Z1 row**: naming an export the module lacks is a failure.
+* **§2.5h hands Z1–Z3 to wazmrt**, with the exact verification commands. It went through the contract
+  file; nothing was written into their tree.
+
+**wasmrt already complies with all three.** Measured before the rule, **both** runtimes silently ignored an
+unknown flag in some host position; wasmrt's did so after the path on summarize, in `wast` and in `wat`.
+Pinned by `crates/wasmrt/tests/cli_unknown_flag.rs` and a Z3 test in `cli_exit_codes.rs` (mutation-verified at
+6 sites; the Z3 test fails when wazmrt's own header wording is injected). **535 tests**, clippy clean.
+⚠️ Still open on wasmrt's side: **F1**. `wasmrt m.wasm f` summarizes and exits 0, the same class as Z1.
+It is tracked under §2.1's additive run modes.
 
 ##### 🤝 DAY 4, part 8 — `coordinate`: the exit-code row, and three breaches where one was logged. `[x]`
 

@@ -39,8 +39,50 @@ fn main() -> ExitCode {
         Some("wasi") => run_wasi_module(&args[2..]),
         Some("wat") => assemble_wat(&args[2..]),
         Some("wast") => run_wast(&args[2..]),
-        Some(path) => summarize(path),
+        Some(flag) if is_flag(flag) => unknown_flag(flag, false),
+        Some(path) => {
+            // Summarize recognises no flags, so one in the leading run after the path is unknown.
+            // (Trailing NON-flag arguments are still ignored here — that is `interop.md` F1, the
+            // wazmrt-spelled "call an export", and a separate open item.)
+            if let Some(f) = leading_flag(&args[2..]) {
+                return unknown_flag(f, false);
+            }
+            summarize(path)
+        }
     }
+}
+
+/// Does `a` have the SHAPE of a flag? `-` alone (stdin by convention) and `--` (end of host flags)
+/// are not flags.
+fn is_flag(a: &str) -> bool {
+    a.starts_with('-') && a != "-" && a != "--"
+}
+
+/// 🔒 **`interop.md` §2.4a — the UNKNOWN-FLAG rule (owner, 2026-09-19).** A flag-shaped argument in a
+/// HOST-FLAG position that this command does not recognise stops the run: stderr says `unknown flag`
+/// and names it, and the exit status is 1. Host-flag positions are everything before the module path,
+/// the leading run of flags immediately after it, and — for a command with no guest argv (`wat`,
+/// `wast`, summarize) — every argument. Guest positions (after `--`, or after the first non-flag
+/// argument that follows the path) are never examined.
+///
+/// Measured before this existed: an unknown flag was SILENTLY IGNORED after the path on summarize, in
+/// `wast` and in `wat`, and misreported as "cannot read `--x`" in front of a path. Both runtimes.
+fn unknown_flag(arg: &str, guest_hint: bool) -> ExitCode {
+    if guest_hint {
+        eprintln!("wasmrt: unknown flag `{arg}` (use `--` to pass it to the guest)");
+    } else {
+        eprintln!("wasmrt: unknown flag `{arg}`");
+    }
+    ExitCode::FAILURE
+}
+
+/// The first flag-shaped argument in the LEADING run of `args` (stopping at the first non-flag, or
+/// at `--`) — i.e. the first flag in a host-flag position after a module path.
+fn leading_flag(args: &[String]) -> Option<&str> {
+    args.iter()
+        .take_while(|a| a.starts_with('-') && *a != "-" && *a != "--")
+        .map(String::as_str)
+        .next()
 }
 
 /// One `--dir` / `--ro-dir` grant: the host directory, the name the guest sees, and
@@ -118,8 +160,9 @@ fn take_dir_flags(args: &[String]) -> Result<(Vec<Preopen>, bool, &[String]), St
             // ⚠️ An unrecognised `--flag` is an ERROR, not the module path. Falling through
             // made `wasmrt wasi --typo x.wasm` report "cannot read '--typo'", and — the half
             // that matters — let a misplaced restriction flag vanish without a word.
-            other if other.starts_with("--") => {
-                return Err(format!("unknown option `{other}` (use `--` to pass it to the guest)"));
+            // §2.4a: `unknown flag`, single- or double-dash.
+            other if is_flag(other) => {
+                return Err(format!("unknown flag `{other}` (use `--` to pass it to the guest)"));
             }
             _ => break,
         };
@@ -347,6 +390,18 @@ fn print_backtrace(inst: &interp::Instance) {
 
 /// `wasmrt wat <file.wat> [-o out.wasm]` — assemble text to a binary.
 fn assemble_wat(rest: &[String]) -> ExitCode {
+    // §2.4a: `wat` has no guest argv, so EVERY argument is in a host-flag position.
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "-o" {
+            i += 2;
+            continue;
+        }
+        if is_flag(&rest[i]) {
+            return unknown_flag(&rest[i], false);
+        }
+        i += 1;
+    }
     let Some(path) = rest.first() else {
         eprintln!("wasmrt: usage: wasmrt wat <file.wat> [-o <out.wasm>]");
         return ExitCode::FAILURE;
@@ -387,6 +442,10 @@ fn run_wast(rest: &[String]) -> ExitCode {
     if rest.is_empty() {
         eprintln!("wasmrt: usage: wasmrt wast <file.wast | directory>...");
         return ExitCode::FAILURE;
+    }
+    // §2.4a: `-v` is the only flag, and `wast` has no guest argv — any other flag is unknown.
+    if let Some(f) = rest.iter().find(|a| is_flag(a) && *a != "-v") {
+        return unknown_flag(f, false);
     }
     let verbose = rest.iter().any(|a| a == "-v");
     let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -550,12 +609,19 @@ fn print_help() {
            --allow-symlink             let the guest CREATE symlinks (off by default)\n\n\
          With no --dir, every path call returns BADF — there is no implicit cwd.\n\n\
          <file> is a `.wasm` binary or `.wat` text; text is assembled first, then validated\n\
-         and run exactly like a binary.",
+         and run exactly like a binary.\n\n\
+         An unrecognised flag is an error (`unknown flag`, exit 1). To hand a flag-like\n\
+         argument to the guest, put it after `--`: wasmrt wasi prog.wasm -- -la",
         wasmrt_core::VERSION
     );
 }
 
 fn run_export(rest: &[String]) -> ExitCode {
+    // §2.4a: `run` takes no flags, so a flag where the path or the function name goes is unknown.
+    // The function's ARGUMENTS are not checked — `-1` is a value there.
+    if let Some(f) = rest.iter().take(2).find(|a| is_flag(a)) {
+        return unknown_flag(f, false);
+    }
     let (path, func) = match (rest.first(), rest.get(1)) {
         (Some(p), Some(f)) => (p.as_str(), f.as_str()),
         _ => {

@@ -75,10 +75,11 @@ fn both_flag_positions_behave_identically() {
 #[test]
 fn an_unknown_leading_option_is_refused_not_treated_as_a_path() {
     let (ok, text) = run(&["wasi", "--typo", "x.wasm"]);
-    assert!(!ok, "an unknown option must fail");
+    assert!(!ok, "an unknown flag must fail");
+    // The wording is contract (`interop.md` §2.4a, owner 2026-09-19): `unknown flag`.
     assert!(
-        text.contains("unknown option"),
-        "must name it as an unknown OPTION, not as an unreadable file; got: {text}"
+        text.contains("unknown flag"),
+        "must name it as an unknown FLAG, not as an unreadable file; got: {text}"
     );
 }
 
