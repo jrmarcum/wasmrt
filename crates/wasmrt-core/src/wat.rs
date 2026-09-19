@@ -1178,6 +1178,8 @@ struct ModuleBuild {
     /// so `(sub (struct …))` with no supertype assembled as **final** — silently turning a valid
     /// hierarchy into an invalid one, the same class as element-segment form 4 rewriting a type.
     type_finals: Vec<bool>,
+    /// Each type's custom-descriptors `(describes $x)` / `(descriptor $y)`, index-aligned with `types`.
+    type_links: Vec<(Option<u32>, Option<u32>)>,
     /// Field names of each struct type, index-aligned with `types` (empty for non-structs),
     /// so `struct.get $T $field` can resolve a field by name — the form binaryen and
     /// hand-written GC .wat actually emit.
@@ -1318,7 +1320,8 @@ fn assemble_parts(module: &[Sexpr], annots: &[Annot]) -> Result<Vec<u8>> {
     }
     // Pre-pass B: the bodies, now that every type name resolves.
     for form in &type_forms {
-        parse_type_body(form, &b.type_names, &mut b.types, &mut b.supers, &mut b.type_finals, &mut b.field_names)?;
+        let links = parse_type_body(form, &b.type_names, &mut b.types, &mut b.supers, &mut b.type_finals, &mut b.field_names)?;
+        b.type_links.push(links);
     }
 
     // Pass 1: the remaining definitions, in source order.
@@ -1685,6 +1688,34 @@ fn field_is_import(kw: &str, items: &[Sexpr]) -> bool {
 ///
 /// A `(type …)` definition occupies its **own slot** even when an identical one already
 /// exists, so this pushes rather than interns — the declared index must match its position.
+/// custom-descriptors: `(describes $x)? (descriptor $y)?` from `list[*k..]`, in that order and each at
+/// most once — whatever follows is the composite type, so a repeated or reordered clause is left where
+/// the composite type must be and refused there ("unexpected token", `descriptors.wast`).
+///
+/// One reader for the two places the clauses stand: at the type level, and inside `(sub …)` after the
+/// supertypes.
+fn parse_type_links(
+    list: &[Sexpr],
+    k: &mut usize,
+    type_names: &[Option<String>],
+) -> Result<(Option<u32>, Option<u32>)> {
+    let clause = |kw: &str, k: &mut usize| -> Result<Option<u32>> {
+        match list.get(*k).filter(|s| s.keyword() == Some(kw)) {
+            Some(c) => {
+                let [_, x] = want_list(c)? else {
+                    return Err(Error::UnexpectedToken);
+                };
+                *k += 1;
+                Ok(Some(resolve_by_name(type_names, x)?))
+            }
+            None => Ok(None),
+        }
+    };
+    let describes = clause("describes", k)?;
+    let descriptor = clause("descriptor", k)?;
+    Ok((describes, descriptor))
+}
+
 fn parse_type_body(
     items: &[Sexpr],
     type_names: &[Option<String>],
@@ -1692,11 +1723,13 @@ fn parse_type_body(
     supers: &mut Vec<Option<u32>>,
     finals: &mut Vec<bool>,
     field_names: &mut Vec<Vec<Option<String>>>,
-) -> Result<()> {
+) -> Result<(Option<u32>, Option<u32>)> {
     let mut j = 1;
     if items.get(j).is_some_and(is_id) {
         j += 1;
     }
+    // The clauses may stand at the type level: `(type $a (descriptor $b) (struct))`.
+    let mut links = parse_type_links(items, &mut j, type_names)?;
     let mut l = want_list(nth(items, j)?)?;
     let mut super_ref = None;
 
@@ -1712,10 +1745,18 @@ fn parse_type_body(
         }
         while let Some(s) = l.get(k) {
             if s.as_list().is_some() {
-                break; // the composite type begins
+                break; // the clauses or the composite type begin
             }
             super_ref = Some(resolve_by_name(type_names, s)?);
             k += 1;
+        }
+        // …or inside `(sub …)`, after the supertypes — but not in both places.
+        let inner = parse_type_links(l, &mut k, type_names)?;
+        if inner != (None, None) {
+            if links != (None, None) {
+                return Err(Error::UnexpectedToken);
+            }
+            links = inner;
         }
         l = want_list(nth(l, k)?)?;
     }
@@ -1743,7 +1784,7 @@ fn parse_type_body(
     supers.push(super_ref);
     finals.push(is_final);
     field_names.push(names);
-    Ok(())
+    Ok(links)
 }
 
 /// No `$name` may repeat within one namespace (§6.3.5). `None` entries are unnamed and never
@@ -2898,6 +2939,17 @@ fn emit_module(
                         // Open with no supertype: an empty supertype vector, not an absent wrapper.
                         None => uleb(&mut c, 0),
                     }
+                }
+                // custom-descriptors: `0x4c describes` then `0x4d descriptor`, between the wrapper and
+                // the composite type — dropping either would change the type's IDENTITY.
+                let (describes, descriptor) = b.type_links.get(i).copied().unwrap_or((None, None));
+                if let Some(x) = describes {
+                    c.push(0x4c);
+                    uleb(&mut c, u64::from(x));
+                }
+                if let Some(y) = descriptor {
+                    c.push(0x4d);
+                    uleb(&mut c, u64::from(y));
                 }
                 match &b.types[i] {
                     TypeDef::Func(s) => {

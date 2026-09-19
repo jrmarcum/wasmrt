@@ -85,6 +85,13 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🆕 2026-09-19 — day 4, part 5: **64,193 / 3 / 428** (track D2, descriptor/describes)
+
+Failures 39 → 3; passes −71 — FALSE passes removed (see `roadmap.md`, DAY 4 part 5; the per-file gate flags five
+custom-descriptors files, all explained). **`tests/descriptor-identity.wast`** (16) pins that descriptor links
+are part of type identity, same- and cross-instance; mutation-verified after its first version was found unable
+to fail.
+
 ### 🆕 2026-09-19 — day 4, part 4: **64,264 / 39 / 331** (track D1, exact types)
 
 **`tests/exact-type-confusion.wast`** — the D1 soundness checkpoint (28 assertions, `cargo test`): a subtype must

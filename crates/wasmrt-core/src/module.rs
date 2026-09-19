@@ -117,6 +117,13 @@ pub struct TableType {
     pub init: Option<Vec<u8>>,
 }
 
+/// A type's custom-descriptors links: `(describes $x)` and `(descriptor $y)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TypeLinks {
+    pub describes: Option<u32>,
+    pub descriptor: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryType {
     pub limits: Limits,
@@ -329,6 +336,10 @@ pub struct Module {
     /// folded into `supertypes` because the two are independent — a type can be open with no
     /// supertype, or final with one.
     pub type_finals: Vec<bool>,
+    /// Each type's custom-descriptors links, parallel to `comp_types`: the type it DESCRIBES and the
+    /// type that is its DESCRIPTOR. Part of the type's identity (see `push_links`), and validated as
+    /// a mutually-consistent pair within one rec group.
+    pub type_links: Vec<TypeLinks>,
     /// Type index of each *defined* function, in order.
     pub functions: Vec<u32>,
     /// Type index of each *defined* exception tag (§5.5.14, EH).
@@ -649,6 +660,7 @@ struct Decoder {
     comp_types: Vec<CompType>,
     supertypes: Vec<Option<u32>>,
     type_finals: Vec<bool>,
+    type_links: Vec<TypeLinks>,
     type_canon: Vec<u32>,
     rec_groups: Vec<(u32, u32)>,
     /// Composite kind of each type index, pre-scanned before bodies are decoded so a
@@ -792,6 +804,7 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
         comp_types: d.comp_types,
         supertypes: d.supertypes,
         type_finals: d.type_finals,
+        type_links: d.type_links,
         type_canon: d.type_canon,
         rec_groups: d.rec_groups,
         functions,
@@ -1095,6 +1108,7 @@ fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
     let mut comp: Vec<CompType> = Vec::new();
     let mut supers: Vec<Option<u32>> = Vec::new();
     let mut finals: Vec<bool> = Vec::new();
+    let mut links: Vec<TypeLinks> = Vec::new();
     // (start, len) of each rec group. A type written without `(rec …)` is its own singleton group,
     // which is what the spec says it is — so this needs no special case downstream.
     let mut groups: Vec<(u32, u32)> = Vec::new();
@@ -1107,18 +1121,19 @@ fn decode_type_section(d: &mut Decoder, r: &mut Reader) -> DecodeResult<()> {
             let mut k = r.read_var_u32()?;
             while k > 0 {
                 k -= 1;
-                decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers, &mut finals)?;
+                decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers, &mut finals, &mut links)?;
             }
         } else {
-            decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers, &mut finals)?;
+            decode_sub_type(&d.type_kinds, r, &mut comp, &mut supers, &mut finals, &mut links)?;
         }
         groups.push((start, comp.len() as u32 - start));
     }
-    d.type_canon = canonicalize(&comp, &supers, &finals, &groups);
+    d.type_canon = canonicalize(&comp, &supers, &finals, &links, &groups);
     d.rec_groups = groups;
     d.comp_types = comp;
     d.supertypes = supers;
     d.type_finals = finals;
+    d.type_links = links;
     Ok(())
 }
 
@@ -1136,6 +1151,7 @@ fn canonicalize(
     comp: &[CompType],
     supers: &[Option<u32>],
     finals: &[bool],
+    links: &[TypeLinks],
     groups: &[(u32, u32)],
 ) -> Vec<u32> {
     // A `BTreeMap`, not a linear scan over previously-seen keys: the number of rec groups is
@@ -1146,7 +1162,7 @@ fn canonicalize(
     for &(start, len) in groups {
         // `canon` is filled in index order, so its length is exactly `start` here — which is what
         // makes "outside the group" and "not yet canonicalised" the same test in `push_type_ref`.
-        let key = rec_group_key(comp, supers, finals, &canon, start, len);
+        let key = rec_group_key(comp, supers, finals, links, &canon, start, len);
         let first = *seen.entry(key).or_insert(start);
         for i in 0..len {
             canon.push(first + i);
@@ -1165,22 +1181,26 @@ fn canonicalize(
 /// * [`crate::interp::Store`]'s type registry passes the **store-wide** ids of the module's earlier
 ///   groups, giving keys comparable **across** modules — which is the whole point of the registry, and
 ///   is why this is parameterised rather than reading `canon` directly.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rec_group_key_with(
     comp: &[CompType],
     supers: &[Option<u32>],
     finals: &[bool],
+    links: &[TypeLinks],
     outside: &[u32],
     start: u32,
     len: u32,
 ) -> Vec<u8> {
-    rec_group_key(comp, supers, finals, outside, start, len)
+    rec_group_key(comp, supers, finals, links, outside, start, len)
 }
 
 /// The structural key of one rec group: every member in order, with type references normalised.
+#[allow(clippy::too_many_arguments)]
 fn rec_group_key(
     comp: &[CompType],
     supers: &[Option<u32>],
     finals: &[bool],
+    links: &[TypeLinks],
     canon: &[u32],
     start: u32,
     len: u32,
@@ -1197,6 +1217,22 @@ fn rec_group_key(
                 push_type_ref(&mut k, canon, start, len, s);
             }
             None => k.push(0),
+        }
+        // 🔒 custom-descriptors: the `describes`/`descriptor` links are part of a type's IDENTITY —
+        // two structs of one shape, one with a descriptor and one without, are different types (and
+        // only one of them can be built by `struct.new`). This key is the ONE definition of identity
+        // for all three places that need it: module-local canonicalisation, and the store-wide
+        // registry's `assign` and `ids_readonly` — which is why the links are a PARAMETER here, so no
+        // caller can omit them and still compile.
+        let l = links.get(t).copied().unwrap_or_default();
+        for link in [l.describes, l.descriptor] {
+            match link {
+                Some(x) => {
+                    k.push(1);
+                    push_type_ref(&mut k, canon, start, len, x);
+                }
+                None => k.push(0),
+            }
         }
         match comp.get(t) {
             Some(CompType::Func(ft)) => {
@@ -1277,15 +1313,23 @@ fn push_type_ref(k: &mut Vec<u8>, canon: &[u32], start: u32, len: u32, t: u32) {
     }
 }
 
-/// Decode one sub type: an optional `0x50`/`0x4f` wrapper carrying a supertype list (GC
-/// MVP: at most one), then a composite type.
-fn decode_sub_type(
-    kinds: &[CompKind],
-    r: &mut Reader,
-    comp: &mut Vec<CompType>,
-    supers: &mut Vec<Option<u32>>,
-    finals: &mut Vec<bool>,
-) -> DecodeResult<()> {
+/// Everything a sub type states before its composite type.
+struct SubPrefix {
+    is_final: bool,
+    super_idx: Option<u32>,
+    links: TypeLinks,
+}
+
+/// Read a sub type's prefix: an optional `0x50`/`0x4f` wrapper carrying a supertype list (GC MVP: at
+/// most one), then — custom-descriptors — an optional `0x4c` describes and an optional `0x4d`
+/// descriptor, in that order, each at most once.
+///
+/// 🔒 **The one reader of this prefix**, for the pre-scan AND the decoder. They each had their own copy
+/// of the `sub` wrapper; D1 paid for a pre-scan that parsed less than the decoder (it misread the whole
+/// type section), and a prefix is exactly where the two would diverge again. A repeated clause, or
+/// `descriptor` before `describes`, leaves a `0x4c`/`0x4d` where the composite type must be, which is
+/// "malformed definition type" in `binary-descriptors.wast`.
+fn read_sub_prefix(r: &mut Reader) -> DecodeResult<SubPrefix> {
     let mut super_idx: Option<u32> = None;
     let tag = r.peek_byte()?;
     // Only `0x50` (`sub`) declares a type OPEN for extension. `0x4f` is `sub final`, and a bare
@@ -1300,19 +1344,40 @@ fn decode_sub_type(
             return Err(DecodeError::BadType); // MVP allows at most one supertype
         }
         if ns == 1 {
-            let s = r.read_var_u32()?;
-            // A supertype must be a PRIOR type (lower index than this one, whose index is
-            // `comp.len()` — not yet appended), so the chain strictly decreases and
-            // `is_subtype`'s walk can't loop.
-            if s as usize >= comp.len() {
-                return Err(DecodeError::BadType);
-            }
-            super_idx = Some(s);
+            super_idx = Some(r.read_var_u32()?);
         }
     }
+    let mut links = TypeLinks::default();
+    if r.peek_byte()? == 0x4c {
+        r.read_byte()?;
+        links.describes = Some(r.read_var_u32()?);
+    }
+    if r.peek_byte()? == 0x4d {
+        r.read_byte()?;
+        links.descriptor = Some(r.read_var_u32()?);
+    }
+    Ok(SubPrefix { is_final, super_idx, links })
+}
+
+/// Decode one sub type: its prefix ([`read_sub_prefix`]), then a composite type.
+fn decode_sub_type(
+    kinds: &[CompKind],
+    r: &mut Reader,
+    comp: &mut Vec<CompType>,
+    supers: &mut Vec<Option<u32>>,
+    finals: &mut Vec<bool>,
+    links: &mut Vec<TypeLinks>,
+) -> DecodeResult<()> {
+    let p = read_sub_prefix(r)?;
+    // A supertype must be a PRIOR type (lower index than this one, whose index is `comp.len()` — not
+    // yet appended), so the chain strictly decreases and `is_subtype`'s walk can't loop.
+    if p.super_idx.is_some_and(|s| s as usize >= comp.len()) {
+        return Err(DecodeError::BadType);
+    }
     comp.push(decode_comp_type(kinds, r)?);
-    supers.push(super_idx);
-    finals.push(is_final);
+    supers.push(p.super_idx);
+    finals.push(p.is_final);
+    links.push(p.links);
     Ok(())
 }
 
@@ -1360,15 +1425,7 @@ fn prescan_type_kinds(r: &mut Reader) -> DecodeResult<Vec<CompKind>> {
 }
 
 fn scan_sub_type(r: &mut Reader, kinds: &mut Vec<CompKind>) -> DecodeResult<()> {
-    let tag = r.peek_byte()?;
-    if tag == 0x50 || tag == 0x4f {
-        r.read_byte()?;
-        let mut ns = r.read_var_u32()?;
-        while ns > 0 {
-            ns -= 1;
-            r.read_var_u32()?; // supertype indices
-        }
-    }
+    read_sub_prefix(r)?;
     match r.read_byte()? {
         0x60 => {
             skip_val_type_vec(r)?;

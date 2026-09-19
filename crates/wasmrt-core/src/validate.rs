@@ -76,6 +76,9 @@ pub enum ValidateError {
     /// A `struct.set` / `array.set` on an immutable field.
     ImmutableField,
     InvalidLimits,
+    /// A custom-descriptors `describes`/`descriptor` link that is not a well-formed pair: outside
+    /// the rec group, not pointing back, a forward `describes`, or on a non-struct type.
+    InvalidDescriptor,
     /// A memory's custom page size is representable but not one the proposal allows — only
     /// 1 byte (`2^0`) and 64 KiB (`2^16`) are (custom-page-sizes).
     InvalidPageSize,
@@ -162,6 +165,7 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
 
     check_module_features(module, features)?;
     check_type_index_scope(module)?;
+    check_descriptor_links(module)?;
     check_declared_subtyping(module)?;
 
     // C.refs (§3.4.10, "undeclared function reference"): a `ref.func x` inside a function
@@ -554,6 +558,80 @@ fn check_declared_subtyping(module: &Module) -> ValidateResult<()> {
         if !comp_type_matches(module, sub_ct, sup_ct) {
             return Err(ValidateError::SubType);
         }
+        // custom-descriptors: a subtype must keep its supertype's descriptor relationships, and in
+        // the same DIRECTION. Each rule is a case `descriptors.wast` asserts:
+        //   * the supertype has a descriptor  → so must the subtype, and a SUBTYPE of that descriptor;
+        //   * the supertype describes a type  → so must the subtype, describing a SUBTYPE of it;
+        //   * the subtype describes a type    → the supertype must describe one too (and the rule
+        //                                       above then relates the two).
+        // Only the subtype gaining a DESCRIPTOR its supertype lacks is allowed.
+        let own = module.type_links.get(i).copied().unwrap_or_default();
+        let parent = module.type_links.get(s).copied().unwrap_or_default();
+        if let Some(pd) = parent.descriptor {
+            if !own.descriptor.is_some_and(|od| module.is_subtype(od, pd)) {
+                return Err(ValidateError::SubType);
+            }
+        }
+        if let Some(px) = parent.describes {
+            if !own.describes.is_some_and(|ox| module.is_subtype(ox, px)) {
+                return Err(ValidateError::SubType);
+            }
+        }
+        if own.describes.is_some() && parent.describes.is_none() {
+            return Err(ValidateError::SubType);
+        }
+    }
+    Ok(())
+}
+
+/// custom-descriptors: `struct.new` / `struct.new_default` may not allocate a type that HAS a
+/// descriptor — such an object must be built with its descriptor (`struct.new_desc`), or it would exist
+/// without the descriptor its type promises and `ref.get_desc` would have nothing true to return.
+/// wasm-tools: "type with descriptor requires descriptor allocation". One check for the body and the
+/// constant-expression copies of `struct.new`'s typing, so neither can drift.
+fn check_plainly_allocatable(module: &Module, ti: u32) -> ValidateResult<()> {
+    if module.type_links.get(ti as usize).is_some_and(|l| l.descriptor.is_some()) {
+        return Err(ValidateError::InvalidDescriptor);
+    }
+    Ok(())
+}
+
+/// custom-descriptors: every `describes`/`descriptor` link names a STRUCT in the SAME rec group that
+/// links BACK, and a `describes` never points forward. Otherwise the two types could disagree about
+/// which one describes which, and `struct.new_desc` / `ref.get_desc` would read a descriptor of a type
+/// the object's own type never agreed to.
+fn check_descriptor_links(module: &Module) -> ValidateResult<()> {
+    let group_of = |t: u32| {
+        module
+            .rec_groups
+            .iter()
+            .find(|&&(s, n)| t >= s && t < s + n)
+            .copied()
+            .unwrap_or((t, 1))
+    };
+    let is_struct = |t: u32| matches!(module.comp_types.get(t as usize), Some(CompType::Struct(_)));
+    let links = |t: u32| module.type_links.get(t as usize).copied().unwrap_or_default();
+    for (i, l) in module.type_links.iter().enumerate() {
+        let t = i as u32;
+        if let Some(d) = l.descriptor {
+            if group_of(d) != group_of(t)
+                || !is_struct(t)
+                || !is_struct(d)
+                || links(d).describes != Some(t)
+            {
+                return Err(ValidateError::InvalidDescriptor);
+            }
+        }
+        if let Some(x) = l.describes {
+            if group_of(x) != group_of(t)
+                || x >= t
+                || !is_struct(t)
+                || !is_struct(x)
+                || links(x).descriptor != Some(t)
+            {
+                return Err(ValidateError::InvalidDescriptor);
+            }
+        }
     }
     Ok(())
 }
@@ -683,6 +761,10 @@ fn check_module_features(module: &Module, features: &Features) -> ValidateResult
         if mt.page_size_log2.is_some() {
             gate(Some(Feature::CustomPageSizes), features)?;
         }
+    }
+    // A descriptor link on any type is custom-descriptors.
+    if module.type_links.iter().any(|l| l.describes.is_some() || l.descriptor.is_some()) {
+        gate(Some(Feature::CustomDescriptors), features)?;
     }
     // An EXACT function import is custom-descriptors (wasm-tools refuses kind `0x20` without it).
     if module.imports.iter().any(|i| i.exact) {
@@ -836,6 +918,7 @@ fn validate_const_expr(
                     // struct.new t / struct.new_default t
                     0x00 | 0x01 => {
                         let ti = r.read_var_u32()?;
+                        check_plainly_allocatable(module, ti)?;
                         let fields = module
                             .struct_fields(ti)
                             .ok_or(ValidateError::UndefinedType)?
@@ -1908,6 +1991,7 @@ impl<'a> FuncValidator<'a> {
             // `subtype_of` already walks the declared supertype chain for concrete pairs.
             Op::StructNew => {
                 let ti = expect_gc_type(&instr.imm)?;
+                check_plainly_allocatable(self.module, ti)?;
                 let fields = self
                     .module
                     .struct_fields(ti)
@@ -1920,6 +2004,7 @@ impl<'a> FuncValidator<'a> {
             }
             Op::StructNewDefault => {
                 let ti = expect_gc_type(&instr.imm)?;
+                check_plainly_allocatable(self.module, ti)?;
                 let fields = self
                     .module
                     .struct_fields(ti)

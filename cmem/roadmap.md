@@ -188,9 +188,9 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,264 / 39 / 331 over 288 files, 525 workspace tests, C-ABI gate PASSED, `.wat` corpus
+**State: 64,193 / 3 / 428 over 288 files, 525 workspace tests, C-ABI gate PASSED, `.wat` corpus
 528/532, Miri **32/32**, custom-sections gate **528 agree / 4 refused by both / 0 differ**, shipped cdylib **522,240 B**, everything committed and pushed.** Day 4
-(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. The era-pinned `proposals/threads/memory.wast` contradiction was then PATCHED (owner-directed) — `proposals/threads/` 494/0/0. **Track D1 (exact types) is DONE; next is D2.**
+(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. The era-pinned `proposals/threads/memory.wast` contradiction was then PATCHED (owner-directed) — `proposals/threads/` 494/0/0. **Track D1 and D2 are DONE; next is D3/D4.**
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -202,7 +202,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | **3** | ✅ **Track A — DONE (2026-09-19, owner: "we do not want the lexer to throw away information … align with canonical wasmtime and wasm").** `custom/` **0/1/20 → 20/0/0**. The first scoping ("pure runner work, no engine risk") was false — wasmtime scores neither command and the lexer dropped every annotation — so it became the **custom-annotations feature**, built to MEASURED canonical behaviour: `@custom` → a custom section at its slot, `@name` + every `$id` → the `name` section (all 12 subsections), branch hints → `metadata.code.branch_hint`, malformed/misplaced → **module refused** (as wasm-tools refuses it), a hint on a non-branch → **emitted and reported, not refused**. See the day-4 entry. | — |
 | **4** | ✅ **DONE 2026-09-19 — see `known-issues.md` (top); refused with wasmtime's own reason, and a rule-free fourth copy of the type-use loop behind it.** ~~**The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
 | **5** | ✅ **DONE 2026-09-19 — custom-page-sizes 5 files 166/0/0 (was 110/0/79); byte-granular bounds verified on every access path and CROSS-CHECKED ON WASMTIME 48; `PAGE_SIZE` deleted so no 64 KiB assumption can compile. See DAY 4 part 3.** ~~**Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
-| **6** | ◐ **D1 DONE 2026-09-19 (exact types) — see DAY 4 part 4. Next: D2 (descriptor/describes), then D3/D4 (the `*_desc` instructions).** **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
+| **6** | ◐ **D1 + D2 DONE 2026-09-19 (exact types; descriptor/describes) — see DAY 4 parts 4–5. Next: D3/D4 (the `*_desc` instructions).** **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
 
 ⚠️ **Two predictions still standing, so honest movement is not read as regression:**
 * **Passes go DOWN when `exact` lands** — a parse gap currently scores as a correct rejection, so ~19
@@ -248,6 +248,38 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### ✅ DAY 4, part 5 — TRACK D2: `describes` / `descriptor`. `[x]`
+
+**64,264 / 39 / 331 → 64,193 / 3 / 428.** `descriptors.wast` 50/7/0 → **50/0/0**; `binary-descriptors.wast`
+3/2/0 → **3/0/0**. Failures 39 → **3**. 525 tests, C-ABI PASSED, Miri 32/32, wasm32 builds. CLI +3,072 B,
+cdylib +2,560 B.
+
+⚠️⚠️ **PASSES WENT DOWN, as predicted, and the per-file gate says so:** `br_on_cast_desc_eq` 19 → 0,
+`br_on_cast_desc_eq_fail` 19 → 0, `ref_cast_desc_eq` 12 → 0, `ref_get_desc` 9 → 0, `struct_new_desc` 19 → 7 —
+**71 FALSE passes removed.** Verified against the pre-D2 build: every module in those files with a
+`(descriptor …)` clause failed to ASSEMBLE (`BadForm`), and an assembly failure counts as a pass for
+`assert_invalid` — so their `assert_invalid`s "passed" without reaching the rule. Now those modules assemble,
+meet the unimplemented `*_desc` instructions, and SKIP honestly; D3/D4 converts them.
+
+**Checked module by module, not in aggregate:** all 47 invalid modules in `descriptors.wast` are refused at
+VALIDATION (not assembly), and wasm-tools agrees on every one, as on all 7 valid ones.
+
+**Identity, the roadmap's "THREE keys":** the links are a PARAMETER of `rec_group_key`/`rec_group_key_with`/
+`canonicalize`, so module-local canonicalisation and both registry paths (`assign`, `ids_readonly`) had to be
+given them to compile; the cross-module matchers compare registry ids. `tests/descriptor-identity.wast`
+(16 assertions) — ⚠️ **its first version could not fail**: `$q`, a singleton group, differs from `$ad` on group
+SHAPE whether or not links are keyed, and it passed with the links deleted from the key. The fix is a rec group of
+EXACTLY `{$a,$ad}`'s shape minus the links (`$b`/`$bd`); mutation now fails 4 assertions, same- and cross-instance.
+
+**Structure:** one sub-type prefix reader (`read_sub_prefix`) for the pre-scan AND the decoder — they each had
+their own copy of the `sub` wrapper, the shape D1 paid for. Binary `(0x50|0x4f sup)? (0x4c x)? (0x4d y)? comptype`;
+text at the type level or inside `(sub …)`, never both, `describes` before `descriptor`, each once.
+**Rules** (all measured on wasm-tools): both ends structs, same rec group, pointing BACK, no forward `describes`;
+subtypes keep the supertype's descriptor/described relationships, only GAINING a descriptor is allowed.
+**`struct.new`/`struct.new_default` refuse a type with a descriptor, in bodies AND initializers** (the roadmap's
+"do it anyway" item; wasm-tools: "type with descriptor requires descriptor allocation") — one check for both
+copies of `struct.new`'s typing.
 
 ##### ✅ DAY 4, part 4 — TRACK D1: EXACT TYPES, and the soundness checkpoint. `[x]`
 
