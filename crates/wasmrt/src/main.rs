@@ -122,6 +122,8 @@ struct HostFlags {
     env: Vec<(String, String)>,
     max_memory: Option<usize>,
     max_table_elems: Option<usize>,
+    /// `--max-iterations <count>`; `0` means unlimited at the CLI.
+    max_iterations: Option<u64>,
     features: Option<Features>,
     verify: VerifyFlags,
 }
@@ -134,6 +136,7 @@ impl HostFlags {
         self.allow_symlink |= other.allow_symlink;
         self.max_memory = self.max_memory.or(other.max_memory);
         self.max_table_elems = self.max_table_elems.or(other.max_table_elems);
+        self.max_iterations = self.max_iterations.or(other.max_iterations);
         // `--features` is refused after the path, so at most one run can carry it.
         self.features = self.features.or(other.features);
         self.verify = VerifyFlags {
@@ -156,6 +159,9 @@ impl HostFlags {
         }
         if let Some(t) = self.max_table_elems {
             l.max_table_elems = t;
+        }
+        if let Some(n) = self.max_iterations {
+            l.max_iterations = n;
         }
         l
     }
@@ -615,6 +621,19 @@ fn take_dir_flags(
                 return Err(format!("--env {v}: expected KEY=VALUE"));
             };
             hf.env.push((k.to_string(), val.to_string()));
+            i += 2;
+            continue;
+        }
+        if args[i] == "--max-iterations" {
+            let Some(v) = args.get(i + 1) else {
+                return Err(String::from("--max-iterations needs a count"));
+            };
+            // `0` is UNLIMITED at the CLI. (The C ABI keeps the default for 0 instead — a library
+            // embedder does not get to remove the bound by passing zero.)
+            let Some(n) = parse_size(v).map(|n| n as u64) else {
+                return Err(format!("--max-iterations {v}: expected a count like 1G or 0"));
+            };
+            hf.max_iterations = Some(n);
             i += 2;
             continue;
         }
@@ -1090,7 +1109,16 @@ fn run_wast(rest: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let known_value_flag = |a: &String| matches!(a.as_str(), "--pins" | "--verify");
+    // ⚠️ EVERY value-taking host flag, or its VALUE is mistaken for a script path — which is how
+    // `wast --max-iterations 1000 <dir>` first tried to run a script named "1000". One list,
+    // used both to validate the flags and to collect the files.
+    let known_value_flag = |a: &String| {
+        matches!(
+            a.as_str(),
+            "--pins" | "--verify" | "--features" | "--env" | "--dir" | "--ro-dir"
+                | "--max-memory" | "--max-table-elems" | "--max-iterations"
+        )
+    };
     let mut skip_next = false;
     for a in rest {
         if skip_next {
@@ -1166,7 +1194,7 @@ fn run_wast(rest: &[String]) -> ExitCode {
             .to_string_lossy();
         // Each file under the features it is written against (`features_for_script`): a proposal can
         // change what is valid, so a core file must not run with one it does not expect.
-        match wasmrt_core::wast::run_script_with_features(&src, wasmrt_core::wast::features_for_script(&name)) {
+        match wasmrt_core::wast::run_script_with(&src, wasmrt_core::wast::features_for_script(&name), gate_flags.limits()) {
             Ok(s) => {
                 passed += s.passed;
                 failed += s.failed;
@@ -1296,7 +1324,9 @@ fn print_help() {
            --allow-symlink             let the guest CREATE symlinks (off by default)\n    \
            --env KEY=VALUE             set one variable for the guest (repeatable)\n    \
            --max-memory <size>         linear-memory ceiling (e.g. 512M, 2G)\n    \
-           --max-table-elems <count>   table-entry ceiling\n\n\
+           --max-table-elems <count>   table-entry ceiling\n    \
+           --max-iterations <count>    stop a guest that never returns (default 1G, 0 = off;\n    \
+                                       one iteration = one loop back-edge or one tail call)\n\n\
          With no --dir, every path call returns BADF — there is no implicit cwd.\n\n\
          VERIFICATION — off unless a pin DB is installed:\n    \
            --pins <path>               use this pin DB instead of the default\n    \
@@ -1396,7 +1426,9 @@ fn call_export(loaded: &Loaded, flags: &HostFlags, func: &str, args: &[String]) 
         }
     }
 
-    let mut inst = match Instance::new(module) {
+    // The ceilings apply to a plain export call too — an unbounded loop is unbounded whichever
+    // entry point reached it.
+    let mut inst = match Instance::new_with(module, wasmrt_core::interp::Imports::new(), flags.limits()) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("wasmrt: cannot instantiate {path}: {e}");

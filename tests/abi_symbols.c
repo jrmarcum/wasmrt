@@ -44,6 +44,7 @@ static const any_fn SYMBOLS[] = {
     (any_fn)wasmrt_config_set_max_gc_objects,
     (any_fn)wasmrt_config_set_max_exception_boxes,
     (any_fn)wasmrt_config_set_max_call_depth,
+    (any_fn)wasmrt_config_set_max_iterations,
 
     /* engine + store */
     (any_fn)wasmrt_engine_new,

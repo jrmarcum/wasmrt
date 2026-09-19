@@ -144,8 +144,29 @@ pub fn features_for_script(path: &str) -> Features {
 /// # Errors
 /// As [`run_script`].
 pub fn run_script_with_features(src: &[u8], features: Features) -> Result<Summary, Error> {
+    run_script_with(src, features, crate::interp::ResourceLimits::defaults())
+}
+
+/// [`run_script_with_features`] under explicit resource ceilings.
+///
+/// 🔒 **This is what makes the conformance corpus a LIVE GATE on the iteration budget**
+/// (`cmem/interop.md` §3.7a): run the suite at a lower ceiling and the heaviest legitimate file
+/// fails loudly, which is how the default was measured instead of adopted on trust. The
+/// iteration trap deliberately does NOT satisfy an `assert_trap` — see `assert_trap` below.
+///
+/// # Errors
+/// As [`run_script`].
+pub fn run_script_with(
+    src: &[u8],
+    features: Features,
+    limits: crate::interp::ResourceLimits,
+) -> Result<Summary, Error> {
     let (forms, top_annots) = sexpr::parse_all_annotated(src)?;
-    let mut r = Runner { features, ..Runner::default() };
+    let mut r = Runner {
+        features,
+        store: Store::with_limits(limits),
+        ..Runner::default()
+    };
     let mut i = 0;
     while i < forms.len() {
         // §7's **inline module** abbreviation: a run of bare MODULE FIELDS at the top level of a
@@ -793,6 +814,15 @@ impl Runner {
         match self.run_action(operand) {
             Ok(_) => self.fail(format!(
                 "assert_trap {}: expected a trap, got a result",
+                render(operand)
+            )),
+            // ⚠️⚠️ **An engine RESOURCE cap must not satisfy an `assert_trap`.** The iteration
+            // budget is ours, not WebAssembly's: letting it pass here would answer "this module
+            // traps" with "we gave up", and a budget set too low would then read as conformance.
+            // Excluding it makes the corpus a LIVE GATE on the ceiling — the suite fails loudly
+            // instead of banking the timeout as the expected result (`interop.md` §3.7a).
+            Err(ActionErr::Trap(t @ Trap::IterationLimitExceeded { .. })) => self.fail(format!(
+                "assert_trap {}: hit the engine's iteration budget, which is not a spec trap: {t}",
                 render(operand)
             )),
             Err(ActionErr::Trap(_)) => self.summary.passed += 1,

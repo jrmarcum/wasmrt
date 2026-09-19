@@ -621,6 +621,24 @@ limit_setter!(wasmrt_config_set_max_gc_objects, max_gc_objects, u64);
 limit_setter!(wasmrt_config_set_max_exception_boxes, max_exn_boxes, u64);
 limit_setter!(wasmrt_config_set_max_call_depth, max_call_depth, u32);
 
+capi! {
+    // The iteration budget (`interop.md` §3.7a) — a `u64`, so it keeps its own setter rather than
+    // going through `limit_setter!`, which saturates to `usize`.
+    //
+    // 🔒 **`0` leaves the DEFAULT in place here, where the CLI treats it as "unlimited".** That
+    // asymmetry is deliberate and is in the contract: a person at a terminal may choose to run
+    // without a bound on their own machine; a library embedder does not get to remove it by passing
+    // zero, which is also what "0 means leave unchanged" already means for every other setter.
+    fn wasmrt_config_set_max_iterations(p: *mut wasmrt_config, v: u64) {
+        #[allow(unsafe_code, reason = "borrowing a caller handle via the ffi primitive")]
+        let Some(cfg) = (unsafe { ffi::opt_mut(p) }) else { return };
+        if v == 0 {
+            return;
+        }
+        cfg.limits.max_iterations = v;
+    }
+}
+
 // ---- engine -------------------------------------------------------------------------
 
 capi! {

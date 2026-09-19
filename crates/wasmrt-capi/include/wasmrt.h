@@ -149,9 +149,9 @@ typedef enum {
 /* The WebAssembly proposals that can be individually refused. ALL ARE ON BY DEFAULT —
  * wasmrt's stated scope is full browser-standard parity plus memory64.
  *
- * There is deliberately NO tail-call entry: `return_call` / `return_call_indirect` are not
- * implemented, so a toggle for them would gate nothing while reading as a control.
- * `return_call_ref` belongs to function-references and is covered by that flag.
+ * (This paragraph said tail calls were "deliberately" absent until 2026-09-19, three lines
+ * above the WASMRT_FEATURE_TAIL_CALL the enum has carried since they landed on 2026-08-14.
+ * A comment that outlives what it describes is worse than none: it was stale, not a policy.)
  *
  * A disabled proposal makes a module INVALID — it is refused by `wasmrt_module_new` /
  * `wasmrt_module_validate`, never part-way through execution.
@@ -203,6 +203,15 @@ void wasmrt_config_set_max_exception_boxes(wasmrt_config_t *, uint64_t);
  * thread stack before the limit fires. Release builds are fine at the default, which is
  * why the default is not simply lowered. */
 void wasmrt_config_set_max_call_depth(wasmrt_config_t *, uint32_t);
+
+/* Iteration budget for one top-level call, bounding non-termination. Default 1<<30.
+ *
+ * ONE ITERATION IS ONE LOOP BACK-EDGE OR ONE TAIL-CALL HOP -- not one instruction. A guest that
+ * exceeds it traps like any other trap; wasmrt_trap_message() says so and names the ceiling.
+ * It does NOT detect an infinite loop: a legitimately long run trips the same trap, and the
+ * answer is to raise the ceiling. 0 leaves the default in place (a library embedder does not
+ * remove the bound by passing zero; the CLI flag --max-iterations 0 does allow that). */
+void wasmrt_config_set_max_iterations(wasmrt_config_t *, uint64_t);
 
 /* ---- Engine ---------------------------------------------------------------------------
  * Holds the configuration shared by the stores made from it. Must outlive them.

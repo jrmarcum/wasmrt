@@ -79,6 +79,26 @@ const DEFAULT_MAX_CALL_DEPTH: usize = 512;
 // memory-safety hole — a bounds or size computation left holding the default would let a guest with
 // 1-byte pages address 65,536x the memory it has. Do not reintroduce one.
 
+/// Default **iteration budget** for one top-level invocation — the execution bound
+/// (`cmem/interop.md` §3.7a; owner, 2026-08-19: *"We do not want an infinite loop on purpose or by
+/// accident … an error message to the user with a break on occurrence."*).
+///
+/// 🎯 **The UNIT is the part that must not drift: one iteration is ONE LOOP BACK-EDGE or ONE
+/// TAIL-CALL HOP.** Two runtimes with "a limit of `1<<30`" that count different things are not
+/// swappable — a module finishing just under the ceiling on one would trap on the other — so
+/// counting instructions instead would be a contract breach even at the same number.
+///
+/// ⚠️ **A COUNT, never a clock.** A wall-clock deadline makes the same module trap on a slow
+/// machine and pass on a fast one, which is unswappable by construction, and it cannot be enforced
+/// without a thread and a clock that the freestanding target does not have.
+///
+/// ⚠️ **It does NOT detect an infinite loop** — nothing can. It bounds non-termination: a
+/// legitimately long-running module trips the same trap and its owner is told to raise the ceiling.
+///
+/// The number is measured, not chosen: the spec corpus's heaviest legitimate workload is
+/// `return_call.wast`'s million-hop chain, so `1<<30` is ~1000x the measured peak (`cmem/testing.md`).
+const DEFAULT_MAX_ITERATIONS: u64 = 1 << 30;
+
 /// Default ceiling on total linear memory per instance (summed across memories), applied at
 /// instantiation and at `memory.grow`. A tiny module can declare gigabytes, so this bounds a
 /// hostile input. 1 GiB is far above any realistic guest.
@@ -252,6 +272,13 @@ pub struct ResourceLimits {
     pub max_gc_objects: usize,
     /// Maximum live boxed exceptions before [`Trap::ExnStoreExhausted`].
     pub max_exn_boxes: usize,
+    /// Iteration budget for one top-level invocation — loop back-edges plus tail-call hops —
+    /// before [`Trap::IterationLimitExceeded`]. `0` disables the bound.
+    ///
+    /// Refilled when a call enters from the host; a host callback that calls back in **inherits
+    /// the remainder**, because a guest that could refill its budget by bouncing through a host
+    /// function would not have one.
+    pub max_iterations: u64,
 }
 
 impl ResourceLimits {
@@ -265,6 +292,7 @@ impl ResourceLimits {
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             max_gc_objects: DEFAULT_MAX_GC_OBJECTS,
             max_exn_boxes: DEFAULT_MAX_EXN_BOXES,
+            max_iterations: DEFAULT_MAX_ITERATIONS,
         }
     }
 }
@@ -444,6 +472,11 @@ impl IndexMaps {
 /// The resource pools shared by every instance in a linking group.
 #[derive(Default)]
 struct Pools {
+    /// Iterations left in the current top-level invocation (see [`ResourceLimits::max_iterations`]).
+    fuel: u64,
+    /// Is a guest already running? Set at the outermost entry only, so a host callback that calls
+    /// back in **inherits** the remaining budget instead of refilling it.
+    in_guest: bool,
     /// The ceilings this store enforces. Lives here rather than on [`Store`] because the
     /// runtime threads `&mut Pools` down every execution path, so every site that has to
     /// consult a limit already holds it.
@@ -506,6 +539,29 @@ struct Pools {
     backtrace: Vec<TrapFrame>,
 }
 
+impl Pools {
+    /// Spend one iteration. Called on a **loop back-edge** and on a **tail-call hop** — the two
+    /// ways a guest runs forever without growing the native stack, which is exactly why the
+    /// call-depth ceiling cannot see either of them.
+    ///
+    /// ⚠️ **The tail-call tick is the one whose absence is invisible to an obvious test.** A local
+    /// `return_call` reuses the interpreter's frame by design, so it makes no backward branch and
+    /// adds no depth: `(func $f (return_call $f))` runs forever under a back-edge-only design while
+    /// the loop test still passes. Both ticks are pinned by their own test.
+    #[inline]
+    fn tick(&mut self) -> Result<()> {
+        if self.limits.max_iterations != 0 {
+            if self.fuel == 0 {
+                return Err(Trap::IterationLimitExceeded {
+                    limit: self.limits.max_iterations,
+                });
+            }
+            self.fuel -= 1;
+        }
+        Ok(())
+    }
+}
+
 /// One frame of a trap's call stack — what [`Store::backtrace`] hands back and what the C ABI's
 /// `wasmrt_trap_frame` reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -525,6 +581,15 @@ pub struct TrapFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trap {
     Unreachable,
+    /// The run exceeded its iteration budget: more loop back-edges plus tail-call hops in one
+    /// top-level invocation than [`ResourceLimits::max_iterations`] allows.
+    ///
+    /// ⚠️ **This is an engine RESOURCE cap, not a WebAssembly trap**, which is why the `.wast`
+    /// runner refuses to let it satisfy an `assert_trap`: a spec test asserting trapping behaviour
+    /// must not be answered by "we gave up". Excluding it also makes the conformance corpus a live
+    /// gate on the ceiling — set the budget too low and the suite fails loudly instead of banking a
+    /// timeout as the expected answer.
+    IterationLimitExceeded { limit: u64 },
     DivByZero,
     IntOverflow,
     /// A trapping float→int conversion of NaN, infinity, or an out-of-range value.
@@ -617,6 +682,14 @@ impl fmt::Display for Trap {
             Trap::IntOverflow => f.write_str("integer overflow"),
             Trap::InvalidConversionToInt => f.write_str("invalid conversion to integer"),
             Trap::CallStackExhausted => f.write_str("call stack exhausted"),
+            // States the ceiling that was hit and how to raise it, as the contract requires — and
+            // says what it does NOT mean, because a legitimately long run trips the same trap.
+            Trap::IterationLimitExceeded { limit } => write!(
+                f,
+                "iteration limit exceeded: {limit} loop back-edges or tail calls in one call \
+                 (this bounds non-termination; it does not detect an infinite loop — raise it with \
+                 --max-iterations <count>, or 0 for unlimited)"
+            ),
             Trap::UndefinedExport => f.write_str("no such exported function"),
             Trap::BadArgCount => f.write_str("wrong number of arguments"),
             Trap::UndefinedFunc => f.write_str("function index out of range"),
@@ -2207,6 +2280,14 @@ impl Store {
         if args.len() != ft.params.len() {
             return Err(Trap::BadArgCount);
         }
+        // The iteration budget is per TOP-LEVEL invocation, refilled on entry from the host — but
+        // a host callback that calls back in INHERITS the remainder, because a guest able to refill
+        // its budget by bouncing through a host function would not have one (`interop.md` §3.7a).
+        let outermost = !self.pools.in_guest;
+        if outermost {
+            self.pools.fuel = self.pools.limits.max_iterations;
+            self.pools.in_guest = true;
+        }
         // The EH state is per-invocation: an exception that escaped a previous call must not
         // be visible to this one, and the exnrefs it boxed are unreachable once it returns.
         self.pools.pending_exn = None;
@@ -2226,6 +2307,12 @@ impl Store {
         // Drop an escaping exception's payload rather than pinning it until the next invoke.
         if r.is_err() {
             pools.pending_exn = None;
+        }
+        // Cleared on BOTH paths: leaving it set after a trap would make the next call from the
+        // host inherit an exhausted budget and trap immediately, which reads as the engine
+        // breaking rather than as the previous run having ended.
+        if outermost {
+            pools.in_guest = false;
         }
         r
     }
@@ -2439,7 +2526,7 @@ impl Frame<'_> {
         self.vstack.len().checked_sub(n).ok_or(Trap::StackUnderflow)
     }
 
-    fn branch(&mut self, n: u32) -> Result<usize> {
+    fn branch(&mut self, n: u32, store: &mut Pools) -> Result<usize> {
         if n as usize >= self.labels.len() {
             return Err(Trap::UndefinedLabel);
         }
@@ -2454,6 +2541,12 @@ impl Frame<'_> {
         }
         self.vstack.copy_within(from..from + arity, label_base);
         self.vstack.truncate(label_base + arity);
+        // 🔒 THE BACK-EDGE TICK. A loop-continue is one iteration of the execution budget
+        // (`interop.md` §3.7a) — the unit is the back-edge, not the instruction, because that is
+        // what the two runtimes must agree on to stay swappable.
+        if is_loop {
+            store.tick()?;
+        }
         // A loop-continue keeps the loop's own label; a forward exit pops it too.
         let keep = if is_loop {
             self.labels.len() - n as usize
@@ -2545,7 +2638,7 @@ impl Frame<'_> {
                     // over-`u32` total rather than wrapping.
                     let target = d as u64 + 1 + u64::from(c.label);
                     let target = u32::try_from(target).map_err(|_| Trap::UndefinedLabel)?;
-                    return self.branch(target).map(Some);
+                    return self.branch(target, store).map(Some);
                 }
             }
 
@@ -2775,6 +2868,10 @@ fn call_function(
     // through. That is what the frame having been replaced MEANS; a runtime that listed them all
     // would be describing a stack it did not keep.
     if let Some(tc) = tail {
+        // 🔒 THE TAIL-CALL TICK. A hop replaces the frame instead of stacking one, so it grows no
+        // native stack and makes no back-edge — `(func $f (return_call $f))` would otherwise run
+        // forever past every other ceiling (`interop.md` §3.7a).
+        store.tick()?;
         inst = tc.inst;
         func_index = tc.func;
         tail_args = Some(tc.args);
@@ -3038,10 +3135,10 @@ fn run(
                         .ok_or(Trap::UncaughtException)?;
                     pc = frame.raise(store, &ctx.maps.tags, exn)?;
                 }
-                Op::Br => pc = frame.branch(label_imm(instr)?)?,
+                Op::Br => pc = frame.branch(label_imm(instr)?, store)?,
                 Op::BrIf => {
                     if frame.pop_i32() != 0 {
-                        pc = frame.branch(label_imm(instr)?)?;
+                        pc = frame.branch(label_imm(instr)?, store)?;
                     } else {
                         pc += 1;
                     }
@@ -3056,7 +3153,7 @@ fn run(
                     } else {
                         bt.default
                     };
-                    pc = frame.branch(idx)?;
+                    pc = frame.branch(idx, store)?;
                 }
                 Op::Return => pc = ir.len(),
 
@@ -3218,7 +3315,7 @@ fn run(
                 Op::BrOnNull => {
                     let r = frame.pop();
                     if r == NULL_REF {
-                        pc = frame.branch(label_imm(instr)?)?; // null → branch (ref dropped)
+                        pc = frame.branch(label_imm(instr)?, store)?; // null → branch (ref dropped)
                     } else {
                         frame.push(r); // non-null → keep the ref, fall through
                         pc += 1;
@@ -3230,7 +3327,7 @@ fn run(
                         pc += 1; // null → ref consumed, fall through
                     } else {
                         frame.push(r); // non-null → keep the ref for the label
-                        pc = frame.branch(label_imm(instr)?)?;
+                        pc = frame.branch(label_imm(instr)?, store)?;
                     }
                 }
                 Op::CallRef | Op::ReturnCallRef => {
@@ -3793,7 +3890,7 @@ fn run(
                     };
                     let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
                     pc = if ref_matches(ctx.module, ctx.code, store, ctx.inst, v, dst) {
-                        frame.branch(label)?
+                        frame.branch(label, store)?
                     } else {
                         pc + 1
                     };
@@ -3806,7 +3903,7 @@ fn run(
                     pc = if ref_matches(ctx.module, ctx.code, store, ctx.inst, v, dst) {
                         pc + 1
                     } else {
-                        frame.branch(label)?
+                        frame.branch(label, store)?
                     };
                 }
                 // custom-descriptors casts: `[v, desc]` — the descriptor is popped (and must not be
@@ -3836,7 +3933,7 @@ fn run(
                     let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
                     let matched = desc_eq_matches(ctx.code, store, v, desc, dst);
                     pc = if matched == (instr.op == Op::BrOnCastDescEq) {
-                        frame.branch(label)?
+                        frame.branch(label, store)?
                     } else {
                         pc + 1
                     };
