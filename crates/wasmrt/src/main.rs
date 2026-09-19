@@ -293,19 +293,42 @@ fn db_paths() -> (Vec<String>, String) {
 /// treating that as "unarmed" is exactly the failure §3.3 calls the most dangerous row in the file.
 fn resolve_default_db() -> Option<(String, String)> {
     let (ours, sibling) = db_paths();
-    for p in &ours {
-        if let Ok(text) = std::fs::read_to_string(p) {
-            return Some((p.clone(), text));
+    match choose_db(&ours, &sibling, |p| std::path::Path::new(p).exists()) {
+        DbChoice::Use(path) => std::fs::read_to_string(&path).ok().map(|t| (path, t)),
+        DbChoice::NoneButSiblingHasOne => {
+            eprintln!(
+                "wasmrt: warning: a pin DB exists at {sibling} but not at {} — \
+                 verification is NOT armed (move or copy it to the shared path)",
+                ours[0]
+            );
+            None
         }
+        DbChoice::None => None,
     }
-    if std::path::Path::new(&sibling).exists() {
-        eprintln!(
-            "wasmrt: warning: a pin DB exists at {sibling} but not at {} — \
-             verification is NOT armed (move or copy it to the shared path)",
-            ours[0]
-        );
+}
+
+/// Which DB a run is governed by — the decision alone, with no I/O, so the one case that matters
+/// can be tested.
+#[derive(Debug, PartialEq, Eq)]
+enum DbChoice {
+    /// Read this one.
+    Use(String),
+    /// Nothing of ours, but the SIBLING runtime has one. ⚠️ **This is the case the owner's decision
+    /// exists for**: an operator pinned modules for the runtime they just swapped out, and treating
+    /// that as "unarmed" would disable verification with no message at all.
+    NoneButSiblingHasOne,
+    /// Nothing anywhere: an unarmed build, which runs everything by design.
+    None,
+}
+
+fn choose_db(ours: &[String], sibling: &str, exists: impl Fn(&str) -> bool) -> DbChoice {
+    if let Some(p) = ours.iter().find(|p| exists(p)) {
+        return DbChoice::Use(p.clone());
     }
-    None
+    if exists(sibling) {
+        return DbChoice::NoneButSiblingHasOne;
+    }
+    DbChoice::None
 }
 
 /// Authorize the bytes that are about to run. `true` to proceed.
@@ -1546,5 +1569,70 @@ fn print_summary(path: &str, m: &Module) -> bool {
             println!("  validation FAILED: {}", invalidity_report(&e));
             false
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 🔒 The owner's anti-silent-disarm rule (`interop.md` §3.3): a swap must never be able to turn
+    /// verification off without saying so. The shared path wins, our legacy path is a fallback, and
+    /// finding only the SIBLING's DB is a case of its own rather than "unarmed".
+    #[test]
+    fn a_swap_cannot_disarm_verification_in_silence() {
+        let ours = std::vec![String::from("/etc/wasmtk/pins"), String::from("/etc/wasmrt/pins")];
+        let sibling = "/etc/wazmrt/pins";
+        let only = |want: &'static str| move |p: &str| p == want;
+
+        assert_eq!(
+            choose_db(&ours, sibling, only("/etc/wasmtk/pins")),
+            DbChoice::Use(String::from("/etc/wasmtk/pins")),
+            "the shared path is preferred"
+        );
+        assert_eq!(
+            choose_db(&ours, sibling, only("/etc/wasmrt/pins")),
+            DbChoice::Use(String::from("/etc/wasmrt/pins")),
+            "our own path still works as a fallback"
+        );
+        assert_eq!(
+            choose_db(&ours, sibling, only("/etc/wazmrt/pins")),
+            DbChoice::NoneButSiblingHasOne,
+            "ONLY the sibling has one — this must be said out loud, not silently unarmed"
+        );
+        assert_eq!(choose_db(&ours, sibling, |_| false), DbChoice::None);
+        // The shared path wins even when every path has a DB, so both runtimes read the same one.
+        assert_eq!(
+            choose_db(&ours, sibling, |_| true),
+            DbChoice::Use(String::from("/etc/wasmtk/pins"))
+        );
+    }
+
+    /// Both separators, and a Windows drive letter is not a separator (the reason `::` exists).
+    #[test]
+    fn preopen_specs_split_the_way_both_runtimes_spell_them() {
+        assert_eq!(split_preopen("."), (String::from("."), String::from(".")));
+        assert_eq!(split_preopen(".:/g"), (String::from("."), String::from("/g")));
+        assert_eq!(split_preopen(".::/g"), (String::from("."), String::from("/g")));
+        assert_eq!(
+            split_preopen("C:\\data"),
+            (String::from("C:\\data"), String::from("C:\\data")),
+            "a drive letter is not a separator"
+        );
+        assert_eq!(
+            split_preopen("C:\\data:/d"),
+            (String::from("C:\\data"), String::from("/d"))
+        );
+    }
+
+    #[test]
+    fn sizes_accept_the_suffixes_the_sibling_documents() {
+        assert_eq!(parse_size("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_size("2G"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_size("100000"), Some(100_000));
+        assert_eq!(parse_size("0"), Some(0));
+        assert_eq!(parse_size("lots"), None);
+        assert_eq!(parse_size(""), None);
     }
 }
