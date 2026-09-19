@@ -196,8 +196,10 @@ the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, c
 era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
 
 🚦 **T13's conformance numbers are at their target, and the last KNOWN format deviations are closed**
-(item 7, 2026-09-19 — three decoder defects, one more than logged). What stands between here and `1.0.0`:
-items 1–2 below (not ours to execute), then the `releasing.md` checklist (item 8).
+(item 7, 2026-09-19 — three decoder defects, one more than logged). The CLI exit-code breach of the
+contract is closed too, **coordinated** (part 8; `interop.md` §2.3m). What stands between here and
+`1.0.0`: items 1–2 below (not ours to execute), then the `releasing.md` checklist (item 8). 🤝 **wazmrt
+has an unadopted annex to read** (§2.3m: Z1–Z3, and the row-3 promotion); **Z2 needs the owner.**
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -257,6 +259,24 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### 🤝 DAY 4, part 8 — `coordinate`: the exit-code row, and three breaches where one was logged. `[x]`
+
+The owner ordered `coordinate` on the item logged as needing it ("`wasmrt <file>` exits 0 on an invalid
+module"). Both `interop.md` copies were byte-identical at v10. Running both binaries (never reading them)
+showed §2.3 row 2 was already AGREED, with **wasmrt in breach three times**: summarize of an invalid
+module, no arguments, and `wast` on failures. **All three were fixed on wasmrt's side with no contract
+change**, pinned by `cli_exit_codes.rs` (mutation-verified); an 18-row matrix agrees throughout. Row 3
+(per-kind codes) was measured and **both already use 1 everywhere**, so its promotion to AGREED is
+proposed, which closes §5 #4. **For wazmrt**, recorded in the annex (§2.3m) and not written into their
+tree: Z1, an unmatched export name is silently ignored with rc 0 (F1's mirror); **Z2, unknown flags,
+🚦 needs an owner decision**; Z3, the header text. Regime A held: an annex, no version bump. The copies now
+differ, as an unadopted proposal. 529 tests, clippy clean.
+
+⚠️ **This session fell into the very trap it was fixing**: part 7's corpus loop counted "validated" from
+`wasmrt <file>`'s exit status. Re-measured by reading the verdict text, the figure holds at 531, but it had
+been reported as measured when it was not. 🎓 *§1.4 (diff the OUTPUT, not exit codes) is only needed while
+the exit code lies; fixing the code beats remembering the rule.*
 
 ##### ✅ DAY 4, part 7 — a value type inside a function body: ONE reader, and three defects where two were logged. `[x]`
 

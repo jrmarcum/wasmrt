@@ -85,6 +85,16 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🤝 2026-09-19 — day 4, part 8: the CLI exit status is the verdict (coordinated with wazmrt)
+
+`wasmrt <file>` exits **1** on an invalid module, and so do `wasmrt` with no arguments and `wasmrt wast`
+on any failed assertion, unparseable script or unreadable file. All three exited 0 (`known-issues.md` top;
+`interop.md` §2.3m). **Workspace 529 tests** (+4: `crates/wasmrt/tests/cli_exit_codes.rs`).
+✅ **So the exit status is now a usable gate**: `wasmrt wast <dir>` in CI fails on a failure, and a `.wat`
+corpus loop may key on `wasmrt <file>`'s status. ⚠️ **Before this, it could not**, and the 2026-09-19 corpus
+loop did, until it was caught. The `.wat` corpus is **531/535 validated, measured by the verdict text**.
+Suite unchanged, 64,598 / 0 / 0 (the runner's output is unchanged; only its status moved).
+
 ### 🆕 2026-09-19 — day 4, part 7: **64,598 / 0 / 0, byte-identical** (value types in function bodies)
 
 **`tests/value-type-encodings.wast`** (34 assertions) — every one-byte value-type encoding as a block type

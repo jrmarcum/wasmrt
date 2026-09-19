@@ -364,6 +364,62 @@ invocations of the other, which is the opposite of swappable.
 | success → 0, host-side failure (bad args, unreadable file, invalid module, refused by policy) → non-zero | ✅ **AGREED** |
 | **specific non-zero codes per failure kind** | ⬜ **UNVERIFIED** — neither has been compared; a script that branches on a specific code is not yet portable |
 
+#### 🔬 2.3m — §2.3 MEASURED by running both binaries (wasmrt session, 2026-09-19) — 📎 ANNEX, offered for fold-in
+
+*A wasmrt contribution under regime A: **not a version**, rows above deliberately left as the pen-holder wrote
+them. Triggered by the owner's `coordinate` on the one item wasmrt had logged as needing it: "`wasmrt <file>`
+exits 0 on an invalid module".*
+
+**Method.** Both copies of this file byte-compared first: **IDENTICAL at v10** (neither changed since
+2026-08-19). Binaries: `wasmrt 0.9.0 (abi 1)` at `3c49845dd`, and `wazmrt 1.0.1 (abi 2)` from
+`zig-out/bin`, built 2026-08-19 13:02. Its only later source commit is H7 (13:05), and the binary
+**already carries H7** (verified: `wazmrt m.wasm x --dir .` prints H7's warning). Nothing was built or
+written in the wazmrt tree. Fixtures come from `wasm-tools parse`, which does not validate, so an ill-typed
+module really reaches each validator. `rc` is read from the process, not through a pipe (§2.1m's lesson).
+
+**Row 2 ("host-side failure → non-zero", ✅ AGREED) — wasmrt was in breach three times; wazmrt in none:**
+
+| | invocation | wasmrt before | wazmrt | wasmrt after |
+| --- | --- | --- | --- | --- |
+| **W1** | summarize an INVALID module (`.wasm` or `.wat`) | **0** | 1 | 1 |
+| **W2** | no arguments at all | **0** (printed the version) | 1 (usage) | 1 (usage) |
+| **W3** | `.wast` with a FAILED assertion / an UNPARSEABLE script / an UNREADABLE file | **0 / 0 / 0** | 1 / 1 / 1 | 1 / 1 / 1 |
+
+✅ **Fixed on wasmrt's side**, pinned by `crates/wasmrt/tests/cli_exit_codes.rs`, which is mutation-verified.
+This needs **no contract change**: it moves wasmrt ONTO a row both copies already carry. After the fix, an
+18-row matrix agrees on success vs failure in every row. It covers summarize, call-an-export and WASI
+`_start`, across valid, invalid, malformed, missing, trapping and `.wat` inputs. 🎓 *W1 is also why §2.1's
+summarize row read "AGREED on exit code": it was measured on a VALID module only.* Skips in a `.wast` run do
+**not** fail it on wasmrt: they are reported separately.
+
+**Row 3 ("specific non-zero codes per failure kind", ⬜) — MEASURED, and the two already agree.**
+Every host-side failure kind we exercised returns exactly **1** on both runtimes: unreadable file, bad
+magic, unassemblable `.wat`, invalid module on every path, wrong arity, unparseable argument literal,
+missing arguments, and usage. So does a guest **trap**. `proc_exit(n)` returns `n` on both (row 1).
+📎 **Proposed for the pen-holder:** promote row 3 to *"✅ AGREED: every host-side failure and every trap
+→ 1; `proc_exit(n)` → `n & 0xff`"*. That also closes **§5 decision #4** without a per-kind table. A script
+cannot tell a trap from a refusal by code alone on either runtime, and nothing measured suggests it needs to.
+
+**Observations for wazmrt.** Neither runtime is the oracle, so these are recorded, not diagnosed, and
+fixing them is wazmrt's call in wazmrt's tree:
+
+* **Z1 — the MIRROR of F1.** `wazmrt valid.wasm nosuch`, naming an export the module does not have,
+  prints the summary and exits **0**. The name is silently ignored. wasmrt's `run` exits 1 with *"no
+  exported function `nosuch`"*. Same class as F1 (an argument dropped, the run reported as success),
+  on the other side.
+* **Z2 — unknown flags have no row, and the two diverge.** `wazmrt m.wasm --bogus` exits **0** (the flag
+  goes to the guest). wasmrt refuses an unknown option in either position: rc 1, *"use `--` to pass it
+  to the guest"*. ⚠️ **Not a simple fix on either side.** wazmrt's flags-after-path form cannot tell a
+  mistyped host flag from a guest argument without `--`, and §2.4 already records why that is dangerous
+  (`… install --yes`). 🚦 **Needs a decision from the owner / pen-holder**, and possibly a §2.4 row.
+* **Z3 — output text, out of scope (§0), recorded anyway.** wazmrt's summary header reads *"valid wasm
+  v1, N section(s)"* for a module whose last line reports `validation: FAILED`. The exit code is right
+  (1); the first line a human reads is not.
+
+**§2.1m's "not covered yet" list, updated:** §2.3's per-failure exit codes and the `.wast` row's exit
+behaviour are now covered. wazmrt also accepts `.wat` on its summarize and call paths (measured), so the
+§2.1 "assemble" row concerns only the `wat` subcommand.
+
 ### 2.4 Flag-parsing rules that are part of the contract
 
 - **`-h`/`--help` and `-v`/`--version` are recognised as the FIRST argument only**, so a `--help` inside
@@ -612,6 +668,7 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 
 | version | date | change |
 | --- | --- | --- |
+| **annex** 📎 | 2026-09-19 | *(wasmrt contribution, NOT a version — offered for fold-in.)* 🔬 **§2.3 MEASURED by running both (§2.3m).** Copies byte-identical at v10 beforehand. **Row 2: wasmrt was in breach three times** (summarize of an invalid module, no arguments, `wast` on failures), all exiting 0 where wazmrt exits 1. **Fixed on wasmrt's side with no contract change**, pinned by `cli_exit_codes.rs`; an 18-row matrix now agrees throughout. **Row 3: both already use 1 for every host failure and every trap** → proposed promotion to ✅ AGREED, which closes §5 #4. **For wazmrt:** Z1, an unmatched export name is silently ignored with rc 0 (F1's mirror); Z2, unknown flags have no row and diverge (🚦 owner/pen-holder); Z3, the header says "valid" for an invalid module (text, out of scope). |
 | **annex** 📎 | 2026-08-19 | *(wasmrt contribution, NOT a version — wazmrt leads and holds the pen; offered for fold-in.)* |
 | *(annex detail)* | 2026-08-19 | 🔬 **§4 CHECK 5 RUN FOR THE FIRST TIME — the CLI rows verified by RUNNING both binaries, not by reading either** (§2.1m). wasmrt 0.9.0 vs wazmrt 1.0.0, same box. **Five findings.** ⚠⚠ **F1: the two “call an export” gaps fail in OPPOSITE directions** — `wasmrt add.wat add 2 3` exits **0** printing a summary and silently ignoring the export and its arguments, while `wazmrt run …` exits **1** and says why; same missing capability, and wasmrt's half is the silent-wrong-output one, so it outranks the other. **F2: the “summarize” row was marked ✅ AGREED and the output text is NOT identical** (behaviour and exit code do agree) — the word “identical” had been written from reading. 🆕 **F3: FLAG POSITION differs and had no row at all** — wazmrt's flags follow the module path, wasmrt's precede it, and ⚠⚠ **a trailing `--dir` under wasmrt is passed to the GUEST, so the sandbox is silently never granted.** 🔻 **F4: a CORRECTION — §2.2’s claim that a single-colon `--dir` “does not error, it preopens the wrong thing” is FALSE; measured, it fails loudly** (`errno 29`, rc=1). That claim had been carried as ⚠⚠ since v1 and was written from reading the code. **F5: `-v` output shape differs** (1 line vs 2). ⚠ Everything check 5 did not reach — the `.wast` row, `--ro-dir`, `--allow-symlink`, `--env`, the ceiling flags, `--`, and all of §2.3’s per-failure exit codes — stays ⬜ UNVERIFIED and **may not be quoted as agreed.** |
 | **10** | 2026-08-19 | 🆕 **wazmrt WARNS on a misplaced flag (§2.2 position row) — H7, and F3 is what found it.** wazmrt recognises host flags only in the LEADING run after the module path; the inverse of that protection had never been asked, so a flag written after a guest argument was **silently donated to the guest and never applied**. Fail-closed for `--no-verify`/`--dir`, ⚠️ **fail-OPEN for `--verify`, `--pins` and every `--max-*`** — a user asks for a restriction, gets no error, and runs without it. Now warns (never refuses: a guest may legitimately take `--dir` as its own argument), and **nothing after an explicit `--` is examined**. Zero bytes. 🎓 Demonstrated with `--max-iterations`, a flag wazmrt had added HOURS earlier in the same track — *a change's own new surface is the one place the audit that produced it will not look.* |

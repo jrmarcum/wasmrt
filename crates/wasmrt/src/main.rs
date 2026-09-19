@@ -16,7 +16,14 @@ use wasmrt_core::validate::{validate, ValidateError};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        None | Some("-v" | "--version") => {
+        // No arguments is a usage error, not a request for the version: `interop.md` §2.3 makes
+        // bad arguments non-zero, and wazmrt exits 1 here (measured 2026-09-19). This printed the
+        // version and exited 0.
+        None => {
+            print_help();
+            ExitCode::FAILURE
+        }
+        Some("-v" | "--version") => {
             println!(
                 "wasmrt {} (abi {})",
                 wasmrt_core::VERSION,
@@ -501,7 +508,16 @@ fn run_wast(rest: &[String]) -> ExitCode {
             println!("  {c:>6}  {n}");
         }
     }
-    ExitCode::SUCCESS
+    // ⚠️⚠️ A test runner's exit status must say whether the tests passed. This was
+    // unconditionally SUCCESS — a failed assertion, an unparseable script and an unreadable file
+    // all exited 0 — so no CI job could gate on `wasmrt wast`. wazmrt and `wasmtime wast` both
+    // exit non-zero (measured 2026-09-19). SKIPS do not fail the run: they are reported
+    // separately, and the per-file gate (`scripts/conformance-diff.sh`) is what judges them.
+    if failed > 0 || errored > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn collect_wast(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -663,9 +679,17 @@ fn summarize(path: &str) -> ExitCode {
         }
     };
     match module::decode(&bytes) {
+        // ⚠️⚠️ The exit status IS the verdict. This returned SUCCESS whatever validation said, so
+        // `wasmrt <file> && …` passed every invalid module — the contract's §2.3 ("invalid module →
+        // non-zero", AGREED in both copies) was violated here and only here; wazmrt exits 1 on the
+        // same module. Measured 2026-09-19 during `coordinate`. It had also fooled this project's own
+        // `.wat` corpus gate at least twice.
         Ok(m) => {
-            print_summary(path, &m);
-            ExitCode::SUCCESS
+            if print_summary(path, &m) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
         Err(e) => {
             eprintln!("wasmrt: {path}: decode failed: {e}");
@@ -674,7 +698,8 @@ fn summarize(path: &str) -> ExitCode {
     }
 }
 
-fn print_summary(path: &str, m: &Module) {
+/// Print the summary and the validation verdict; `true` iff the module VALIDATED.
+fn print_summary(path: &str, m: &Module) -> bool {
     let defined_funcs = m.functions.len();
     let imported_funcs = m.imported_func_count() as usize;
     println!("{path}: WebAssembly module (version {})", m.version);
@@ -708,15 +733,23 @@ fn print_summary(path: &str, m: &Module) {
         }
     }
     match validate(m) {
-        Ok(()) => println!("  validation OK"),
-        // Deferred typing arm (SIMD / atomics / GC objects / EH) — not a verdict on the
-        // module, just a gap in this release's validator.
+        Ok(()) => {
+            println!("  validation OK");
+            true
+        }
+        // Deferred typing arm — not a verdict on the module, a gap in the validator. Still
+        // NON-ZERO: a caller using this command as a validity gate must not pass a module
+        // nobody checked (that direction fails open).
         Err(ValidateError::UnsupportedValidation) => {
             println!("  validation SKIPPED (uses a construct the validator can't check yet)");
+            false
         }
         // Name the function when the failure was inside one. A bare `TypeMismatch` for a module
         // with twenty bodies is a verdict without a diagnosis — localizing one by hand is what
         // T9a#9 cost before this existed.
-        Err(e) => println!("  validation FAILED: {}", invalidity_report(&e)),
+        Err(e) => {
+            println!("  validation FAILED: {}", invalidity_report(&e));
+            false
+        }
     }
 }

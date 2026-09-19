@@ -342,7 +342,32 @@ with nothing behind it. Restricted to an atom starting with a DIGIT, which also 
 `funcref`, `declare` and every reftype keyword **by construction** rather than by a keyword list a
 future spelling could outgrow. All eight spellings now agree with wasmtime in both directions.
 
-## 🟡 OPEN, and it is a CONTRACT SURFACE — `wasmrt <file>` exits **0** on an invalid module
+## ✅ CLOSED 2026-09-19 (coordinated) — the CLI's exit status now IS the verdict: THREE exit-0 paths, not one
+
+🤝 **Coordinated first, as this entry demanded.** Both copies of `interop.md` byte-compared IDENTICAL at v10,
+then both binaries were RUN (the whole record is `interop.md` §2.3m). The finding reframed the question.
+§2.3 row 2 (*"host-side failure — bad args, unreadable file, **invalid module** → non-zero"*) was already
+✅ AGREED in both copies, and wazmrt already exits 1. **So this was wasmrt breaching an agreed row, not a
+contract change**, and there were three breaches:
+
+| | wasmrt before | wazmrt | after |
+| --- | --- | --- | --- |
+| `wasmrt <file>` on an invalid module (this entry) | 0 | 1 | **1** |
+| `wasmrt` with no arguments | 0 | 1 | **1** |
+| `wasmrt wast`: failed assertion / unparseable script / unreadable file | 0 / 0 / 0 | 1 / 1 / 1 | **1 / 1 / 1** |
+
+⚠️⚠️ **`wasmrt wast` exiting 0 on FAILED ASSERTIONS was the serious one**: no CI job could ever gate on it.
+Pinned by `crates/wasmrt/tests/cli_exit_codes.rs` (mutation-verified at 4 sites). An 18-row cross-runtime
+matrix now agrees throughout. ⚠️ **And this entry's trap was fallen into AGAIN on 2026-09-19, before the
+fix**: that day's `.wat` corpus loop counted "validated" from this exit status, so its "531 validated" was
+never measured. Re-measured by reading the verdict text, it holds at **531**, but it was an inference
+reported as a measurement. With the status fixed, the trap is gone rather than merely documented.
+Also found for wazmrt, and theirs to act on: Z1–Z3 in `interop.md` §2.3m (Z2, unknown flags, 🚦 needs
+an owner decision).
+
+*The entry as it stood:*
+
+### ~~OPEN~~, and it is a CONTRACT SURFACE — `wasmrt <file>` exits **0** on an invalid module
 
 `wasmrt <file>` (summarize + type-check) prints `validation FAILED: …` and **exits 0**. A script using
 that path as a validity gate passes every invalid module.
