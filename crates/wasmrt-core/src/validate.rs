@@ -397,6 +397,8 @@ pub struct FailureSite {
 // and a stale value can only make a *later* failure's location wrong, never a success look failed.
 #[cfg(feature = "std")]
 std::thread_local! {
+    // The initializer IS `const { … }`; clippy 0.1.100 (nightly 2026-08-31) flags it regardless.
+    #[allow(clippy::missing_const_for_thread_local)]
     static SITE: core::cell::Cell<FailureSite> = const { core::cell::Cell::new(FailureSite {
         func_index: None, offset: None, expected: None, found: None,
     }) };
@@ -582,6 +584,34 @@ fn check_declared_subtyping(module: &Module) -> ValidateResult<()> {
         }
     }
     Ok(())
+}
+
+/// custom-descriptors: the descriptor type of `ti`, or `InvalidDescriptor` ("type without
+/// descriptor") — the precondition of every `*_desc` instruction, decided in one place.
+fn descriptor_of(module: &Module, ti: u32) -> ValidateResult<u32> {
+    module.comp_types.get(ti as usize).ok_or(ValidateError::UndefinedType)?;
+    module
+        .type_links
+        .get(ti as usize)
+        .and_then(|l| l.descriptor)
+        .ok_or(ValidateError::InvalidDescriptor)
+}
+
+/// The descriptor operand a desc-cast to `rt` takes: `(ref null (exact $d))` for an EXACT target —
+/// only the exact descriptor proves an exact type — and `(ref null $d)` otherwise, where any subtype
+/// of `$d` describes a subtype of the target. `rt` must name a concrete type WITH a descriptor.
+fn desc_operand_type(module: &Module, rt: RefType) -> ValidateResult<V> {
+    let (t, exact) = match rt.heap {
+        HeapType::Concrete(t) => (t, false),
+        HeapType::Exact(t) => (t, true),
+        _ => return Err(ValidateError::InvalidDescriptor),
+    };
+    let d = descriptor_of(module, t)?;
+    Ok(if exact {
+        V::exact_ref(true, RefHeap::Struct, d)
+    } else {
+        V::concrete_ref(true, RefHeap::Struct, d)
+    })
 }
 
 /// custom-descriptors: `struct.new` / `struct.new_default` may not allocate a type that HAS a
@@ -916,6 +946,31 @@ fn validate_const_expr(
                 let sub = r.read_var_u32()?;
                 match sub {
                     // struct.new t / struct.new_default t
+                    // struct.new_desc / struct.new_default_desc — constant (a global may build a whole
+                    // descriptor chain). Same typing as the body forms.
+                    0x20 | 0x21 => {
+                        let ti = r.read_var_u32()?;
+                        let d = descriptor_of(module, ti)?;
+                        let got = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                        if !subtype_of(module, got, V::exact_ref(true, RefHeap::Struct, d)) {
+                            return Err(ValidateError::TypeMismatch);
+                        }
+                        let fields = module
+                            .struct_fields(ti)
+                            .ok_or(ValidateError::UndefinedType)?
+                            .to_vec();
+                        if sub == 0x20 {
+                            for f in fields.iter().rev() {
+                                let got = stack.pop().ok_or(ValidateError::StackUnderflow)?;
+                                if !subtype_of(module, got, f.storage.unpacked()) {
+                                    return Err(ValidateError::TypeMismatch);
+                                }
+                            }
+                        } else if fields.iter().any(|f| f.storage.unpacked().is_non_null_ref()) {
+                            return Err(ValidateError::TypeMismatch);
+                        }
+                        push(&mut stack, V::exact_ref(false, RefHeap::Struct, ti))?;
+                    }
                     0x00 | 0x01 => {
                         let ti = r.read_var_u32()?;
                         check_plainly_allocatable(module, ti)?;
@@ -2014,6 +2069,53 @@ impl<'a> FuncValidator<'a> {
                 }
                 self.push_val_t(V::exact_ref(false, RefHeap::Struct, ti));
             }
+            // custom-descriptors allocation: the fields (for `_desc`), then the DESCRIPTOR on top —
+            // an EXACT reference to the type's own descriptor type, since only that describes it.
+            Op::StructNewDesc | Op::StructNewDefaultDesc => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let d = descriptor_of(self.module, ti)?;
+                self.pop_expect(V::exact_ref(true, RefHeap::Struct, d))?;
+                let fields = self
+                    .module
+                    .struct_fields(ti)
+                    .ok_or(ValidateError::UndefinedType)?;
+                if instr.op == Op::StructNewDesc {
+                    for f in fields.iter().rev() {
+                        self.pop_expect(f.storage.unpacked())?;
+                    }
+                } else if fields.iter().any(|f| f.storage.unpacked().is_non_null_ref()) {
+                    return Err(ValidateError::TypeMismatch); // not defaultable
+                }
+                self.push_val_t(V::exact_ref(false, RefHeap::Struct, ti));
+            }
+            // The descriptor of an object of `$t`. EXACT only when the input is: an inexact
+            // `(ref $t)` may hold a subtype, whose descriptor is a subtype of `$t`'s. A bottom
+            // input (`none`, or unreachable) proves anything, so it counts as exact.
+            Op::RefGetDesc => {
+                let ti = expect_gc_type(&instr.imm)?;
+                let d = descriptor_of(self.module, ti)?;
+                let exact = match self.pop_val()? {
+                    StackType::Unknown => true,
+                    StackType::Val(v) => {
+                        if !subtype_of(self.module, v, V::concrete_ref(true, RefHeap::Struct, ti)) {
+                            return Err(ValidateError::TypeMismatch);
+                        }
+                        // 🔒 Exact only for an exact input OF `$t` ITSELF. An exact `$c <: $t` holds
+                        // a `$c`, whose descriptor is `$c`'s — a strict subtype of `$t`'s — so typing
+                        // the result `(exact $t.desc)` would give a `$d` the static type EXACTLY `$b`:
+                        // type confusion. (`ref_get_desc.wast`: "only exact inputs of the inspected
+                        // type produce exact outputs" — this read `v.is_exact()` alone until the
+                        // corpus refused it.)
+                        (v.is_exact() && self.module.types_equal(v.concrete_index(), ti))
+                            || !v.is_concrete()
+                    }
+                };
+                self.push_val_t(if exact {
+                    V::exact_ref(false, RefHeap::Struct, d)
+                } else {
+                    V::concrete_ref(false, RefHeap::Struct, d)
+                });
+            }
             Op::StructGet | Op::StructGetS | Op::StructGetU => {
                 let (ti, fi) = expect_gc_field(&instr.imm)?;
                 let field = self.struct_field(ti, fi)?;
@@ -2325,6 +2427,15 @@ impl<'a> FuncValidator<'a> {
             // --- WasmGC: casts ---
             // Spec: `ref.test rt : [rt'] -> [i32]` with `rt <: rt'` — operand and target
             // must share a TOP type, so `ref.test (ref func)` on an `externref` is invalid.
+            // `[any-ish, desc] -> rt`: the descriptor on top, then the value, cast by descriptor
+            // IDENTITY at run time (see `interp::desc_eq_matches`).
+            Op::RefCastDescEq => {
+                let rt = expect_ref_cast(&instr.imm)?;
+                let target = ref_type_val_type(self.module, rt)?;
+                self.pop_expect(desc_operand_type(self.module, rt)?)?;
+                self.pop_expect(target.ref_heap().top().val_type(true))?;
+                self.push_val_t(target);
+            }
             Op::RefTest | Op::RefCastOp => {
                 let target = ref_type_val_type(self.module, expect_ref_cast(&instr.imm)?)?;
                 self.pop_expect(target.ref_heap().top().val_type(true))?;
@@ -2337,13 +2448,33 @@ impl<'a> FuncValidator<'a> {
             // The label carries `[t* rt]`; the operand is `[t* src]`. `br_on_cast` branches
             // when the ref matches `dst` and falls through otherwise; `br_on_cast_fail` is
             // the mirror. `dst` must be a subtype of `src` (a downcast).
-            Op::BrOnCast | Op::BrOnCastFail => {
+            // The desc-eq branches are these two with ONE extra operand — the descriptor, on top —
+            // and the same edge typing. Shared rather than copied: the `rt1 \ rt2` difference below
+            // was once wrong on one of two copies (see its note), and a third copy would be a third
+            // chance.
+            Op::BrOnCast | Op::BrOnCastFail | Op::BrOnCastDescEq | Op::BrOnCastDescEqFail => {
                 let Imm::BrCast { label, src, dst } = instr.imm else {
                     return Err(ValidateError::UnsupportedValidation);
                 };
+                if matches!(instr.op, Op::BrOnCastDescEq | Op::BrOnCastDescEqFail) {
+                    self.pop_expect(desc_operand_type(self.module, dst)?)?;
+                }
                 let src_vt = ref_type_val_type(self.module, src)?;
                 let dst_vt = ref_type_val_type(self.module, dst)?;
-                if !subtype_of(self.module, dst_vt, src_vt) {
+                // The GC rule is a DOWNCAST: `dst <: src`. custom-descriptors RELAXES it to "the same
+                // hierarchy" — `br_on_cast 0 eqref anyref` and `… structref arrayref` become valid,
+                // `… (ref null any) (ref null func)` stays invalid. wasm-tools gates the relaxation on
+                // the feature, and so does this: the core `br_on_cast.wast` asserts the strict rule,
+                // the proposal's copy the relaxed one. The desc-eq branches exist only with the
+                // proposal, so they always take the relaxed rule.
+                let relaxed = self.features.has(Feature::CustomDescriptors)
+                    || matches!(instr.op, Op::BrOnCastDescEq | Op::BrOnCastDescEqFail);
+                let ok = if relaxed {
+                    dst_vt.ref_heap().top() == src_vt.ref_heap().top()
+                } else {
+                    subtype_of(self.module, dst_vt, src_vt)
+                };
+                if !ok {
                     return Err(ValidateError::TypeMismatch);
                 }
                 let lt = self.label_types_at(label)?;
@@ -2370,7 +2501,8 @@ impl<'a> FuncValidator<'a> {
                 };
                 // What the branch carries: `dst` for br_on_cast (it fires on a match), the
                 // difference for br_on_cast_fail (it fires on a miss).
-                let carried = if instr.op == Op::BrOnCast { dst_vt } else { diff };
+                let on_match = matches!(instr.op, Op::BrOnCast | Op::BrOnCastDescEq);
+                let carried = if on_match { dst_vt } else { diff };
                 if !subtype_of(self.module, carried, lt[lt.len() - 1]) {
                     return Err(ValidateError::TypeMismatch);
                 }
@@ -2380,7 +2512,7 @@ impl<'a> FuncValidator<'a> {
                 self.push_vals(&prefix);
                 // Fall-through is the mirror: the difference for br_on_cast, the narrowed `dst`
                 // for br_on_cast_fail.
-                self.push_val_t(if instr.op == Op::BrOnCast { diff } else { dst_vt });
+                self.push_val_t(if on_match { diff } else { dst_vt });
             }
             Op::I31GetS | Op::I31GetU => {
                 self.pop_expect(V::I31REF)?;

@@ -2327,7 +2327,18 @@ fn classify_unknown_mnemonic(name: &str) -> Error {
     // (`ref.get_desc`, `ref.cast_desc`, `ref.cast_desc_eq`, `struct.new_desc`,
     // `br_on_cast_desc`/`_fail`/`_eq`/`_eq_fail` …). Matched as a substring on purpose:
     // enumerating them invites exactly the omission this function must not make.
+    // ⚠️ Tracks D3/D4 built the current spellings (2026-09-19), which `Op::from_text_name`
+    // resolves before this function is reached; the rule stays for the proposal's earlier names
+    // (`ref.cast_desc`, `br_on_cast_desc` …), which are real and unbuilt.
     if name.contains("desc") {
+        return Error::UnimplementedInstr;
+    }
+    // stack-switching (phase 3) — continuations. Not in the vendored corpus, so this costs no
+    // skip today; it is listed because it is a real proposal wasmrt has not built, and a module
+    // using it must be scored as OUR gap rather than as malformed input.
+    if name.starts_with("cont.")
+        || matches!(name, "resume" | "resume_throw" | "resume_throw_ref" | "suspend" | "switch")
+    {
         return Error::UnimplementedInstr;
     }
     // ⚠️ wide-arithmetic's four mnemonics were listed here until 2026-09-17. Track W implemented
@@ -3529,7 +3540,7 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
     match op {
         // `ref.null`'s heap type may be a LIST — `(ref.null (exact $t))` — which the atom/list split
         // below would take for an operand. Same shape as the cast targets.
-        O::RefTest | O::RefCastOp | O::RefNull => {
+        O::RefTest | O::RefCastOp | O::RefNull | O::RefCastDescEq => {
             let imm_end = 2.min(l.len());
             for j in imm_end..l.len() {
                 emit_one(ctx, l, j)?;
@@ -3537,7 +3548,7 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
             ctx.record_hint(hint);
             return emit_op_with_immediates(ctx, op, &l[..imm_end], 1);
         }
-        O::BrOnCast | O::BrOnCastFail => {
+        O::BrOnCast | O::BrOnCastFail | O::BrOnCastDescEq | O::BrOnCastDescEqFail => {
             let imm_end = 4.min(l.len());
             for j in imm_end..l.len() {
                 emit_one(ctx, l, j)?;
@@ -3633,6 +3644,23 @@ fn immediate_arity(op: crate::opcode::Op) -> usize {
         // the same reason as the array bulk ops above: falling into the catch-all is how four
         // instructions shipped as bare opcodes, and "0" has to be a decision, not a default.
         O::AnyConvertExtern | O::ExternConvertAny => 0,
+        // ⚠️⚠️ **Every other GC instruction was missing here, so none of them assembled in FLAT form.**
+        // `struct.new $s`, `struct.get $s 0`, `ref.cast (ref null $s)`, `br_on_cast 0 anyref (ref $s)`:
+        // each fell into `_ => 0`, left its immediates in the token stream, and was refused as
+        // `BadImmediate` — while wasm-tools accepts every one. Invisible for the whole GC track because
+        // the spec corpus spells GC instructions FOLDED, and the `.wat` corpus has none flat. Found
+        // 2026-09-19 by the D3 byte-comparison against wasm-tools, which tried both spellings.
+        O::StructNew | O::StructNewDefault | O::ArrayNew | O::ArrayNewDefault | O::ArrayGet
+        | O::ArrayGetS | O::ArrayGetU | O::ArraySet => 1,
+        O::StructGet | O::StructGetS | O::StructGetU | O::StructSet | O::ArrayNewFixed => 2,
+        // A cast's target is ONE list immediate, `(ref null? ht)`.
+        O::RefTest | O::RefCastOp => 1,
+        // label, source type, target type.
+        O::BrOnCast | O::BrOnCastFail => 3,
+        O::ArrayLen | O::RefI31 | O::I31GetS | O::I31GetU | O::RefEq => 0,
+        // custom-descriptors: type-index ops, the desc-eq cast target, and the desc-eq branches.
+        O::StructNewDesc | O::StructNewDefaultDesc | O::RefGetDesc | O::RefCastDescEq => 1,
+        O::BrOnCastDescEq | O::BrOnCastDescEqFail => 3,
         // Loads/stores take optional `offset=`/`align=` atoms, consumed by their emitter.
         _ => 0,
     }
@@ -4170,6 +4198,12 @@ fn emit_op_with_immediates(
         | O::RefCastOp
         | O::BrOnCast
         | O::BrOnCastFail
+        | O::StructNewDesc
+        | O::StructNewDefaultDesc
+        | O::RefGetDesc
+        | O::RefCastDescEq
+        | O::BrOnCastDescEq
+        | O::BrOnCastDescEqFail
         | O::RefI31
         | O::I31GetS
         | O::I31GetU
@@ -4201,6 +4235,13 @@ fn emit_op_with_immediates(
                 O::RefCastOp => 0x16,
                 O::BrOnCast => 0x18,
                 O::BrOnCastFail => 0x19,
+                O::StructNewDesc => 0x20,
+                O::StructNewDefaultDesc => 0x21,
+                O::RefGetDesc => 0x22,
+                // non-null; the cast arm below re-selects 0x24 for a nullable target.
+                O::RefCastDescEq => 0x23,
+                O::BrOnCastDescEq => 0x25,
+                O::BrOnCastDescEqFail => 0x26,
                 O::AnyConvertExtern => 0x1a,
                 O::ExternConvertAny => 0x1b,
                 O::RefI31 => 0x1c,
@@ -4343,7 +4384,8 @@ fn emit_op_with_immediates(
         }
         // --- WasmGC ---
         O::StructNew | O::StructNewDefault | O::ArrayNew | O::ArrayNewDefault | O::ArrayGet
-        | O::ArrayGetS | O::ArrayGetU | O::ArraySet => {
+        | O::ArrayGetS | O::ArrayGetU | O::ArraySet | O::StructNewDesc | O::StructNewDefaultDesc
+        | O::RefGetDesc => {
             let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
             uleb(&mut ctx.out, u64::from(ti));
         }
@@ -4394,17 +4436,21 @@ fn emit_op_with_immediates(
         | O::RefEq
         | O::AnyConvertExtern
         | O::ExternConvertAny => {}
-        O::RefTest | O::RefCastOp => {
+        O::RefTest | O::RefCastOp | O::RefCastDescEq => {
             let (nullable, heap) = parse_ref_type_target(ctx, imm(0)?)?;
             if nullable {
-                // Re-select the nullable sub-opcode (0x14→0x15 test, 0x16→0x17 cast); the
-                // prefix arm above wrote the non-null one.
+                // Re-select the nullable sub-opcode (0x14→0x15 test, 0x16→0x17 cast, 0x23→0x24
+                // desc-eq cast); the prefix arm above wrote the non-null one.
                 let last = ctx.out.len() - 1;
-                ctx.out[last] = if op == O::RefTest { 0x15 } else { 0x17 };
+                ctx.out[last] = match op {
+                    O::RefTest => 0x15,
+                    O::RefCastDescEq => 0x24,
+                    _ => 0x17,
+                };
             }
             emit_heap(&mut ctx.out, heap);
         }
-        O::BrOnCast | O::BrOnCastFail => {
+        O::BrOnCast | O::BrOnCastFail | O::BrOnCastDescEq | O::BrOnCastDescEqFail => {
             let label = ctx.resolve_label(imm(0)?)?;
             let (n1, c1) = parse_ref_type_target(ctx, imm(1)?)?;
             let (n2, c2) = parse_ref_type_target(ctx, imm(2)?)?;

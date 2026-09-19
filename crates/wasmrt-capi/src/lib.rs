@@ -333,6 +333,8 @@ thread_local! {
     /// `Trap::HostTrap` and its text would otherwise be lost. The callback wrapper parks it
     /// here and the call site picks it up. Thread-local because `wasmrt.h` states a store is
     /// single-threaded, so there is exactly one call in flight per thread.
+    // The initializer IS `const { … }`; clippy 0.1.100 (nightly 2026-08-31) flags it regardless.
+    #[allow(clippy::missing_const_for_thread_local)]
     static HOST_TRAP: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 

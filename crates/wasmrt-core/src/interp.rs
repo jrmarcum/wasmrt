@@ -565,6 +565,8 @@ pub enum Trap {
     UndefinedElement,
     /// A null reference where a non-null one is required (`call_ref` / `ref.as_non_null`).
     NullReference,
+    /// A null DESCRIPTOR given to a custom-descriptors allocation or desc-cast.
+    NullDescriptor,
     /// A GC struct field / array element access outside the object's bounds.
     GcOutOfBounds,
     /// The instance allocated more than `MAX_GC_OBJECTS` GC objects (no collector).
@@ -639,6 +641,7 @@ impl fmt::Display for Trap {
             Trap::UndefinedType => f.write_str("type index out of range"),
             Trap::UndefinedElement => f.write_str("element segment index out of range"),
             Trap::NullReference => f.write_str("null reference"),
+            Trap::NullDescriptor => f.write_str("null descriptor reference"),
             Trap::GcOutOfBounds => f.write_str("out of bounds GC access"),
             Trap::GcHeapExhausted => f.write_str("GC heap exhausted"),
             Trap::CastFailure => f.write_str("cast failure"),
@@ -3558,6 +3561,40 @@ fn run(
                     frame.push(r);
                     pc += 1;
                 }
+                // custom-descriptors allocation: the descriptor is on top and must not be null; it
+                // becomes the object's trailing slot (see `object_descriptor`).
+                Op::StructNewDesc | Op::StructNewDefaultDesc => {
+                    let Imm::GcType(ti) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let desc = frame.pop();
+                    if desc == NULL_REF {
+                        return Err(Trap::NullDescriptor);
+                    }
+                    let sf = ctx.module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                    let mut obj: Vec<Value> = if instr.op == Op::StructNewDesc {
+                        let base = frame.stack_base(sf.len())?;
+                        let fields = sf
+                            .iter()
+                            .enumerate()
+                            .map(|(k, f)| pack_field(f.storage, frame.vstack[base + k]))
+                            .collect();
+                        frame.vstack.truncate(base);
+                        fields
+                    } else {
+                        sf.iter().map(|f| default_field(f.storage)).collect()
+                    };
+                    obj.push(desc);
+                    let r = alloc_object(store, ctx.inst, ti, obj)?;
+                    frame.push(r);
+                    pc += 1;
+                }
+                Op::RefGetDesc => {
+                    let idx = gc_object_index(store, frame.pop())?;
+                    let d = object_descriptor(ctx.code, store, idx).ok_or(Trap::UndefinedType)?;
+                    frame.push(d);
+                    pc += 1;
+                }
                 Op::StructGet | Op::StructGetS | Op::StructGetU => {
                     let Imm::GcField { type_index, field } = instr.imm else {
                         return Err(Trap::UnsupportedInstruction);
@@ -3770,6 +3807,38 @@ fn run(
                         pc + 1
                     } else {
                         frame.branch(label)?
+                    };
+                }
+                // custom-descriptors casts: `[v, desc]` — the descriptor is popped (and must not be
+                // null), the value stays, and the match is `desc_eq_matches`'s identity test.
+                Op::RefCastDescEq => {
+                    let Imm::RefCast(rt) = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let desc = frame.pop();
+                    if desc == NULL_REF {
+                        return Err(Trap::NullDescriptor);
+                    }
+                    let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
+                    if !desc_eq_matches(ctx.code, store, v, desc, rt) {
+                        return Err(Trap::CastFailure);
+                    }
+                    pc += 1;
+                }
+                Op::BrOnCastDescEq | Op::BrOnCastDescEqFail => {
+                    let Imm::BrCast { label, dst, .. } = instr.imm else {
+                        return Err(Trap::UnsupportedInstruction);
+                    };
+                    let desc = frame.pop();
+                    if desc == NULL_REF {
+                        return Err(Trap::NullDescriptor);
+                    }
+                    let v = *frame.vstack.last().ok_or(Trap::StackUnderflow)?;
+                    let matched = desc_eq_matches(ctx.code, store, v, desc, dst);
+                    pc = if matched == (instr.op == Op::BrOnCastDescEq) {
+                        frame.branch(label)?
+                    } else {
+                        pc + 1
                     };
                 }
 
@@ -4309,6 +4378,38 @@ fn gc_object_index(store: &Pools, r: Value) -> Result<usize> {
         return Err(Trap::GcOutOfBounds);
     }
     Ok(idx)
+}
+
+/// The descriptor of GC object `idx` — custom-descriptors keeps it as the object's TRAILING slot, and
+/// only for a type that declares one, so no other object pays for it. `None` when the object's type has
+/// no descriptor. (`struct.get`/`struct.set` never reach the slot: a validated field index stops at the
+/// declared field count.)
+fn object_descriptor(code: &[InstanceData], store: &Pools, idx: usize) -> Option<Value> {
+    let obj = store.gc_heap.get(idx)?;
+    let owner = &code.get(obj.owner as usize)?.module;
+    owner.type_links.get(obj.type_index as usize)?.descriptor?;
+    obj.fields.last().copied()
+}
+
+/// Does `v` pass a desc-eq cast to `rt` with descriptor `desc`? A null passes iff `rt` is nullable;
+/// anything else must be a GC object whose stored descriptor IS `desc` — reference identity.
+///
+/// 🔒 Identity is sufficient and nothing weaker is: validation makes every type's descriptor type
+/// describe it, and subtypes' descriptors subtypes of their supertypes', so an object whose descriptor
+/// is `desc` has a type described by `desc`'s type — which the operand typing already made `<:` the
+/// target (or `==` it, when exact). An i31, host or extern value has no descriptor and is refused
+/// BEFORE the heap is indexed, as `ref_matches` refuses them.
+fn desc_eq_matches(code: &[InstanceData], store: &Pools, v: Value, desc: Value, rt: RefType) -> bool {
+    if v == NULL_REF {
+        return rt.nullable;
+    }
+    if v & (I31_TAG | HOST_TAG | EXTERN_TAG) != 0 {
+        return false;
+    }
+    usize::try_from(v)
+        .ok()
+        .and_then(|idx| object_descriptor(code, store, idx))
+        .is_some_and(|d| d == desc)
 }
 
 /// A pending **tail call**: the body ended by handing control to another function rather than
@@ -6304,6 +6405,30 @@ fn eval_const_expr(
                             .map(|(k, f)| pack_field(f.storage, stack[base + k]))
                             .collect();
                         stack.truncate(base);
+                        let v = alloc_object(pools, inst, ti, obj)?;
+                        stack.push(v);
+                    }
+                    // struct.new_desc t / struct.new_default_desc t — the descriptor on top.
+                    sub @ (0x20 | 0x21) => {
+                        let ti = r.read_var_u32()?;
+                        let desc = stack.pop().ok_or(Trap::ConstantExpr)?;
+                        if desc == NULL_REF {
+                            return Err(Trap::NullDescriptor);
+                        }
+                        let sf = module.struct_fields(ti).ok_or(Trap::UndefinedType)?;
+                        let mut obj: Vec<Value> = if sub == 0x20 {
+                            let base = stack.len().checked_sub(sf.len()).ok_or(Trap::ConstantExpr)?;
+                            let fields = sf
+                                .iter()
+                                .enumerate()
+                                .map(|(k, f)| pack_field(f.storage, stack[base + k]))
+                                .collect();
+                            stack.truncate(base);
+                            fields
+                        } else {
+                            sf.iter().map(|f| default_field(f.storage)).collect()
+                        };
+                        obj.push(desc);
                         let v = alloc_object(pools, inst, ti, obj)?;
                         stack.push(v);
                     }

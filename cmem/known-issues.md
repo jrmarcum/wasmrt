@@ -28,6 +28,22 @@ spec: `best-practices.md` §3.8b, exactly. **One `wasmtime compile` on our outpu
 wasmtime 48), raw bytes refused at decode, and the ops moved to internal tags above `0xff` so the
 byte space cannot claim them again.
 
+## ✅ CLOSED 2026-09-19 — the core and custom-descriptors `br_on_cast` files CONTRADICTED each other
+
+custom-descriptors relaxes `br_on_cast`'s typing (target need only share the source's hierarchy), so core
+`br_on_cast.wast` asserts `br_on_cast 1 (ref any) (ref null $t)` invalid and the proposal's copy asserts it valid.
+The runner ran every file with every feature, so one of them always failed. **Not a corpus defect and not an
+engine defect: a RUNNER defect** — canonical runners pick features per directory. Fixed by
+`wast::features_for_script` plus gating the relaxation on `Feature::CustomDescriptors` (as wasm-tools does).
+Contrast the threads snapshot below, which WAS a corpus defect: the difference is whether some feature set
+makes both files right.
+
+## ✅ CLOSED 2026-09-19 — flat-form GC instructions were REFUSED by the assembler
+
+`wat.rs`'s `immediate_arity` did not list the GC instructions, so `struct.new $t`, `array.get $a`, `ref.cast
+(ref $t)` … in FLAT form were refused (the folded form takes a different path). Found writing D3's flat forms;
+the corpus is almost entirely folded. All 14 flat GC forms now byte-identical to wasm-tools' output.
+
 ## 🟡 OPEN — the typed-`select` immediate reads each type as ONE RAW BYTE (found during D1, 2026-09-19)
 
 `opcode.rs`'s `ImmKind::SelectTypes` does `ValType::from_bits(r.read_byte())` and accepts anything `is_valid` —

@@ -26,6 +26,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::features::Features;
 use crate::interp::{externalize, host_ref, Imports, InstanceId, Store, Trap, Value};
 use crate::linker::Linker;
 use crate::module::Module;
@@ -103,8 +104,48 @@ const MAX_RECORDED_SKIPS: usize = 512;
 /// Returns [`Error::Parse`] if the source is not well-formed s-expressions. Command-level
 /// problems are counted in the [`Summary`] rather than returned.
 pub fn run_script(src: &[u8]) -> Result<Summary, Error> {
+    run_script_with_features(src, Features::all())
+}
+
+/// The features a spec-suite script at `path` is written against: the standardized language, plus
+/// the one proposal a `proposals/<name>/` directory tests.
+///
+/// ⚠️⚠️ **A core file and a proposal file can contradict each other**, because a proposal may change
+/// what is VALID: custom-descriptors relaxes `br_on_cast` (the target need no longer be a subtype of
+/// the source), so the core `br_on_cast.wast` asserts `br_on_cast 1 (ref any) (ref null $t)` INVALID
+/// and the proposal's copy asserts it VALID. wasm-tools gates the relaxation on the feature. Running
+/// every file with every feature (as this runner did) makes one of the two files wrong by
+/// construction; canonical spec-test runners pick features per directory, and so does this.
+#[must_use]
+pub fn features_for_script(path: &str) -> Features {
+    let path = path.replace('\\', "/");
+    // Only the SPEC SUITE is written against the standard + one proposal. Any other script — this
+    // repo's own `tests/*.wast` regression files, which exercise proposals on purpose — gets every
+    // feature, as `cargo test` gives it.
+    if !path.contains("testsuite") {
+        return Features::all();
+    }
+    let mut f = Features::standard();
+    if let Some(rest) = path.split("proposals/").nth(1) {
+        match rest.split('/').next().unwrap_or("") {
+            "threads" => f.threads = true,
+            "wide-arithmetic" => f.wide_arithmetic = true,
+            "custom-page-sizes" => f.custom_page_sizes = true,
+            "custom-descriptors" => f.custom_descriptors = true,
+            _ => {}
+        }
+    }
+    f
+}
+
+/// [`run_script`] under a specific feature set — every module the script builds, defines or
+/// asserts about is validated against `features` (see [`features_for_script`]).
+///
+/// # Errors
+/// As [`run_script`].
+pub fn run_script_with_features(src: &[u8], features: Features) -> Result<Summary, Error> {
     let (forms, top_annots) = sexpr::parse_all_annotated(src)?;
-    let mut r = Runner::default();
+    let mut r = Runner { features, ..Runner::default() };
     let mut i = 0;
     while i < forms.len() {
         // §7's **inline module** abbreviation: a run of bare MODULE FIELDS at the top level of a
@@ -165,6 +206,8 @@ fn is_module_field(form: &Sexpr) -> bool {
 
 #[derive(Default)]
 struct Runner {
+    /// The proposals this script is validated against — see [`features_for_script`].
+    features: Features,
     /// One store for the whole script, so `(register …)` can publish a module and a later
     /// one can import from it — the instances genuinely share resources.
     store: Store,
@@ -455,7 +498,7 @@ impl Runner {
     fn build_to_validation(&mut self, node: &Sexpr) -> Result<(), BuildErr> {
         let bytes = Self::module_binary(node).map_err(BuildErr::Assemble)?;
         let md = crate::module::decode(&bytes).map_err(BuildErr::Decode)?;
-        crate::validate::validate(&md).map_err(BuildErr::Validate)
+        crate::validate::validate_with_features(&md, &self.features).map_err(BuildErr::Validate)
     }
 
     /// decode → validate → link → instantiate, from module bytes.
@@ -465,7 +508,7 @@ impl Runner {
     /// own globals, tables and memories rather than a handle to the first.
     fn instantiate_bytes(&mut self, bytes: &[u8]) -> Result<InstanceId, BuildErr> {
         let md = crate::module::decode(bytes).map_err(BuildErr::Decode)?;
-        crate::validate::validate(&md).map_err(BuildErr::Validate)?;
+        crate::validate::validate_with_features(&md, &self.features).map_err(BuildErr::Validate)?;
         let imports = self.resolve_imports(&md)?;
         self.store
             .instantiate(md, imports)
@@ -520,7 +563,7 @@ impl Runner {
                 Ok(bytes) => {
                     let checked = crate::module::decode(&bytes)
                         .map_err(BuildErr::Decode)
-                        .and_then(|md| crate::validate::validate(&md).map_err(BuildErr::Validate));
+                        .and_then(|md| crate::validate::validate_with_features(&md, &self.features).map_err(BuildErr::Validate));
                     match checked {
                         Ok(()) => {
                             if let Some(n) = name {
@@ -927,7 +970,7 @@ impl Runner {
             .map_err(BuildErr::Assemble)
             .and_then(|bytes| {
                 let md = crate::module::decode(&bytes).map_err(BuildErr::Decode)?;
-                crate::validate::validate(&md).map_err(BuildErr::Validate)?;
+                crate::validate::validate_with_features(&md, &self.features).map_err(BuildErr::Validate)?;
                 Ok(branch_hint_diagnostics(&bytes, &md))
             });
         match built {
@@ -1600,10 +1643,11 @@ mod tests {
         // property at all — it exists in **no** proposal, so refusing it is a *verdict*, not a
         // gap. **A test that fails because its example was reclassified is STALE, not broken:**
         // keep the property, re-pick the example. The example must now be a mnemonic that is a
-        // real instruction wasmrt has not built.
+        // real instruction wasmrt has not built. (Rotated again 2026-09-19: `struct.new_desc` was
+        // built by track D3; stack-switching's `cont.new` is the successor.)
         let s = run(
             r#"(assert_invalid
-                 (module (func (struct.new_desc)))
+                 (module (func (cont.new 0)))
                  "some reason")"#,
         );
         assert_eq!((s.passed, s.failed, s.skipped), (0, 0, 1), "our gap must SKIP");
@@ -1751,8 +1795,9 @@ mod tests {
         let s = run_script(
             // ⚠️ The unbuildable module must use a construct `wat::classify_unknown_mnemonic`
             // still reports as OUR gap. It was `any.convert_extern` until that landed (S1), then
-            // `i64.add128` until Track W landed it (2026-09-17), and is `struct.new_desc`
-            // (custom-descriptors, Track D) now. **Swap it the day Track D lands** — and when
+            // `i64.add128` until Track W landed it (2026-09-17), then `struct.new_desc` until
+            // Track D3 landed it (2026-09-19), and is stack-switching's `cont.new` now — a
+            // proposal outside the vendored corpus, so the rotation can stop here. And when
             // nothing is left unimplemented, delete this arm rather than fake it: at that point
             // there is no "module: unsupported" skip left to record a reason for.
             //
@@ -1761,7 +1806,7 @@ mod tests {
             // why the rotation costs a line instead of a debugging session.
             br#"(assert_flurb (invoke "nope"))
                 (module (func (export "f") (result i64)
-                  (struct.new_desc (i64.const 1) (i64.const 0) (i64.const 1) (i64.const 0))))
+                  (drop (cont.new 0 (ref.null nofunc))) (i64.const 1)))
                 (assert_return (invoke "f") (i64.const 1))
                 (assert_trap (invoke "f") "x")
                 (invoke "f")"#,

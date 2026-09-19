@@ -419,7 +419,9 @@ fn run_wast(rest: &[String]) -> ExitCode {
             .strip_prefix(std::env::current_dir().unwrap_or_default())
             .unwrap_or(f)
             .to_string_lossy();
-        match wasmrt_core::wast::run_script(&src) {
+        // Each file under the features it is written against (`features_for_script`): a proposal can
+        // change what is valid, so a core file must not run with one it does not expect.
+        match wasmrt_core::wast::run_script_with_features(&src, wasmrt_core::wast::features_for_script(&name)) {
             Ok(s) => {
                 passed += s.passed;
                 failed += s.failed;

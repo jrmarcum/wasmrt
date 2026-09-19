@@ -232,6 +232,20 @@ impl Features {
         }
     }
 
+    /// The STANDARDIZED language — WebAssembly 3.0 — without the proposals that are not part of it
+    /// (threads, wide-arithmetic, custom-page-sizes, custom-descriptors). What the spec suite's CORE
+    /// files are written against: a proposal can change the validity of existing constructs (custom-
+    /// descriptors relaxes `br_on_cast`), so the core files must not see one they do not expect.
+    #[must_use]
+    pub const fn standard() -> Features {
+        let mut f = Features::all();
+        f.threads = false;
+        f.wide_arithmetic = false;
+        f.custom_page_sizes = false;
+        f.custom_descriptors = false;
+        f
+    }
+
     /// The WebAssembly 1.0 core language: every post-MVP proposal disabled.
     #[must_use]
     pub const fn mvp() -> Features {
@@ -386,6 +400,10 @@ pub const fn op_feature(op: Op) -> Option<Feature> {
 
         // --- wide arithmetic ---
         I64Add128 | I64Sub128 | I64MulWideS | I64MulWideU => Feature::WideArithmetic,
+
+        // --- custom-descriptors ---
+        StructNewDesc | StructNewDefaultDesc | RefGetDesc | RefCastDescEq | BrOnCastDescEq
+        | BrOnCastDescEqFail => Feature::CustomDescriptors,
 
         // --- non-trapping float→int ---
         I32TruncSatF32S | I32TruncSatF32U | I32TruncSatF64S | I32TruncSatF64U

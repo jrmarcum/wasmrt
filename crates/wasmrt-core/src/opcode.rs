@@ -292,6 +292,12 @@ define_ops! {
         I32TruncSatF64S = 0x12f => "i32.trunc_sat_f64_s", I32TruncSatF64U = 0x130 => "i32.trunc_sat_f64_u",
         I64TruncSatF32S = 0x131 => "i64.trunc_sat_f32_s", I64TruncSatF32U = 0x132 => "i64.trunc_sat_f32_u",
         I64TruncSatF64S = 0x133 => "i64.trunc_sat_f64_s", I64TruncSatF64U = 0x134 => "i64.trunc_sat_f64_u",
+        // custom-descriptors (`0xFB 0x20..0x26`, track D3/D4). `ref.cast_desc_eq`'s two encodings
+        // (`0x23` non-null, `0x24` nullable) share one tag, as `ref.cast`'s do: the nullability rides
+        // in the `RefType` immediate.
+        StructNewDesc = 0x135 => "struct.new_desc", StructNewDefaultDesc = 0x136 => "struct.new_default_desc",
+        RefGetDesc = 0x137 => "ref.get_desc", RefCastDescEq = 0x138 => "ref.cast_desc_eq",
+        BrOnCastDescEq = 0x139 => "br_on_cast_desc_eq", BrOnCastDescEqFail = 0x13a => "br_on_cast_desc_eq_fail",
     }
 }
 
@@ -505,9 +511,9 @@ pub struct Instr {
     pub imm: Imm,
 }
 
-/// The immediate shape an opcode carries, keyed by its byte. Mirrors wazmrt
-/// `immediateKind`. The internal-tag kinds (`0xd7`+) are unreachable in [`decode_body`]
-/// (rejected by the range guard first) but kept for completeness.
+/// The immediate shape a SINGLE-BYTE wire opcode carries (see [`immediate_kind`]). Every prefixed
+/// op decodes in its own arm, so the kinds only prefixed ops take (element/data segments, the GC
+/// immediates, casts) are not here: they were, until the `u16` repartition left them unconstructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImmKind {
     None,
@@ -519,14 +525,7 @@ enum ImmKind {
     Local,
     Global,
     Table,
-    Elem,
-    Data,
-    DataInit,
-    MemCopy,
-    TableInit,
-    TableCopy,
     Mem,
-    MemReserved,
     MemIndex,
     I32c,
     I64c,
@@ -534,13 +533,6 @@ enum ImmKind {
     F64c,
     SelectTypes,
     RefType,
-    GcType,
-    GcField,
-    GcTypeN,
-    GcTypeSeg,
-    GcArrayCopy,
-    RefCast,
-    BrCast,
     Tag,
     TryTable,
     Unsupported,
@@ -1073,6 +1065,22 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                 },
                 0x18 => Instr { offset: 0, op: Op::BrOnCast, imm: read_br_cast(&mut r)? },
                 0x19 => Instr { offset: 0, op: Op::BrOnCastFail, imm: read_br_cast(&mut r)? },
+                // custom-descriptors (`0x20..0x26`).
+                0x20 => Instr { offset: 0, op: Op::StructNewDesc, imm: Imm::GcType(r.read_var_u32()?) },
+                0x21 => Instr { offset: 0, op: Op::StructNewDefaultDesc, imm: Imm::GcType(r.read_var_u32()?) },
+                0x22 => Instr { offset: 0, op: Op::RefGetDesc, imm: Imm::GcType(r.read_var_u32()?) },
+                0x23 => Instr {
+                    offset: 0,
+                    op: Op::RefCastDescEq,
+                    imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut r)? }),
+                },
+                0x24 => Instr {
+                    offset: 0,
+                    op: Op::RefCastDescEq,
+                    imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut r)? }),
+                },
+                0x25 => Instr { offset: 0, op: Op::BrOnCastDescEq, imm: read_br_cast(&mut r)? },
+                0x26 => Instr { offset: 0, op: Op::BrOnCastDescEqFail, imm: read_br_cast(&mut r)? },
                 // The externref bridge. An `externref` is a WRAPPER: `extern.convert_any` boxes
                 // an internal reference, `any.convert_extern` unboxes one, and null maps to null
                 // both ways (§4.4.7.3). The wrapper bit lives in `Value`'s high half, so the two
@@ -1211,21 +1219,7 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
             ImmKind::TryTable => read_try_table(&mut r)?,
             // These kinds belong to `0xFB`/`0xFC`-prefixed ops decoded above; reaching
             // here means a raw synthetic-tag byte, which is malformed.
-            ImmKind::Elem
-            | ImmKind::Data
-            | ImmKind::DataInit
-            | ImmKind::MemCopy
-            | ImmKind::MemReserved
-            | ImmKind::TableInit
-            | ImmKind::TableCopy
-            | ImmKind::GcType
-            | ImmKind::GcField
-            | ImmKind::GcTypeN
-            | ImmKind::GcTypeSeg
-            | ImmKind::GcArrayCopy
-            | ImmKind::RefCast
-            | ImmKind::BrCast
-            | ImmKind::Unsupported => return Err(DecodeError::UnsupportedOpcode),
+            ImmKind::Unsupported => return Err(DecodeError::UnsupportedOpcode),
         };
 
         let op = Op::from_u8(b0).ok_or(DecodeError::UnsupportedOpcode)?;
@@ -1528,6 +1522,12 @@ mod tests {
             Op::BrOnCastFail,
             Op::AnyConvertExtern,
             Op::ExternConvertAny,
+            Op::StructNewDesc,
+            Op::StructNewDefaultDesc,
+            Op::RefGetDesc,
+            Op::RefCastDescEq,
+            Op::BrOnCastDescEq,
+            Op::BrOnCastDescEqFail,
         ] {
             assert_eq!(Op::from_text_name(op.text_name()), Some(op));
         }

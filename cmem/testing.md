@@ -85,6 +85,23 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🎯 2026-09-19 — day 4, part 6: **64,598 / 0 / 0** — ZERO failed, ZERO skipped, ZERO unrun (track D3/D4)
+
+All 288 files run and every one is clean. **The runner now picks FEATURES PER FILE** (`wast::features_for_script`):
+spec-suite paths get `Features::standard()` (Wasm 3.0) plus the proposal a `proposals/<name>/` segment names;
+anything else (our `tests/`) gets `Features::all()`. ⚠️ Required, not cosmetic — core `br_on_cast.wast` and
+`proposals/custom-descriptors/br_on_cast.wast` disagree on one module's validity, and only the feature set
+decides which is right. The CLI's `wast` command does the same, so `wasmrt wast <dir>` and `cargo test` agree.
+
+**`tests/descriptor-casts.wast`** — the D3/D4 soundness checkpoint (26 assertions, cargo test): desc-eq casts by
+identity, a FORGED last field, null descriptors, cross-instance. Mutation-verified (see roadmap DAY 4 part 6).
+⚠️ **`assert_trap` does not compare the message** in this runner — any trap passes. A test that needs a
+SPECIFIC trap must be built so the wrong behaviour changes the outcome, not just the text.
+
+`.wat` corpus **531/535** assemble→decode→validate (denominator +3: new files in wasmtk; the same four corpus
+defects, all refused by wasm-tools too). Custom-sections gate **531 agree / 4 refused by both / 0 differ**.
+Workspace **525 tests**; clippy `-D warnings` **clean**; Miri **32/32**; C-ABI PASSED.
+
 ### 🆕 2026-09-19 — day 4, part 5: **64,193 / 3 / 428** (track D2, descriptor/describes)
 
 Failures 39 → 3; passes −71 — FALSE passes removed (see `roadmap.md`, DAY 4 part 5; the per-file gate flags five

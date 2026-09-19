@@ -188,9 +188,18 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,193 / 3 / 428 over 288 files, 525 workspace tests, C-ABI gate PASSED, `.wat` corpus
-528/532, Miri **32/32**, custom-sections gate **528 agree / 4 refused by both / 0 differ**, shipped cdylib **522,240 B**, everything committed and pushed.** Day 4
-(below) found the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4 and did track P. The era-pinned `proposals/threads/memory.wast` contradiction was then PATCHED (owner-directed) — `proposals/threads/` 494/0/0. **Track D1 and D2 are DONE; next is D3/D4.**
+**State: 🎯 64,598 / 0 / 0 over 288 files — ZERO FAILED, ZERO SKIPPED, ZERO UNRUN.** 525 workspace tests,
+clippy **clean** (`-D warnings`, all targets), C-ABI gate PASSED, Miri **32/32**, `.wat` corpus **531/535**
+(the denominator moved: wasmtk has 3 more files; the same 4 corpus defects), custom-sections gate **531 agree / 4
+refused by both / 0 differ**, shipped cdylib **531,968 B**, everything committed and pushed. Day 4 (below) found
+the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4, did track P, patched the
+era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
+
+🚦 **T13's conformance numbers are at their target.** What stands between here and `1.0.0` is no longer the
+corpus: items 1–2 below (not ours to execute), the two 🟡 OPEN decoder accept-invalid defects at the top of
+`known-issues.md` (typed-`select` one-byte types; block-type bytes mapping to internal tags — real
+deviations from the binary format that the corpus happens not to reach, so *zero deliberate deviations* is
+not yet true), then the `releasing.md` checklist.
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -202,7 +211,9 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | **3** | ✅ **Track A — DONE (2026-09-19, owner: "we do not want the lexer to throw away information … align with canonical wasmtime and wasm").** `custom/` **0/1/20 → 20/0/0**. The first scoping ("pure runner work, no engine risk") was false — wasmtime scores neither command and the lexer dropped every annotation — so it became the **custom-annotations feature**, built to MEASURED canonical behaviour: `@custom` → a custom section at its slot, `@name` + every `$id` → the `name` section (all 12 subsections), branch hints → `metadata.code.branch_hint`, malformed/misplaced → **module refused** (as wasm-tools refuses it), a hint on a non-branch → **emitted and reported, not refused**. See the day-4 entry. | — |
 | **4** | ✅ **DONE 2026-09-19 — see `known-issues.md` (top); refused with wasmtime's own reason, and a rule-free fourth copy of the type-use loop behind it.** ~~**The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
 | **5** | ✅ **DONE 2026-09-19 — custom-page-sizes 5 files 166/0/0 (was 110/0/79); byte-granular bounds verified on every access path and CROSS-CHECKED ON WASMTIME 48; `PAGE_SIZE` deleted so no 64 KiB assumption can compile. See DAY 4 part 3.** ~~**Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
-| **6** | ◐ **D1 + D2 DONE 2026-09-19 (exact types; descriptor/describes) — see DAY 4 parts 4–5. Next: D3/D4 (the `*_desc` instructions).** **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
+| **6** | ✅ **DONE 2026-09-19 — D1–D4, custom-descriptors 100% clean. See DAY 4 parts 4–6.** ~~**Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test.~~ | — |
+| **7** | 🟡 **The two OPEN decoder defects** (`known-issues.md`, top): typed-`select` reads each type as one raw byte; block-type bytes `-24`…`-41` map to internal non-null tags. Both accept INVALID binaries. | The last known deviations from the format. Small, and each wants an outside-reader check (wasm-tools refusing the same bytes). |
+| **8** | **`1.0.0` release prep** per `releasing.md` — after 1, 7 and a fresh corpus re-measure. | T13's exit. |
 
 ⚠️ **Two predictions still standing, so honest movement is not read as regression:**
 * **Passes go DOWN when `exact` lands** — a parse gap currently scores as a correct rejection, so ~19
@@ -248,6 +259,60 @@ test. 106 held for real once unwrapped; **6 were false**, and behind them:
 🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
 how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
 guards are mutation-verified (each mutation confirmed applied before its test was believed).
+
+##### ✅ DAY 4, part 6 — TRACK D3/D4: the `*_desc` instructions, and the corpus at ZERO. `[x]`
+
+**64,193 / 3 / 428 → 🎯 64,598 / 0 / 0 over 288 files.** Every file in `proposals/custom-descriptors/` is clean:
+`br_on_cast_desc_eq` 0/0/122 → **117/0/0**, `br_on_cast_desc_eq_fail` 0/0/122 → **117/0/0**, `ref_cast_desc_eq`
+0/0/109 → **106/0/0**, `ref_get_desc` 0/1/38 → **32/0/0**, `struct_new_desc` 7/0/37 → **40/0/0**, and the two
+`br_on_cast` files 33/1/0 → **33/0/0**. No other file moved; the per-file gate is clean against D2.
+525 tests, clippy clean, C-ABI PASSED, Miri 32/32, wasm32 builds. Size: CLI +8,704 B, cdylib +5,120 B.
+
+**Built:** `struct.new_desc`/`struct.new_default_desc`/`ref.get_desc`/`ref.cast_desc_eq`/`br_on_cast_desc_eq`/`_fail`
+(`0xFB 0x20`–`0x26`; `ref.cast_desc_eq`'s two encodings share one tag, as `ref.cast`'s do) in decoder, validator,
+interpreter, const-expr evaluator and assembler. The descriptor is the object's **trailing slot**, present only
+when the object's type declares one, so no other object pays for it; a validated `struct.get` index stops short of it.
+
+🔒 **The soundness checkpoint — `tests/descriptor-casts.wast` (26 assertions, `cargo test`).** A desc-eq cast
+succeeds by descriptor IDENTITY; every assertion is a negative paired with the positive that proves the path is
+reached, same- and cross-instance. wasm-tools validates both modules. **Mutation-verified — and the first
+version could NOT catch three of five:**
+* **"the object has a descriptor" instead of "IS this descriptor"** — caught (4 assertions).
+* **reading the trailing slot without checking the owner type declares one** — ⚠️ uncaught until a FORGERY
+  test: an ordinary `(struct (field (ref $ad)))` holding the descriptor has the same last-field bits. Now pinned.
+* **a null descriptor not trapped** (cast and branch) — ⚠️ uncaught because **the runner does not compare trap
+  MESSAGES**: a `cast failure` satisfied an `assert_trap` meant for `null descriptor reference`. Pinned by shapes
+  whose OUTCOME changes without the check (a null value on a nullable target would pass; a `_fail` would branch).
+* the i31/host/extern tag screen stays uncatchable **by design** — a tagged value cannot index the heap anyway; it
+  is defence in depth, recorded as such rather than tested into existence.
+* `ref.get_desc`'s exactness rule — exact only for an exact input **of `$t` itself** (an exact `$c <: $t` holds a
+  `$c`, whose descriptor is a strict subtype) — the corpus refused the first version, and all three mutations of
+  it are caught by `ref_get_desc.wast`.
+
+⚠️ The test's first draft asserted `any.convert_extern (extern.convert_any x)` FAILS the cast. It must not: the
+round trip IS `x`. **A wrong-answer test can itself be the wrong answer** — the engine was right and the test
+was fixed (a host reference is the honest negative).
+
+⚠️⚠️ **THE CORE AND PROPOSAL FILES CONTRADICT EACH OTHER, and the runner was running both wrong.**
+custom-descriptors RELAXES `br_on_cast` (the target need only share the source's hierarchy, not be its subtype),
+so core `br_on_cast.wast` asserts `br_on_cast 1 (ref any) (ref null $t)` INVALID and the proposal's copy asserts it
+VALID. Every file ran with **every** feature on, which makes one of the two wrong by construction. Fix:
+`wast::features_for_script` — `Features::standard()` (Wasm 3.0) plus the one proposal a `proposals/<name>/`
+directory tests, which is what canonical runners do; the relaxation is gated on `Feature::CustomDescriptors`
+(and always on for the desc-eq branches, which only exist under it). Non-testsuite paths keep `Features::all()`.
+🎓 **A feature flag is part of a test's INPUT** — a runner that ignores it is scoring a different question.
+
+🔴 **A pre-existing assembler defect, found by writing the flat forms:** `immediate_arity` did not list the GC
+instructions, so **every flat-form GC instruction with an immediate was refused** (`struct.new $t` outside a
+fold). The corpus is almost all folded, which is why it survived. All 14 flat forms now byte-identical to
+wasm-tools. *(The T9a#8 shape again — `immediate_arity` is a table the emitter depends on and nothing enumerates.)*
+
+**Gate hygiene:** the two runner self-tests that need "a real instruction wasmrt has not built" were stale the
+moment `struct.new_desc` landed (they predicted it); the successor is stack-switching's `cont.new`, now in
+`classify_unknown_mnemonic` — a proposal outside the vendored corpus, so the rotation stops. Mutation-verified.
+Clippy is **clean** again: 14 dead `ImmKind` variants (unconstructed since the `u16` repartition) deleted, and two
+`missing_const_for_thread_local` reports on initializers that already ARE `const { … }` — a false positive in
+clippy 0.1.100 — allowed at the site with that reason.
 
 ##### ✅ DAY 4, part 5 — TRACK D2: `describes` / `descriptor`. `[x]`
 
