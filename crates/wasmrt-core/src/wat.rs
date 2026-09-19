@@ -108,6 +108,10 @@ pub enum Error {
     /// `assert_malformed`, and the assembler accepting them meant the **validator** reported
     /// them instead, as a stack-height mismatch on a module that should never have assembled.
     UnexpectedToken,
+    /// A second `(start …)` field. A module has at most one start function (§6.6.12); the
+    /// assembler used to keep the LAST one silently, so `(start $a) (start $b)` built a module
+    /// that ran only `$b` — a module the text did not describe, and one wasmtime refuses.
+    MultipleStart,
     /// A text construct this release does not assemble yet. Loud by design.
     Unsupported(&'static str),
 }
@@ -1256,7 +1260,12 @@ pub fn assemble_module(module: &[Sexpr]) -> Result<Vec<u8>> {
             "data" => parse_data_field(items, &mut b)?,
             "tag" => parse_tag_field(items, &mut b)?,
             "import" => parse_import_field(items, &mut b)?,
-            "start" => b.start = Some(nth(items, 1)?.clone()),
+            "start" => {
+                if b.start.is_some() {
+                    return Err(Error::MultipleStart);
+                }
+                b.start = Some(nth(items, 1)?.clone());
+            }
             // DEFERRED to pass 2: a module-level export may name something declared later
             // in the file, and binaryen emits exactly that order (all exports, then the
             // funcs). Inline `(export …)` clauses stay immediate — they can only name the
@@ -2822,6 +2831,8 @@ struct Ctx<'a> {
     local_names: &'a [Option<String>],
     /// Control-label stack, innermost last, for resolving `br $name` to a relative depth.
     labels: Vec<Option<String>>,
+    /// The open FLAT legacy `try` frames, innermost last — see [`Ctx::flat_try_clause`].
+    flat_tries: Vec<FlatTry>,
     /// Written through to [`ModuleBuild::needs_data_count`] when this body emits
     /// `memory.init`/`data.drop`. A `&mut` to one field, borrowed disjointly from the name
     /// tables — the same trick that lets a body intern a block signature.
@@ -2846,6 +2857,55 @@ impl Ctx<'_> {
     fn resolve_local(&self, s: &Sexpr) -> Result<u32> {
         resolve_by_name(self.local_names, s)
     }
+
+    /// Admit a flat `catch` / `catch_all` / `delegate`, which is only text when the INNERMOST
+    /// open frame is a legacy `try` whose handlers have got no further than `phase` allows:
+    /// `try … (catch x …)* (catch_all …)? end` or `try … delegate l`.
+    ///
+    /// ⚠️ These used to be emitted wherever they appeared — `(func (catch_all))` assembled, and
+    /// the VALIDATOR then refused it as `MismatchedCatch`. The spec suite asserts these with
+    /// `assert_malformed`, so the stage is the verdict, and it had been passing only because
+    /// the `.wast` runner wrapped whole-module quotes in a second `(module …)` and refused
+    /// them all with `BadModuleField` (see `wast::quoted_module_source`).
+    fn flat_try_clause(&mut self, next: TryPhase) -> Result<()> {
+        let depth = self.labels.len();
+        // A frame deeper than the label stack was closed by something other than its own
+        // `end` (malformed input the validator will reject); it can never match again.
+        while self.flat_tries.last().is_some_and(|t| t.depth > depth) {
+            self.flat_tries.pop();
+        }
+        let Some(t) = self.flat_tries.last_mut().filter(|t| t.depth == depth) else {
+            return Err(Error::UnexpectedToken);
+        };
+        let allowed = match next {
+            TryPhase::Catch | TryPhase::CatchAll => t.phase != TryPhase::CatchAll,
+            TryPhase::Delegate => t.phase == TryPhase::Body,
+            TryPhase::Body => false,
+        };
+        if !allowed {
+            return Err(Error::UnexpectedToken);
+        }
+        t.phase = next;
+        if next == TryPhase::Delegate {
+            self.flat_tries.pop();
+        }
+        Ok(())
+    }
+}
+
+/// An open flat legacy `try`: the label depth its own label sits at, and how far through the
+/// handler grammar it has got.
+struct FlatTry {
+    depth: usize,
+    phase: TryPhase,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TryPhase {
+    Body,
+    Catch,
+    CatchAll,
+    Delegate,
 }
 
 /// Borrow every name table out of a [`ModuleBuild`] alongside a mutable `sigs`, so a body
@@ -2868,6 +2928,7 @@ macro_rules! ctx_for {
             tag_names: &$b.tag_names,
             local_names: $locals,
             labels: Vec::new(),
+            flat_tries: Vec::new(),
             needs_data_count: &mut $b.needs_data_count,
         }
     };
@@ -2933,6 +2994,11 @@ fn emit_folded(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
         // The legacy folded `try` is structural — `(do …)` plus clause lists — so it is
         // intercepted here rather than going through the opcode table.
         "try" => return emit_folded_try(ctx, l),
+        // Folded, these are only ever CLAUSES of a `(try …)`, which `emit_folded_try` consumes
+        // itself — so reaching here means one stands alone, e.g. `(func (catch_all))`.
+        // ⚠️ The flat-form guard (`Ctx::flat_try_clause`) does not see this path: folded
+        // instructions go through `emit_op_with_immediates`, never `emit_flat`.
+        "catch" | "catch_all" | "delegate" => return Err(Error::UnexpectedToken),
         _ => {}
     }
     // The prefixed families are looked up before the single-byte table — their members
@@ -3295,9 +3361,15 @@ fn emit_folded_try(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
         }
     }
 
+    // `(catch_all …)` is the LAST handler if present: `(catch x …)* (catch_all …)?`.
+    let mut seen_catch_all = false;
     while j < l.len() {
         let cl = want_list(&l[j])?;
-        match cl.first().and_then(Sexpr::as_atom) {
+        let kw = cl.first().and_then(Sexpr::as_atom);
+        if seen_catch_all && matches!(kw, Some("catch" | "catch_all")) {
+            return Err(Error::UnexpectedToken);
+        }
+        match kw {
             Some("catch") => {
                 ctx.out.push(0x07);
                 let tag = resolve_by_name(ctx.tag_names, nth(cl, 1)?)?;
@@ -3305,6 +3377,7 @@ fn emit_folded_try(ctx: &mut Ctx, l: &[Sexpr]) -> Result<()> {
                 emit_seq(ctx, &cl[2..])?;
             }
             Some("catch_all") => {
+                seen_catch_all = true;
                 ctx.out.push(0x19);
                 emit_seq(ctx, &cl[1..])?;
             }
@@ -3381,21 +3454,25 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
                 return Err(Error::NestingTooDeep);
             }
             ctx.labels.push(label);
+            ctx.flat_tries.push(FlatTry { depth: ctx.labels.len(), phase: TryPhase::Body });
             Ok(j)
         }
         O::CatchLegacy => {
+            ctx.flat_try_clause(TryPhase::Catch)?;
             ctx.out.push(0x07);
             let tag = resolve_by_name(ctx.tag_names, nth(items, i + 1)?)?;
             uleb(&mut ctx.out, u64::from(tag));
             Ok(i + 2)
         }
         O::CatchAll => {
+            ctx.flat_try_clause(TryPhase::CatchAll)?;
             ctx.out.push(0x19);
             Ok(i + 1)
         }
         // `delegate l` terminates its `try`, so its label resolves OUTSIDE it — the try's own
         // label comes off first. See `emit_folded_try`.
         O::Delegate => {
+            ctx.flat_try_clause(TryPhase::Delegate)?;
             ctx.labels.pop();
             ctx.out.push(0x18);
             let target = ctx.resolve_label(nth(items, i + 1)?)?;
@@ -3433,6 +3510,9 @@ fn emit_flat(ctx: &mut Ctx, items: &[Sexpr], i: usize, name: &str) -> Result<usi
             ctx.out.push(0x0b);
             let n = consume_matching_label(ctx, items, i + 1)?;
             ctx.labels.pop();
+            if ctx.flat_tries.last().is_some_and(|t| t.depth > ctx.labels.len()) {
+                ctx.flat_tries.pop();
+            }
             Ok(i + 1 + n)
         }
         // Flat `select (result t)?` — the immediate sits where the next instruction would.
@@ -4831,7 +4911,7 @@ mod tests {
             r#"(module (type $s (func (param i32) (result i32)))
                 (func (i32.const 0) (block (result i32) (type $s) (param i32))))"#,
         ] {
-            assert_eq!(asm(src).unwrap_err(), Error::UnexpectedToken, "{src}");
+            assert_eq!(assemble(src.as_bytes()).unwrap_err(), Error::UnexpectedToken, "{src}");
         }
         // The canonical order still assembles — the rule is an order check, not a ban.
         assert!(
@@ -7147,6 +7227,53 @@ mod emitter_coverage_tests {
             let m = assemble(src)
                 .unwrap_or_else(|e| panic!("{} must assemble: {e}", core::str::from_utf8(src).unwrap()));
             crate::module::decode(&m).expect("and decode");
+        }
+    }
+
+    /// A module has one start function. The assembler kept the LAST `(start …)` silently, so
+    /// `(start $a) (start $b)` built a module that ran only `$b` (`start.wast`, hidden behind
+    /// the `.wast` runner's whole-module-quote wrapper until 2026-09-19).
+    #[test]
+    fn a_second_start_field_is_malformed() {
+        assert_eq!(
+            assemble(b"(module (func $a) (func $b) (start $a) (start $b))").unwrap_err(),
+            Error::MultipleStart
+        );
+        assemble(b"(module (func $a) (start $a))").unwrap();
+    }
+
+    /// `catch` / `catch_all` / `delegate` are TEXT only directly inside a legacy `try`, in
+    /// grammar order: `(catch x …)* (catch_all …)?`, or a lone `delegate`. They used to be
+    /// emitted anywhere and refused later by the VALIDATOR — the wrong stage for an
+    /// `assert_malformed`. Both forms, because they reach the emitter by different routes and
+    /// the first fix covered only the flat one.
+    #[test]
+    fn a_legacy_handler_outside_its_try_is_malformed() {
+        for src in [
+            "(module (func (catch_all)))",
+            "(module (tag $e) (func (catch $e)))",
+            "(module (func (delegate 0)))",
+            "(module (func catch_all))",
+            "(module (func delegate 0))",
+            "(module (func block try end catch_all end))",
+            "(module (func (try (do catch_all))))",
+            "(module (func try catch_all catch_all end))",
+            "(module (tag $e) (func try catch_all catch $e end))",
+            "(module (tag $e) (func try catch $e delegate 0))",
+            "(module (func (try (do) (catch_all) (catch_all))))",
+            "(module (tag $e) (func (try (do) (catch_all) (catch $e))))",
+        ] {
+            assert_eq!(assemble(src.as_bytes()).unwrap_err(), Error::UnexpectedToken, "{src}");
+        }
+        for src in [
+            "(module (tag $e) (func try catch $e catch $e catch_all end))",
+            "(module (func try delegate 0))",
+            "(module (func block try nop delegate 0 end))",
+            "(module (tag $e) (func try block end catch $e try catch_all end end))",
+            "(module (tag $e) (func (try (do) (catch $e) (catch $e) (catch_all))))",
+        ] {
+            let m = assemble(src.as_bytes()).unwrap_or_else(|e| panic!("{src} must assemble: {e:?}"));
+            crate::module::decode(&m).unwrap_or_else(|e| panic!("{src} must decode: {e:?}"));
         }
     }
 }

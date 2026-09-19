@@ -186,10 +186,11 @@ Produced after the **skip census** (`testing.md`) made the skip column attributa
 ⚠️ **The track table was ranked on numbers that could not distinguish a root from its shadow;** these
 are ranked on *assertions unblocked*, which is what the ranking rule above actually asks for.
 
-##### 🚦 HANDOFF — where to pick up (2026-09-17, end of day 3)
+##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,068 / 66 / 549 over 288 files, 503 workspace tests, C-ABI gate PASSED, `.wat` corpus
-528/532, Miri **31/31**, everything committed and pushed.**
+**State: 64,067 / 65 / 550 over 288 files, 506 workspace tests, C-ABI gate PASSED, `.wat` corpus
+528/532, Miri **31/31**, everything committed and pushed.** Day 4 (below) found the runner manufacturing
+passes; track A is **blocked on an owner scope decision**, so the next unblocked item is **#4**.
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -198,7 +199,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | --- | --- | --- |
 | **1** | 🔒 **wasmtk commits the threads patch.** Two files modified in the wasmtk tree and nothing else: `proposals/threads/imports.wast`, `proposals/threads/memory.wast`. **Not committed from here on purpose** — the write was owner-authorised, committing in another repo is not. | It is the only work-in-progress anywhere. ⚠️ It is a deliberate deviation from upstream and `update-testsuite.py` WILL overwrite it on the next sync — re-check after every sync. |
 | **2** | 📮 **Report the stale snapshot upstream** (the spec repo's `proposals/threads/` still asserts multi-memory and multi-table invalid). Not filed — needs the owner's account. | The only route that fixes it for everyone; until then the patch carries it. |
-| **3** | **Track A — the `custom/` directory.** `assert_malformed_custom` and `assert_invalid_custom` are unhandled commands: **20 skips + 1 failure, pure runner work, no engine risk.** | Smallest item left, same shape as S2 (41 assertions of runner work). Arrived with the 08-20 corpus sync and no track covered it. |
+| **3** | 🚦 **Track A — the `custom/` directory — BLOCKED ON AN OWNER SCOPE DECISION (2026-09-19).** ⚠️⚠️ **The premise "pure runner work, no engine risk" was FALSE**, and checking it was the day's first act (§8.4). (a) **wasmtime 48 does not score these either** — it parses both directives and refuses them as `unimplemented wast directives`. (b) **wasmrt's lexer drops every annotation as trivia** (`sexpr::skip_annotation`), so no `(@custom …)` / `(@name …)` / `(@metadata.code.branch_hint …)` ever reaches the assembler — there is nothing for a runner arm to adjudicate. Honest verdicts require **implementing custom annotations**: surface them from the lexer, emit `@custom` as custom sections with `(before|after <section>)` placement, `@name` into the name section, branch hints into `metadata.code.branch_hint`, and report their errors on a channel that does **not** fail the module (the spec says a malformed custom section must not invalidate one). Options for the owner: **implement** (20 verdicts; assembler code, which is size) · **leave skipped with a recorded reason**, as wasmtime does (breaks T13's zero-skip bar) · ⛔ *not* "pass if the module assembles" — that verifies nothing. The **1 failure** was not Track A at all: see the day-4 entry. | Smallest item left in *count*, not in *work*. |
 | **4** | **The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
 | **5** | **Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
 | **6** | **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
@@ -223,6 +224,30 @@ and `rust-toolchain.toml` already pins the nightly it requires. `bash scripts/mi
    only visible after fixing the instrument: the per-file gate could not see a clean file lose passes,
    and the `.wat` corpus loop keyed on an exit status that is always 0.
 
+
+##### ✅ DAY 4 (2026-09-19) — the runner was MANUFACTURING PASSES, and behind them were two assembler defects. `[x]`
+
+**64,068 / 66 / 549 → 64,067 / 65 / 550 over 288 files** (corpus re-measured first: unchanged since day 3).
+506 workspace tests (+3), C-ABI gate PASSED (`CC=gcc` — this host has no `cc` on PATH), Miri **31/31**,
+`.wat` corpus **528/532** (the same four corpus defects, checked against the pre-change binary).
+
+🔴 **`(module quote "(module …)")` was ALWAYS REFUSED.** The spec grammar lets quoted text be a whole
+module *or* its fields; the runner wrapped both in a second `(module …)`, so a whole-module quote became
+`(module (module …))` and died on `BadModuleField` **whatever it said**. Found by chasing
+`custom_annot.wast`'s one failure — a *valid* module of that shape. ⚠️⚠️ **The half that mattered is the
+other direction: inside `assert_malformed` the wrapper's refusal SCORED AS A PASS.** 112 assertions
+(`align` 46, `align64` 46, `start`, `try_table`, `legacy/` ×2, `custom/`) never reached the rule they
+test. 106 held for real once unwrapped; **6 were false**, and behind them:
+
+| exposed | defect |
+| --- | --- |
+| `start.wast` ×1 | 🔴 **SILENT WRONG MODULE — the seventh emitter-mechanism instance.** `(start $a) (start $b)` assembled with only `$b` as start: the parser overwrote the field. `run` returned `$b`'s effect; wasmtime refuses the source. Now `Error::MultipleStart`. |
+| `try_table` ×1, `legacy/try_catch` ×2, `legacy/try_delegate` ×1 | `catch` / `catch_all` / `delegate` outside a legacy `try` (and handlers after `catch_all`) assembled, and the **validator** refused them — wrong stage for `assert_malformed`. ⚠️ **The first fix covered only the FLAT form**: folded instructions reach the emitter through `emit_op_with_immediates`, never `emit_flat` — *a guard one call-level away from half its inputs*, the lesson already on record, re-paid in the same hour. |
+| `custom-page-sizes.wast` ×1 | now an honest **skip** behind X1's refusal (a `pagesize` module); Track P converts it. The one "lost pass" in the gate, and it was false. |
+
+🎓 **A harness that TRANSFORMS its input can manufacture verdicts.** Every earlier scoring hole was in
+how a result was *read*; this one was in how the input was *built*, upstream of every assertion. All five
+guards are mutation-verified (each mutation confirmed applied before its test was believed).
 
 ##### ✅ DAY 3 (2026-09-17) — X1, X2, X3, the M/A residue, **TRACK W**, the threads patch and the **`Op`→u16** move. `[x]`
 

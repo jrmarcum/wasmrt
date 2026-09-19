@@ -290,19 +290,39 @@ impl Runner {
 
     /// Assemble a `(module …)` form to bytes. Handles the `binary` and `quote` variants.
     fn module_binary(form: &[Sexpr]) -> Result<Vec<u8>, wat::Error> {
-        // `(module quote "…" …)` — the strings are `.wat` source holding the module's
-        // FIELDS, not a whole `(module …)` form, so they are wrapped before assembly.
         let quote_at = form.iter().position(|s| s.as_atom() == Some("quote"));
         if let Some(q) = quote_at {
-            let mut src = b"(module\n".to_vec();
+            let mut body = Vec::new();
             for s in &form[q + 1..] {
-                src.extend_from_slice(s.as_str().unwrap_or(&[]));
-                src.push(b'\n');
+                body.extend_from_slice(s.as_str().unwrap_or(&[]));
+                body.push(b'\n');
             }
-            src.extend_from_slice(b")\n");
-            return wat::assemble(&src);
+            return wat::assemble(&Self::quoted_module_source(body));
         }
         wat::assemble_module(form)
+    }
+
+    /// The `.wat` source a `(module quote "…")` denotes. The text is EITHER a module's fields
+    /// or a whole `(module …)` form — the spec grammar is `module ::= module_ | inline_module`
+    /// — and only the first needs wrapping.
+    ///
+    /// ⚠️ This used to wrap unconditionally, so every whole-module quote became
+    /// `(module (module …))` and was refused with `BadModuleField` whatever it contained. Inside
+    /// `assert_malformed` that refusal SCORED AS A PASS — 112 assertions (`align.wast` 46,
+    /// `align64.wast` 46, `start`, `try_table`, `legacy/`, `custom/`) were being passed by a
+    /// wrapper, never reaching the rule they test. Outside one, a valid module failed to build.
+    fn quoted_module_source(body: Vec<u8>) -> Vec<u8> {
+        let whole = matches!(
+            crate::sexpr::parse_all(&body).as_deref(),
+            Ok([only]) if only.keyword() == Some("module")
+        );
+        if whole {
+            return body;
+        }
+        let mut src = b"(module\n".to_vec();
+        src.extend_from_slice(&body);
+        src.extend_from_slice(b")\n");
+        src
     }
 
     /// Build the [`Linker`] this script links against: the standard `spectest` host module
@@ -1623,5 +1643,25 @@ mod tests {
             ));
             assert_eq!((s.passed, s.failed), (0, 1), "{bad} must not satisfy it");
         }
+    }
+
+    /// `(module quote "(module …)")` — the quoted text may be a WHOLE module, not only its
+    /// fields. Until 2026-09-19 the runner wrapped it in a second `(module …)` regardless, so a
+    /// valid module failed to build and — the half that mattered — every `assert_malformed` of
+    /// that shape passed on the wrapper's `BadModuleField` without reaching its rule.
+    #[test]
+    fn a_quoted_whole_module_is_not_wrapped_twice() {
+        let s = run(
+            r#"(module quote "(module (func (export \"f\") (result i32) (i32.const 7)))")
+               (assert_return (invoke "f") (i32.const 7))
+               (module quote "(func (export \"g\") (result i32) (i32.const 8))")
+               (assert_return (invoke "g") (i32.const 8))"#,
+        );
+        assert_eq!((s.passed, s.failed, s.skipped), (2, 0, 0), "{:?}", s.failures);
+
+        // The load-bearing direction: a VALID whole-module quote must now fail an
+        // `assert_malformed`. Under the old wrapper this scored a pass.
+        let s = run(r#"(assert_malformed (module quote "(module (func))") "anything")"#);
+        assert_eq!((s.passed, s.failed), (0, 1), "a wrapper refusal must not score as a pass");
     }
 }
