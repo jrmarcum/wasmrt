@@ -23,10 +23,22 @@ parity testing at every step.
 > which WebAssembly proposals a guest may use and cap the memory, call depth and GC objects it may
 > consume. Handles are checked, so one from the wrong store is refused rather than followed.
 >
-> It also runs **real WASI programs** — `wasmrt wasi prog.wasm` — with stdio, args, environ, clocks,
-> `random_get` and a **sandboxed filesystem**. A guest reaches only what you preopen:
-> `--dir <host>[::<guest>]`, or `--ro-dir` for read-only (which propagates to the whole subtree). With
-> no `--dir`, every path call returns `BADF` — there is no implicit working directory.
+> It also runs **real WASI programs** — `wasmrt wasi prog.wasm`, or just `wasmrt prog.wasm` — with
+> stdio, args, environ, clocks, `random_get` and a **sandboxed filesystem**. A guest reaches only what
+> you preopen: `--dir <host>[:<guest>]`, or `--ro-dir` for read-only (which propagates to the whole
+> subtree). With no `--dir`, every path call returns `BADF` — there is no implicit working directory.
+> `--max-memory`, `--max-table-elems` and `--max-iterations` cap what it may consume, and
+> `--features <list>` restricts which proposals it may use.
+>
+> **A runaway guest is stopped rather than hanging the host**: one loop back-edge or one tail-call hop
+> is one iteration, and a top-level call gets `1<<30` of them by default (`--max-iterations`, `0` to
+> disable). It bounds non-termination — it does not claim to detect an infinite loop.
+>
+> **Modules can be pinned.** `wasmrt pin <file>` prints a SHA-256 line for a root-owned allow-list; with
+> one installed, wasmrt verifies the bytes it is about to run — before validating them, on every path
+> that executes, `.wast` scripts included — and refuses anything unpinned. `--verify off|warn|enforce`
+> only ever raises strictness, and under a root-owned `enforce` no command-line flag can lower it. With
+> no allow-list installed nothing is verified and nothing costs anything.
 >
 > The engine is **`#![forbid(unsafe_code)]`**: `wasmrt-core` and the CLI contain no `unsafe` at all, and
 > the compiler enforces it. The C ABI cannot be — a foreign boundary is unsafe by definition — so every
@@ -37,7 +49,8 @@ parity testing at every step.
 ## Goals
 
 - **Canonical** — run the same WebAssembly `wasmtime` can (full browser-standard feature set + memory64;
-  WASI preview 1). **Tail calls are the one scope item not yet implemented.**
+  WASI preview 1), including tail calls. The official spec testsuite runs **64,598 assertions over 288
+  files with zero failures and zero skips**.
 - **Fast** — win cold-start and native-FFI workloads (an interpreter over a pre-decoded IR, not a JIT).
 - **Small** — minimize every artifact; the runtime even compiles to `wasm32` to embed inside another
   wasm host.

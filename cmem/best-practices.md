@@ -894,6 +894,21 @@ for a second, untouched reason. The assertion was true and tested nothing.
 (nullable results, supertypes, `unreachable` operands), then mutation-verify — a surviving mutation on an
 invalid-module test usually means the module is invalid twice.
 
+### 5.4b Two independent implementations agreeing is a HYPOTHESIS until one command compares them
+
+`security-model.md` §3a predicted that the two runtimes' `.wat` digests might diverge, because the
+digest is of the **assembled** bytes and the assemblers are independent — and it said to make that a
+TEST rather than an assumption. Run over 535 files, **529 differed**. The cause was then diagnosed in
+one more command: wazmrt's digest equals ours with custom sections stripped, so we emit a `name`
+section and they do not.
+
+The mirror of §3.8b: there, two components that learned a convention from *each other* agreed and were
+both wrong. Here, two implementations of the same spec disagreed, and only a differential check could
+see it — neither side is wrong alone, and neither could find it alone.
+**Apply:** when a security or interop property depends on two implementations producing the same
+bytes, compare the bytes in CI, over a corpus, not on one hand-picked file. The tiny file agreed; the
+529 real ones did not.
+
 ### 5.5 Skips are never folded into passes
 
 A construct the build cannot put to the test is not a pass. Skips are counted separately so the

@@ -247,11 +247,11 @@ form it already ships.**
 | capability | wazmrt spelling | wasmrt spelling | status |
 | --- | --- | --- | --- |
 | summarize + validate, no execution | `wazmrt <module>` | `wasmrt <file>` | ✅ **AGREED on behaviour + exit code (both `rc=0`, neither executes) — ⚠️ MEASURED 2026-08-19, the OUTPUT TEXT differs.** *(The row read "already identical", which was written from reading and is false as stated.)* |
-| call an exported function | `wazmrt <module> <export> [args…]` | `wasmrt run <file> <fn> [args…]` | ⚠️⚠️ **MEASURED — and the two gaps fail in OPPOSITE directions. See F1.** |
-| run a WASI `_start` command | `wazmrt <module> [flags] [-- argv]` | `wasmrt wasi [flags] <file> […]` | ⚠️ **each must accept both** |
-| run a `.wast` spec script | `wazmrt <script.wast>` | `wasmrt wast <file\|dir>… [-v]` | ⚠️ **each must accept both** |
+| call an exported function | `wazmrt <module> <export> [args…]` | `wasmrt run <file> <fn> [args…]` **and now `wasmrt <module> <export> [args…]`** | ✅ **wasmrt DONE 2026-09-19** · wasmrt accepts BOTH spellings, and F1's silent-wrong half is gone: naming an export the module lacks now fails (Z1). ⏳ wazmrt to accept the subcommand form. |
+| run a WASI `_start` command | `wazmrt <module> [flags] [-- argv]` | `wasmrt wasi [flags] <file> […]` **and now `wasmrt <module> [flags] [-- argv]`** | ✅ **wasmrt DONE 2026-09-19** · ⚠️⚠️ **A bare path now EXECUTES** where it used to summarize — the posture change §2.1 flagged, which is why it shipped in the same commit as the pin gate, never before it. ⏳ wazmrt to accept the subcommand form. |
+| run a `.wast` spec script | `wazmrt <script.wast>` | `wasmrt wast <file\|dir>… [-v]` **and now `wasmrt <script.wast>`** (by extension) | ✅ **wasmrt DONE 2026-09-19** · ⏳ wazmrt to accept the subcommand form. |
 | assemble `.wat` → `.wasm` | *(absent)* | `wasmrt wat <file.wat> [-o out]` | ⚠️ **wazmrt must grow it** |
-| pin a module for the DB | `wazmrt pin <file\|dir> [--db <path>]` | *(absent — `pin` is a stub)* | ⚠️ **wasmrt must grow it** |
+| pin a module for the DB | `wazmrt pin <file\|dir> [--db <path>]` | `wasmrt pin <file\|dir> [--db <path>]` | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** — same spelling, same behaviour: prints the lines, appends only with `--db`, hashes the ASSEMBLED bytes for `.wat`. ⚠️ See §3.1m: the `.wat` digests themselves do not match yet. |
 | keypair / signing tools | `wazmrt keygen`, `wazmrt sign` | *(design-only)* | ⬜ **deferred** — reopen when either ships signatures |
 | `-h`/`--help`, `-v`/`--version` | **first argument only** | **first argument only** | ✅ **AGREED** |
 
@@ -327,19 +327,19 @@ rows stay ⬜ **UNVERIFIED** and **may not be quoted as agreed.**
 
 | flag | wazmrt | wasmrt | status |
 | --- | --- | --- | --- |
-| `--dir <host>[<sep>guest]` | separator `:` | separator `::` | ⚠️⚠️ **DIVERGENT AND LIVE — see below** |
-| `--ro-dir` | same separator issue | same | ⚠️⚠️ as above |
+| `--dir <host>[<sep>guest]` | separator `:` | **both `:` and `::`** | ✅ **wasmrt DONE 2026-09-19** · wasmrt accepts either, preferring `::`, and never mistakes a Windows drive letter for a separator. ⏳ wazmrt to accept `::` too, and the break is then closed. |
+| `--ro-dir` | same separator issue | **both**, as `--dir` | ✅ **wasmrt DONE 2026-09-19** · ⏳ as above |
 | **flag POSITION** relative to the module path | flags come **AFTER** the path — 🆕 **and a wazmrt flag written where only the guest sees it now WARNS** (H7, 2026-08-19); nothing after an explicit `--` is examined | flags come **BEFORE** the path | ⚠⚠ **DIVERGENT AND LIVE — MEASURED 2026-08-19 (F3).** wasmrt silently passes a trailing `--dir` to the GUEST, so the sandbox is never granted and nothing warns. |
 | `--allow-symlink` | ✅ | ✅ | ✅ **AGREED** (both added 2026-08-10) |
-| `--env KEY=VALUE` | ✅ | ❌ absent | ⚠️ **wasmrt must add** |
-| `--max-memory <size>` | ✅ | ❌ absent at the CLI | ⚠️ **wasmrt must expose** (the ceiling exists) |
-| `--max-table-elems <count>` | ✅ | ❌ absent at the CLI | ⚠️ **wasmrt must expose** (the ceiling exists) |
-| `--features <list>` | ✅ | ❌ absent at the CLI | ⚠️ **wasmrt must expose** (gating exists in the C ABI) |
-| `--max-iterations <count>` | ✅ (2026-08-19) | ❌ absent — **and so is the ceiling** | ⚠️⚠️ **DIVERGENT AND LIVE — see §3.7** |
-| `--` ends host flags, rest is guest argv | ✅ | ❌ (preopens must precede the path) | ⚠️ **wasmrt must add** |
-| `--pins <path>` | ✅ | ❌ | ⚠️ **wasmrt must add** (with `pin`) |
-| `--verify off\|warn\|enforce` | ✅ | ❌ | ⚠️ **wasmrt must add** (with `pin`) |
-| `--no-verify`, `--yes` | ✅ | ❌ | ⚠️ **wasmrt must add** (with `pin`) |
+| `--env KEY=VALUE` | ✅ | ✅ | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** |
+| `--max-memory <size>` | ✅ | ✅ (`512M`, `2G` …) | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** |
+| `--max-table-elems <count>` | ✅ | ✅ | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** |
+| `--features <list>` | ✅ | ✅ | ✅ **wasmrt DONE 2026-09-19** · **Both vocabularies resolve** (`bulk_memory` and `bulk-memory-operations`), same seeding (`-item` implies `all`, bare implies `mvp`), same layering refusals, and 🔒 **it must come BEFORE the module path — an error anywhere else, in both runtimes** (owner, 2026-09-19). ⚠️ wazmrt's `multi_table` has no wasmrt equivalent: recognised, warned about, no effect. |
+| `--max-iterations <count>` | ✅ (2026-08-19) | ✅ (2026-09-19, T9i) | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** — same unit, same default, `0` = unlimited at the CLI. See §3.7a. |
+| `--` ends host flags, rest is guest argv | ✅ | ✅ | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** — host flags are accepted before the path AND in the run immediately after it; `--` ends them. |
+| `--pins <path>` | ✅ | ✅ | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** — ignored under a root `enforce`, as §3.4 requires. |
+| `--verify off\|warn\|enforce` | ✅ | ✅ | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** — raises only, and a typo is an error. |
+| `--no-verify`, `--yes` | ✅ | ✅ | ✅ **wasmrt DONE 2026-09-19** · ✅ **AGREED** — leading host-flag run only, never from guest argv. |
 
 ⚠️ **THE `--dir` SEPARATOR IS A SWAPPABILITY BREAK THAT IS LIVE TODAY**, and it has nothing to do with
 verification. `--dir .:/` is a working wazmrt invocation; on wasmrt the single colon is not the
@@ -530,6 +530,8 @@ forbids writing into wazmrt's tree. For wazmrt's own session to adopt in wazmrt'
 | **Z2** | unknown flags are ignored or misreported | **§2.4a** (owner decision) | `unknown flag`, rc 1, in every host-flag position — but after the module path ONLY for a `--flag`: a single-dash token there is the guest’s (and no “looks like” guessing anywhere) | `wazmrt m.wasm --bogus`, `wazmrt --bogus m.wasm` and `wazmrt s.wast --bogus` → `unknown flag`, rc 1; `wazmrt m.wasm -- --bogus` and `wazmrt m.wasm -la` → untouched |
 | **Z3** | the summary header says "valid" for an invalid module | **§2.5** (owner decision) | neutral header wording until validation has passed | `wazmrt invalid.wasm` → no line claims validity; rc 1 |
 
+| **Z4** 🆕 | `.wat` digests do not match between the runtimes, so a `.wat` pin is not portable | §3.1, §3.1m | emit the `name` section from the text's identifiers, as wasm-tools and wasmtime do | `wazmrt pin f.wat` and `wasmrt pin f.wat` → same digest (today: 529 of 535 differ) |
+
 ⚠️ **Z1 needs care on wazmrt's side.** Its bare path runs `_start` when the module exports one, so a
 following word may be guest argv rather than an export name. The failure applies when the word **can
 only be** an export name: the module has no `_start`, or the word is in the export position of an
@@ -545,7 +547,7 @@ explicit call form. How wazmrt draws that line is its design call; the observabl
 | rule | status |
 | --- | --- |
 | hash the **in-memory bytes about to execute**; never re-read by path | ✅ **AGREED** — `bytes-hashed == bytes-run` by construction |
-| a `.wat` input hashes the **assembled** bytes, not the source text | ✅ **AGREED** |
+| a `.wat` input hashes the **assembled** bytes, not the source text | ✅ **AGREED** — ⚠️⚠️ **but the two assemblers do not produce the same bytes: `.wat` DIGESTS ARE NOT PORTABLE. MEASURED 2026-09-19 — see §3.1m.** `.wasm` digests are. |
 | a `.wast` script hashes the **script bytes** — every module it can run is contained in them | ✅ **AGREED** |
 | the file is read **once**; no path is reopened after load | ✅ **AGREED** in behaviour · ⚠️ **wasmrt is making it a compiler-checked type** (`Loaded { bytes, digest }`), wazmrt passes a slice — an implementation difference, not a contract difference |
 
@@ -553,6 +555,30 @@ explicit call form. How wazmrt draws that line is its design call; the observabl
 `(module binary "…")` raw payloads. wazmrt shipped this bypass: `wazmrt payload.wast` ran unpinned,
 unsigned wasm **even under a root-owned `# mode: enforce`**. **Any wasm can be wrapped in a `.wast`, and
 the attacker chooses the extension, so the bypass needs no privilege.**
+
+#### 🔬 3.1m — `.wat` DIGESTS DIVERGE, and the cause is the name section (wasmrt session, 2026-09-19)
+
+**§3a decision 2 said to make the `.wat` agreement a TEST rather than an assumption. Run, it fails.**
+Both runtimes' `pin` hashes the assembled bytes, so their digests can be compared directly — that is
+the differential check, and it is one command per file.
+
+| corpus | result |
+| --- | --- |
+| **535 `.wat` files** (the wasmtk tree) | **2 agree · 529 DIFFER · 4 refused by both** |
+| the same modules as `.wasm` | **identical** — so this is the assemblers, not the hash |
+
+**The cause, diagnosed rather than guessed:** wazmrt's digest equals the SHA-256 of *wasmrt's* output
+with its custom sections stripped (`wasm-tools strip --all`) — verified byte-for-byte on
+`mathlib.wat`. The module bodies are identical; **wasmrt emits a `name` section (matching wasm-tools
+and wasmtime, from the identifiers the text carries) and wazmrt does not.**
+
+🔒 **Consequence for an operator, and it is the honest fallback §3a already named: only `.wasm` pins
+are portable.** A `.wat` pinned under one runtime is refused under the other — which fails CLOSED
+(a denial, not a silent run), so it is an operational break, not a security hole.
+
+📬 **Z4, for wazmrt:** emit the `name` section from the text's identifiers, as wasm-tools does. That
+also matches the owner's standing direction not to throw away information the source carries. Until
+then this row stays ⚠️, and an installer that pins `.wat` must pin per runtime.
 
 ### 3.2 When the gate runs
 
@@ -565,7 +591,7 @@ the attacker chooses the extension, so the bypass needs no privilege.**
 
 | item | agreed value |
 | --- | --- |
-| **location** | ⚠️ **DECISION NEEDED — see below.** Today: `/etc/wazmrt/pins` · `C:\ProgramData\wazmrt\pins` |
+| **location** | ✅ **DECIDED (owner, 2026-09-19): the SHARED deployment path** — `/etc/wasmtk/pins` · `C:\ProgramData\wasmtk\pins` — with each runtime's own path kept as a fallback, **and a loud warning when a runtime finds no DB where its sibling would have found one.** Implemented in wasmrt (T9e). 🔒 **OWNER DECISION 2026-09-19** — recorded by wasmrt; ⏳ **awaiting fold-in by the pen-holder (wazmrt, regime A), who assigns its version number** |
 | ownership | **root-owned, read-only to the user, plaintext.** Integrity from **ownership, not secrecy** |
 | format | one lowercase-hex SHA-256 per line; blank lines and `#` lines ignored; whitespace-separated text after the hash is a human label and is ignored |
 | addressing | **content-addressed — no paths in the DB**, so moving or renaming an approved file does not re-open a hole |
@@ -574,7 +600,12 @@ the attacker chooses the extension, so the bypass needs no privilege.**
 | no encryption | a category error: encryption gives confidentiality; what is needed is integrity |
 | no machine-binding | the attacker **is** the user |
 
-⚠️⚠️ **THE PATH IS THE MOST DANGEROUS UNRESOLVED ROW IN THIS FILE.** If each runtime reads its own path,
+✅ **RESOLVED 2026-09-19 by the owner**, as recommended below: shared path, per-runtime fallback, and
+the anti-silent-disarm warning. wasmrt reads `/etc/wasmtk/pins` then `/etc/wasmrt/pins`, and if neither
+exists while `/etc/wazmrt/pins` does, it says so instead of quietly computing `armed = false`.
+⏳ wazmrt to adopt the same order and the same warning.
+
+*The row as it stood:* ⚠️⚠️ **THE PATH IS THE MOST DANGEROUS UNRESOLVED ROW IN THIS FILE.** If each runtime reads its own path,
 **swapping the binary finds no DB, computes `armed = false`, and silently runs everything** — a security
 downgrade with **no error message**, which is the worst defect class either project tracks.
 
@@ -638,9 +669,31 @@ come from root.
 | max linear memory | **`1 << 30`** (1 GiB) | ✅ **AGREED** — verified in both, 2026-08-19 |
 | max table elements | **`1 << 27`** (128 M) | ✅ **AGREED** — verified in both, 2026-08-19 |
 | max call depth | **512** | ✅ **AGREED** — verified in both, 2026-08-19 |
-| an execution bound (non-termination) | **`1 << 30` iterations** per top-level call | ⚠️⚠️ **DIVERGENT AND LIVE — wazmrt shipped it 2026-08-19, wasmrt has nothing. See §3.7a.** |
+| an execution bound (non-termination) | **`1 << 30` iterations** per top-level call | ✅ **AGREED — wasmrt implemented it 2026-09-19 (T9i), closing the last DIVERGENT AND LIVE row.** Same unit (one loop back-edge or one tail-call hop), same default, same per-invocation scope. See §3.7a. |
 
-### 3.7a The execution bound — ⚠️ **DIVERGENT AND LIVE, and the UNIT matters more than the number**
+### 3.7a The execution bound — ✅ **CLOSED 2026-09-19: wasmrt implements it. The UNIT matters more than the number**
+
+✅ **wasmrt landed this on 2026-09-19 (T9i).** `(loop (br 0))` and `(func $f (return_call $f))` both
+trap where they previously hung. What it implements is the agreed design below, unchanged:
+one back-edge **or** one tail-call hop is one iteration, `1 << 30` per top-level invocation, refilled
+on entry, inherited by a host callback that re-enters, an ordinary trap, `--max-iterations <count>`
+in the leading run of host flags, `0` unlimited at the CLI.
+
+🔬 **The default was RE-MEASURED against wasmrt's own corpus rather than adopted on trust**, as this
+section asked: green at `1<<20`; at `1<<19` `return_call.wast` and `return_call_ref.wast` fail; at
+`1<<18` `return_call_indirect` joins them; at `1<<14`, 36 failures. Same shape as wazmrt's numbers —
+the heaviest legitimate workload is the million-hop chain — so `1<<30` is ~1000x our measured peak.
+**Not materially different from the sibling's result**, which is the finding §3.7a asked for.
+
+⚙️ **Cost: not measurable.** A/B/A on a million-back-edge steady loop: 58.06 / 58.78 / 58.87 ms
+without the tick, 57.29 / 57.42 ms with it — inside the ~8% run-to-run spread, and nominally the
+wrong way round, so neither a cost nor a speed-up can be claimed.
+
+⚠️ **The C ABI takes `0` as "leave the default"**, not as "unlimited" — a library embedder does not
+remove the bound by passing zero, which is what every other ceiling setter already means. The CLI's
+`--max-iterations 0` does disable it, for a person at their own terminal.
+
+*The section as it stood, with the agreed design that was implemented:*
 
 🔒 **Owner decision, 2026-08-19** (this resolves §5 decision #3): *"We do not want an infinite loop on
 purpose or by accident by the user. We need an internal check mechanism if this occurs and an error
@@ -761,10 +814,10 @@ Neither runtime is the oracle, so "the other one does X" is not a diagnosis.
 
 | # | decision | why it blocks |
 | --- | --- | --- |
-| 1 | **The shared pin DB path** (§3.3) | until it is decided, a swap can silently disarm verification |
+| ~~1~~ | ~~**The shared pin DB path** (§3.3)~~ | ✅ **DECIDED by the owner 2026-09-19**: `/etc/wasmtk/pins` + `C:\ProgramData\wasmtk\pins`, per-runtime fallback, and a warning rather than a silent `armed = false`. Implemented in wasmrt; ⏳ wazmrt to adopt. |
 | 2 | **Who accepts whose CLI spelling, and by when** (§2.1) | the additive plan needs both halves; `wasmrt wat` and `wazmrt pin` each exist on one side only |
 | ~~3~~ | ~~**Fuel / execution bound** (§3.7)~~ | ✅ **DECIDED by the owner 2026-08-19** — a bound is wanted, with an error message and a break. Design agreed in **§3.7a**. ⚠️ **The decision is closed; the DIVERGENCE is open**: wazmrt ships it, wasmrt does not, and the predicted failure ("a workload that completes under one hangs under the other") is **verified live**, not hypothetical |
-| 5 | **When does wasmrt land the execution bound** (§3.7a) | until it does, swapping wasmrt in **silently removes** the protection — no error, the workload just never returns |
+| ~~5~~ | ~~**When does wasmrt land the execution bound** (§3.7a)~~ | ✅ **ANSWERED: 2026-09-19 (T9i).** The protection is present in both runtimes now; the row in §3.7 is AGREED. |
 | 6 | **Attribution of commit `7ce0dcd2` in the wasmrt repo** | wasmrt reports it committed **wazmrt's** §3.7a rewrite into its tree as if it were its own, before the collision was noticed. ⚠️ **wazmrt cannot fix this — §1a forbids writing to that tree**, and rewriting another repo's history is not an agent's call anyway. It is exactly the tracking-integrity problem the boundary was added to prevent, and it is now **behind** the rule rather than in front of it. Options: leave it with the collision documented in row 3b, or have the wasmrt session amend/annotate it **in its own tree** |
 | 7 | **Whether coordination should run in ONE session at a time** (§1c) | §1a removes the cross-tree risk by construction, but two sessions editing the *same* copy still resolve last-write-wins with nothing to detect it. wasmrt proposed the discipline; it costs nothing and closes the residual gap |
 | 4 | **Exit-code table** (§2.3) | only needed if scripts are expected to branch on specific codes. 📎 *wasmrt measured (§2.3m): both already use 1 for every host failure and every trap, so this may close with no table.* |

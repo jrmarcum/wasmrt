@@ -219,6 +219,31 @@ it survives a change of mechanism. Verified by mutation: deleting the `..` guard
 > Ported at **T9** (it was previously slated for T7, then T8, and slipped both times). The *authority*
 > half of the model — the WASI sandbox — **is** fully built; do not confuse the two.
 
+## ✅ BUILT 2026-09-19 (T9e) — the gate, the DB, `pin`, and the CLI convergence it gated
+
+**Everything the spec below asks for is implemented and pinned by tests.** What shipped, and the two
+things that were decided or measured while building it:
+
+| | |
+| --- | --- |
+| `wasmrt-core/src/pin.rs` | SHA-256 (ours, no dependencies — pinned by the NIST vectors **and cross-checked against `sha256sum` on a real file**), `Digest`/hex, the `Off<Warn<Enforce` ladder, `Db::parse`, and the pure `decide()` matrix. `no_std`-clean. |
+| load-once | `Loaded { path, bytes, digest }` — the ONLY thing an executing path accepts, so the property is checked by the compiler rather than by discipline. |
+| the gate | before validation, on every executing path **including `wast`**; never on summarize. Fail-closed on a mistyped `# mode:`, a malformed DB and a mistyped `--verify`; an override that would have blocked warns. |
+| 🔒 the DB path | **DECIDED by the owner 2026-09-19: the shared `/etc/wasmtk/pins` + `C:\ProgramData\wasmtk\pins`**, each runtime's own path as a fallback, and a LOUD warning when only the sibling's path has a DB — so a swap cannot disarm in silence. |
+| `wasmrt pin` | prints the lines, appends only with `--db`, hashes the ASSEMBLED bytes for `.wat` — same spelling and behaviour as wazmrt's. |
+| the C ABI | still does not verify, and `wasmrt.h` now SAYS so (§5's "say what you did not do"). |
+
+⚠️⚠️ **THE `.wat` DIGEST AGREEMENT WAS MADE A TEST, AND IT FAILED — 529 of 535 files differ.**
+§3a decision 2 called for exactly this check. The cause is diagnosed, not guessed: wazmrt's digest is
+the SHA-256 of wasmrt's own output **with custom sections stripped**, so the module bodies agree and
+**wasmrt emits a `name` section where wazmrt does not**. The honest fallback §3a already named is now
+the recorded position: **only `.wasm` pins are portable; a `.wat` must be pinned per runtime** until
+wazmrt emits the section (handed over as Z4 in `interop.md` §2.5h). It fails CLOSED — a denial, not a
+silent run — so it is an operational break rather than a hole. 🎓 *An agreement between two
+implementations is a hypothesis until one command compares them.*
+
+*The spec as it was written, which is what got built:*
+
 ## ✅ DECIDED 2026-08-19 (owner) — gate load-once, and build `pin` to wazmrt's APPLICATION
 
 **The owner accepted the recommendation** (gate load-once; re-scope `pin` to a default-`off` mechanism

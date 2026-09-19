@@ -85,6 +85,30 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
 
+### 🔒 2026-09-19 — day 4, part 10: the pin gate and the execution bound (**564 tests**)
+
+**`crates/wasmrt/tests/cli_pin_gate.rs`** (8) — armed/unarmed, pinned/unpinned, `enforce` absolute, a
+mistyped `# mode:`, a malformed DB, `.wast` gated, summarize never gated, `.wat` pinned by its
+ASSEMBLED bytes. **`crates/wasmrt/tests/cli_run_modes.rs`** (8) — the bare-path forms, Z1, `--features`
+position/vocabulary/layering, both `--dir` separators, the ceiling and env flags in both positions.
+**`crates/wasmrt-core/tests/iteration_budget.rs`** (6) — the loop and the tail-call chain, the UNIT
+(one back-edge each), per-invocation refill, `0` = unlimited, and the default not tripping a realistic
+workload. Plus 6 unit tests in `pin.rs` (NIST vectors, hex, the fail-closed rules, the whole `decide`
+matrix row by row).
+
+🔬 **Cross-checks that are not our own code:** our SHA-256 matches `sha256sum` on a real file, and
+`wasmrt pin` matches `wazmrt pin` on `.wasm` — **but on `.wat` 529 of 535 differ**, because we emit a
+`name` section and wazmrt does not (`interop.md` §3.1m).
+
+🔬 **The iteration ceiling is measured, not assumed:** `wasmrt wast --max-iterations N <suite>` at
+descending N — green at `1<<20`, `return_call.wast`/`return_call_ref.wast` fail at `1<<19`,
+`return_call_indirect` joins at `1<<18`, 36 failures at `1<<14`. **Re-run this whenever the interpreter
+changes**: an engine cap deliberately cannot satisfy an `assert_trap`, so the corpus fails loudly if
+the budget is ever set below a legitimate workload.
+
+⚙️ **A/B/A on the tick** (million-back-edge loop): 58.06 / 58.78 / 58.87 ms without, 57.29 / 57.42 ms
+with — inside the ~8% spread, so **no measurable cost**.
+
 ### 🔒 2026-09-19 — day 4, part 9: the unknown-flag rule and Z3, pinned (**535 tests**)
 
 `crates/wasmrt/tests/cli_unknown_flag.rs` — `interop.md` §2.4a: `unknown flag` + rc 1 in every host-flag

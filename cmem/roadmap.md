@@ -195,6 +195,13 @@ refused by both / 0 differ**, shipped cdylib **531,968 B**, everything committed
 the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4, did track P, patched the
 era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
 
+🔒 **T9e AND T9i ARE DONE (2026-09-19) — `pin` was the last open T9 item, and the execution bound was
+the last DIVERGENT row in the security contract.** The CLI now accepts wazmrt's whole shape (bare-path
+run modes, `--features`, `--env`, the ceilings, the verification flags, `--`, both `--dir` separators),
+which the contract required to land **with** the gate, never before it. ⚠️ **New finding, handed over
+as Z4:** `.wat` pin digests are NOT portable between the runtimes (529 of 535 differ — we emit a `name`
+section, wazmrt does not); `.wasm` digests agree exactly.
+
 🚦 **T13's conformance numbers are at their target, and the last KNOWN format deviations are closed**
 (item 7, 2026-09-19 — three decoder defects, one more than logged). The CLI exit-code breach of the
 contract is closed too, **coordinated** (part 8; `interop.md` §2.3m). What stands between here and
@@ -269,6 +276,43 @@ the owner narrowed it minutes later (single dash after the path = the guest’s)
 reached them. ✅ **The owner relayed the narrowing the same day and wazmrt is adjusting to it.** **Next coordination step:** mirror their v11–v13 **after they commit**
 (§1d: reconcile against code that has stopped moving). Our copy stays at v10 + unnumbered owner decisions
 until then; the mismatch is a normal in-flight state, not an error.
+
+##### 🔒 DAY 4, part 10 — T9e (the pin gate) + T9i (the execution bound) + the CLI convergence. `[x]`
+
+Owner: **full convergence, pin gate included** — which fixes the order, because the contract forbids a
+bare path executing before the gate exists. Both landed, plus the last DIVERGENT row in §3.7.
+
+**T9e — the gate.** `pin.rs` (SHA-256 by hand, NIST vectors **and** `sha256sum` cross-checked;
+`Off<Warn<Enforce`; `Db::parse`; the pure `decide()` matrix), `Loaded { bytes, digest }` so load-once is
+a TYPE, `verify_gate` before validation on every executing path **including `wast`** (the bypass the
+sibling shipped), and `wasmrt pin`. Fail-closed throughout. 🔒 **The DB path is the owner's decision:
+shared `/etc/wasmtk/pins`, per-runtime fallback, and a warning when only the sibling's path has one —
+so a swap cannot silently disarm.**
+
+**The CLI now accepts wazmrt's whole shape**: bare-path call/`_start`/`.wast`, `--features` (both
+vocabularies, layering enforced, **BEFORE the module or it is an error** — owner), `--env`, the
+ceilings, `--pins`/`--verify`/`--no-verify`/`--yes`, `--` and **both `--dir` separators**. Z1 applies to
+us too: naming a missing export fails instead of printing a summary.
+
+**T9i — the execution bound.** One loop back-edge **or** one tail-call hop is one iteration, `1<<30`
+per top-level invocation, refilled on entry and inherited by host re-entry, an ordinary trap, and
+`--max-iterations` (`0` = unlimited at the CLI; `0` = keep the default in the C ABI). ⚠️ **An engine
+resource cap must not satisfy an `assert_trap`**, so the runner fails on it — which makes the corpus a
+live gate on the ceiling. **Both ticks mutation-verified, and each is invisible to the other's test.**
+🔬 **The default was re-measured on OUR corpus** (green at 2^20; `return_call`/`return_call_ref` fail at
+2^19), so `1<<30` is ~1000x our peak — the sibling's shape, confirmed rather than trusted.
+⚙️ **Cost: not measurable** — A/B/A 58.06/58.78/58.87 ms without vs 57.29/57.42 ms with, inside the ~8%
+spread and nominally the wrong way round.
+
+🔴 **A FINDING THE GATE PAID FOR: `.wat` DIGESTS ARE NOT PORTABLE.** Comparing `wasmrt pin` with
+`wazmrt pin` over 535 files: **2 agree, 529 differ**, while the same modules as `.wasm` agree exactly.
+Diagnosed: wazmrt's digest is ours **with custom sections stripped** — we emit a `name` section, they
+do not. Only `.wasm` pins are portable today; handed over as **Z4**. 🎓 *§3a said to make this a test
+rather than an assumption; the test took one command and the assumption was false.*
+
+564 tests, clippy clean, suite **64,598 / 0 / 0** unchanged, C-ABI PASSED (**75** symbols — the new
+`wasmrt_config_set_max_iterations`), Miri 32/32, `.wat` corpus 531/535, custom-sections 531/4/0.
+CLI 799,744 → **845,312 B**; cdylib 531,968 → **540,160 B**.
 
 ##### 🔒 DAY 4, part 9 — two OWNER DECISIONS in the contract, and Z1–Z3 handed to wazmrt. `[x]`
 
@@ -1054,7 +1098,7 @@ sandbox-escape tests, which self-skip because this host denies native symlink cr
 
 **Still open in T9:** the text-parser remainder of **#12** (`func.wast` 8), **T9e `pin`**,
 **T9f tail calls DONE 2026-08-14 — every in-scope proposal is now implemented.** **All of T9a #1–#9 and
-#11 are closed**, #10 stays a non-issue by design, and **`T9e pin` is the ONLY T9 item left**:
+#11 are closed**, #10 stays a non-issue by design, and ~~**`T9e pin` is the ONLY T9 item left**~~ ✅ **T9e landed 2026-09-19 (with T9i), closing T9**:
 `func.wast` 8 moved to T10 with the other bugs (owner, 2026-08-14 — *"implement T9 first then tackle all
 of the bugs which is T10 anyway"*). The T8 block below is the v0.9.0 release record.
 
@@ -2205,7 +2249,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     rejects a `../../README.md` path — the trap `releasing.md` warned about. Verified with
     `cargo package --no-verify` on all three: clean.
 
-  ### T9e — `pin` + CLI swappability. `1.0.1` ✅ **DECIDED 2026-08-19** `[ ]`
+  ### T9e — `pin` + CLI swappability. `1.0.1` ✅ **DONE 2026-09-19 — see DAY 4 part 10** `[x]`
 
   🔒 **Owner decisions, all three on 2026-08-19:** *(1)* gate load-once and **re-scope** `pin` to a
   default-`off` mechanism rather than deleting it; *(2)* **"the idea is to be swappable with the wazmrt
@@ -2304,7 +2348,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
   baseline does not reproduce here at all, so **build-to-build variance (~7%) exceeds the ~5%
   regression T11 is chasing** — T11's first job is a benchmark that can resolve 5%.
 
-  ### T9i — The ITERATION BUDGET: bound non-termination. `1.0.1` ✅ **DECIDED 2026-08-19** `[ ]`
+  ### T9i — The ITERATION BUDGET: bound non-termination. `1.0.1` ✅ **DONE 2026-09-19 — see DAY 4 part 10** `[x]`
 
   ✅ **UNBLOCKED 2026-08-19 — the flag-position fix landed** (`known-issues.md`): host flags are now
   accepted in both positions, an unknown leading `--flag` is an error rather than a path, a stranded

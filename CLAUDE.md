@@ -32,7 +32,7 @@ than the thing the consumer uses.
 CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 4 landed 2026-09-19 (track A done as the custom-annotations feature; the shipped cdylib −62% after `rlib` was found defeating LTO; the import type-use check #4 closed; TRACK P custom-page-sizes done — `PAGE_SIZE` deleted, byte-granular bounds cross-checked on wasmtime; 🎯 **TRACK D (D1–D4) done — the corpus is at ZERO failed / ZERO skipped / ZERO unrun**), all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
 **embeddable from C** via `wasmrt.h`. Spec suite 🎯 **100%** (**64,598 / 0 / 0** over **288**
-files — per-file feature sets, `wast::features_for_script`), **525 workspace tests**, clippy clean, C-ABI gate PASSED, `.wat` corpus **531/535** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 32/32 PASSED (day 4, 2026-09-19)** — re-count it every run; it was 28 on record while the crate had 31.
+files — per-file feature sets, `wast::features_for_script`), **564 workspace tests**, clippy clean, C-ABI gate PASSED, `.wat` corpus **531/535** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 32/32 PASSED (day 4, 2026-09-19)** — re-count it every run; it was 28 on record while the crate had 31.
 🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
 **0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; and **`proposals/threads/` is at
 497 / 0 / 0** after the owner-directed vendored patch. **custom-descriptors is now 65/451 — 98% of
@@ -75,6 +75,15 @@ stale one. 🎓 *Verifying the premise of an option is not verifying the option*
 removed assertions, and `proposals/threads/` is now **497 / 0 / 0**. ⚠️ The patch is **uncommitted in the
 wasmtk tree on purpose** (the write was authorised; committing in another repo is not) and is designed
 to be overwritten by the next corpus sync — **re-check after every sync.**
+🔒 **T9e + T9i LANDED 2026-09-19 — `pin` was the LAST T9 ITEM, so T9 is closed.** The pin gate
+(SHA-256 in core, load-once as a TYPE, the gate before validation on every executing path **including
+`wast`**, `wasmrt pin`, fail-closed policy) and the execution bound (**one loop back-edge or one
+tail-call hop**, `1<<30`, `--max-iterations`) both ship, and **the CLI now accepts wazmrt's whole
+shape** — bare-path run modes, `--features` (BEFORE the module, an error elsewhere), `--env`, the
+ceilings, the verification flags, `--`, both `--dir` separators. 🔒 **The pin DB path is the owner's
+decision: shared `/etc/wasmtk/pins` with a warning rather than a silent disarm.** ⚠️ **New finding —
+`.wat` pin digests are NOT portable** (529 of 535 differ: we emit a `name` section, wazmrt does not);
+`.wasm` digests agree. Handed over as **Z4**.
 🚦 **NEXT: `1.0.0` release prep** (`cmem/releasing.md`). 🤝 **`coordinate` ran 2026-09-19 on exit codes**: `interop.md` §2.3 row 2 was already AGREED and wasmrt breached it three times (invalid-module summarize, no args, `wast` on FAILED assertions, all rc 0). Fixed with no contract change; annex §2.3m is offered to wazmrt. The exit status is now a usable gate. 🔒 **Then two OWNER DECISIONS (2026-09-19): `interop.md` §2.4a** (an unknown flag in a host-flag position → `unknown flag`, rc 1; guest positions after `--` or after the first guest argument are never examined — and **after the module path a SINGLE-DASH token is the guest's**, since every host flag there is double-dash, so `prog.wasm -la` needs no `--`; **no "looks like" heuristic**, by owner decision) **and §2.5** (no output line may call a module valid unless it validated; the one output-text exception to §0). **Z1–Z3 are handed to wazmrt through the contract (§2.5h)**, and wasmrt already complies. ⚠️ wasmrt's own **F1** (`wasmrt m.wasm f` summarizes with rc 0) is still open under §2.1. ✅ The two 🟡 OPEN decoder defects are CLOSED (2026-09-19) — and were THREE: 20 invalid value-type encodings accepted, 3 valid block types refused, `select (result (ref …))` undecodable; one reader now (`opcode::read_value_type_from`), found by sweeping all 64 one-byte encodings rather than reading the table (`cmem/best-practices.md` §1.8); `tests/value-type-encodings.wast` is passed whole by wasmtime 48. TRACK D3/D4 DONE 2026-09-19: corpus **64,598 / 0 / 0**; `tests/descriptor-casts.wast` is the soundness checkpoint; ⚠️ core and proposal `br_on_cast.wast` contradict each other, so the runner now picks features PER FILE. *(Was: NEXT TRACK D3/D4 —* D1 (exact types) and D2 (descriptor/describes) DONE 2026-09-19; D2 removed 71 FALSE passes (modules that failed to assemble were scoring `assert_invalid` passes). D1 with its soundness checkpoint met (`tests/exact-type-confusion.wast`). ⚠️ wasmtime 48 has NO custom-descriptors: wasm-tools is the outside reader (encoding + validity). **TRACK D — custom-descriptors** (2026-09-19). Tracks A and P, #4, the cdylib dead-code leak and both
 threads-snapshot patches are DONE (`cmem/roadmap.md`, DAY 4 parts 1–3). *(Was: track A → the two owner decisions
 above → track P → track D.)* The 2026-08-20 scoping below is now the record of how it was planned; its
@@ -272,7 +281,7 @@ all**, so `--ro-dir` never stripped it and a guest could plant links in a read-o
 owner-authorized and deliberately re-baselined; `check-wazmrt.sh` reports NO DRIFT.
 **T9a #1–#9 and #11 are now all closed.** ✅ **Tail calls landed 2026-08-14 (T9f), so no in-scope
 proposal is missing**, and `func.wast` 8 (the withdrawn body-order rule + duplicate identifiers) moved
-to T10 with the other bugs (owner, 2026-08-14). **`T9e pin` is the ONLY T9 item left.**
+to T10 with the other bugs (owner, 2026-08-14). ~~**`T9e pin` is the ONLY T9 item left.**~~ ✅ **T9e AND T9i landed 2026-09-19 — T9 is CLOSED.**
 🆕 **THE LADDER WAS RE-CUT (owner, 2026-08-19).** `1.0.0` is no longer "complete on our own terms" — it
 is **T13, the CONFORMANCE CLEAR-OUT**: the corpus to **zero failed / zero skipped / zero unrun**, an
 empty baseline and **zero deliberate deviations**, which brings the proposals the corpus contains into
