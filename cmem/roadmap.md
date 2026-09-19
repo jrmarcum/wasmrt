@@ -188,9 +188,9 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 64,087 / 65 / 530 over 288 files, 514 workspace tests, C-ABI gate PASSED, `.wat` corpus
-528/532, Miri **31/31**, the new custom-sections gate 528/532 byte-identical to wasm-tools, everything committed and pushed.** Day 4
-(below) found the runner manufacturing passes, then did track A as the custom-annotations feature. **Next: #4.**
+**State: 64,087 / 63 / 535 over 288 files, 515 workspace tests, C-ABI gate PASSED, `.wat` corpus
+528/532, Miri **31/31**, custom-sections gate **528 agree / 4 refused by both / 0 differ**, shipped cdylib **521,216 B** (`rlib` removed from its crate-type, −62%), everything committed and pushed.** Day 4
+(below) found the runner manufacturing passes, did track A as the custom-annotations feature, fixed the cdylib dead-code leak, and closed #4. **Next: #5, track P.**
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
 clean and the wasmtk patch is the only thing left uncommitted, deliberately (below).
@@ -200,7 +200,7 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 | **1** | 🔒 **wasmtk commits the threads patch.** Two files modified in the wasmtk tree and nothing else: `proposals/threads/imports.wast`, `proposals/threads/memory.wast`. **Not committed from here on purpose** — the write was owner-authorised, committing in another repo is not. | It is the only work-in-progress anywhere. ⚠️ It is a deliberate deviation from upstream and `update-testsuite.py` WILL overwrite it on the next sync — re-check after every sync. |
 | **2** | 📮 **Report the stale snapshot upstream** (the spec repo's `proposals/threads/` still asserts multi-memory and multi-table invalid). Not filed — needs the owner's account. | The only route that fixes it for everyone; until then the patch carries it. |
 | **3** | ✅ **Track A — DONE (2026-09-19, owner: "we do not want the lexer to throw away information … align with canonical wasmtime and wasm").** `custom/` **0/1/20 → 20/0/0**. The first scoping ("pure runner work, no engine risk") was false — wasmtime scores neither command and the lexer dropped every annotation — so it became the **custom-annotations feature**, built to MEASURED canonical behaviour: `@custom` → a custom section at its slot, `@name` + every `$id` → the `name` section (all 12 subsections), branch hints → `metadata.code.branch_hint`, malformed/misplaced → **module refused** (as wasm-tools refuses it), a hint on a non-branch → **emitted and reported, not refused**. See the day-4 entry. | — |
-| **4** | **The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
+| **4** | ✅ **DONE 2026-09-19 — see `known-issues.md` (top); refused with wasmtime's own reason, and a rule-free fourth copy of the type-use loop behind it.** ~~**The import type-use check** — §6.4.4's "`(type x)` plus explicit clauses must MATCH" is applied to function *definitions* but apparently not to *imports*. Costs 2 `.wat` corpus files and makes our error name the wrong cause. | A check, not a feature. `known-issues.md` has the wasmtime comparison. |
 | **5** | **Track P — custom-page-sizes** (0 failed / 78 skipped; every module honestly refused since X1). 🔒 **The memory-safety one**: enumerate every `PAGE_SIZE`/`65536` and justify each in the commit message; demand a byte-granularity out-of-bounds test. | The refusal is holding, so there is no live defect — but the feature is unbuilt and the skips are real. |
 | **6** | **Track D — custom-descriptors** (65 failed / 451 skipped). **Now 98% of everything that remains.** ✅ **Unblocked**: `Op` has 0xEB free tags. D1 (`(ref (exact $t))`) changes SUBTYPING and carries the type-confusion checkpoint — every cast arm needs a by-construction wrong-answer test. | Largest and riskiest; everything else is small by comparison. |
 

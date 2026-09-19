@@ -95,8 +95,8 @@ quote fix moved 64,068/66/549 → 64,067/65/550 by removing six FALSE passes. 51
 `wasmrt wat` AND `wasm-tools parse` and compares section order plus every custom section's bytes
 (`@custom` placement, the `name` section, branch hints normalised past the locals vector). **Run it
 whenever the assembler's output changes.** Baseline: `.wat` corpus **528 compared byte-for-byte and
-agree, 2 refused by both** (the `anyfunc` corpus defects), **2 differ** (item #4, the import type-use
-check). Needs `wasm-tools` on PATH and `python` (not `python3`, which is a Store stub here and hangs).
+agree, 4 refused by both, 0 differ** — since #4 closed (2026-09-19); the four refusals are corpus
+defects (two `anyfunc`, two import type-use mismatches) that wasmtime refuses too, for the same reasons. Needs `wasm-tools` on PATH and `python` (not `python3`, which is a Store stub here and hangs).
 wasmrt's own decoder cannot be this gate: it reads the name section leniently and ignores the rest.
 
 ### 🔬 2026-09-17 — A THIRD HOLE IN THE PER-FILE GATE: a clean file has no row

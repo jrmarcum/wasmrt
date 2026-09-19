@@ -118,6 +118,15 @@ pub enum Error {
     /// assembler used to keep the LAST one silently, so `(start $a) (start $b)` built a module
     /// that ran only `$b` — a module the text did not describe, and one wasmtime refuses.
     MultipleStart,
+    /// A type use's `(type x)` and its explicit `(param …)`/`(result …)` clauses disagree (§6.4.4:
+    /// they must describe the same function type) — wasm-tools' *"inline function type doesn't
+    /// match type reference"*.
+    ///
+    /// Its own variant because the old one, [`Error::UnexpectedToken`], named the wrong cause: the
+    /// tokens are all in the right place, and it is their MEANING that conflicts. (Before
+    /// 2026-09-19 an IMPORT with this defect was not refused at all, and surfaced 32 KB later as a
+    /// `StackUnderflow` in an unrelated function.)
+    TypeUseMismatch,
     /// A malformed or misplaced CUSTOM annotation — `@custom`, `@name`, or a branch hint. The
     /// payload is the reason, worded as the spec suite words it. Its own variant because the
     /// stage is the verdict: `assert_malformed_custom` is satisfied by this and nothing else.
@@ -140,6 +149,9 @@ impl fmt::Display for Error {
         match self {
             Error::Parse(e) => write!(f, "s-expression parse error: {e}"),
             Error::Annotation(why) => write!(f, "annotation: {why}"),
+            Error::TypeUseMismatch => {
+                write!(f, "inline function type doesn't match type reference")
+            }
             Error::Unsupported(what) => write!(f, "unsupported text construct: {what}"),
             // The whole point of a dedicated variant: the input is LEGACY, not nonsense, so the
             // message keeps the compatibility hint even though the acceptance does not.
@@ -1179,6 +1191,15 @@ struct ModuleBuild {
     /// Emitting it unconditionally cost 3 bytes on every module with data segments, which
     /// is 3 bytes against the "small" axis on modules that never bulk-copy.
     needs_data_count: bool,
+
+    /// Type uses whose `(type x)` named an index that did not exist YET when the use was read,
+    /// with the explicit clauses beside it: `(type x)` may name an IMPLICIT type — one the text
+    /// format appends for an inline signature elsewhere — so the match can only be checked once
+    /// every type exists. Checked at the end of assembly (see `assemble_parts`).
+    ///
+    /// ⚠️ Checking immediately found index `x` absent and refused with `UnexpectedToken`: right to
+    /// refuse, wrong CAUSE — wasm-tools says the inline type does not match, and it is right.
+    deferred_type_uses: Vec<(u32, Sig)>,
 }
 
 // --- Entry points -------------------------------------------------------------
@@ -1394,6 +1415,16 @@ fn assemble_parts(module: &[Sexpr], annots: &[Annot]) -> Result<Vec<u8>> {
                 data_offsets.push(Some(out));
             }
             None => data_offsets.push(None),
+        }
+    }
+
+    // The deferred type uses, now that every type — implicit ones included — exists. An index
+    // that still names nothing is left for the validator, whose stage "unknown type" is.
+    for (ti, sig) in &b.deferred_type_uses {
+        if let Some(d) = func_sig_at(&b.types, *ti) {
+            if d.params != sig.params || d.results != sig.results {
+                return Err(Error::TypeUseMismatch);
+            }
         }
     }
 
@@ -2057,12 +2088,17 @@ fn parse_func_field(items: &[Sexpr], annots: &[Annot], b: &mut ModuleBuild) -> R
     // Without this the explicit clauses were kept while the type index was also used, so the module
     // could mean something the text did not say. The suite calls it "inline function type".
     if let Some(ti) = type_ref {
-        if (seen_param || seen_result)
-            && func_sig_at(&b.types, ti).is_none_or(|d| {
-                d.params != sig.params || d.results != sig.results
-            })
-        {
-            return Err(Error::UnexpectedToken);
+        if seen_param || seen_result {
+            match b.types.get(ti as usize) {
+                Some(TypeDef::Func(d)) => {
+                    if d.params != sig.params || d.results != sig.results {
+                        return Err(Error::TypeUseMismatch);
+                    }
+                }
+                // Possibly an implicit type — see `ModuleBuild::deferred_type_uses`.
+                None => b.deferred_type_uses.push((ti, sig.clone())),
+                Some(_) => return Err(Error::TypeUseMismatch),
+            }
         }
     }
 
@@ -2095,6 +2131,13 @@ fn parse_func_field(items: &[Sexpr], annots: &[Annot], b: &mut ModuleBuild) -> R
     check_unique_names(&local_names)?;
 
     if let Some(r) = import {
+        // An imported function is a SIGNATURE and nothing else: no locals, no body. Both used to be
+        // accepted and thrown away — `(func (import "a" "b") nop)` assembled — where wasm-tools
+        // refuses them; and `(exact (type 0))` was dropped the same way, importing `(func)`.
+        if seen_local {
+            return Err(Error::UnexpectedToken);
+        }
+        after_import_signature(items.get(k))?;
         let ti = type_ref.unwrap_or_else(|| intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig));
         b.func_imports.push(ImportedFunc { r, type_index: ti });
         b.import_order.push(ImportKind::Func);
@@ -2448,22 +2491,34 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
 }
 
 /// Parse a tag's `(type $t)` and/or inline `(param …)`, returning its type index.
-fn parse_tag_type(items: &[Sexpr], b: &mut ModuleBuild) -> Result<u32> {
-    let mut type_ref = None;
-    let mut sig = Sig::default();
-    for item in items {
-        match item.keyword() {
-            Some("type") => {
-                type_ref = Some(resolve_by_name(&b.type_names, nth(want_list(item)?, 1)?)?);
-            }
-            Some("param" | "result") => {
-                let s = parse_sig(core::slice::from_ref(item), &b.type_names, None)?;
-                sig.params.extend(s.params);
-                sig.results.extend(s.results);
-            }
-            _ => {}
-        }
+/// What may follow an imported function's (or a tag's) signature: nothing.
+///
+/// 🔒 One rule for both spellings of an import. `(exact (type x))` is custom-descriptors' EXACT
+/// import (track D, unimplemented), so it is refused as [`Error::Unsupported`] — a gap of ours,
+/// scored as a skip — never as a verdict on the input. Anything else is malformed.
+fn after_import_signature(next: Option<&Sexpr>) -> Result<()> {
+    match next {
+        None => Ok(()),
+        Some(s) if s.keyword() == Some("exact") => Err(Error::Unsupported("custom-descriptors")),
+        Some(_) => Err(Error::UnexpectedToken),
     }
+}
+
+/// The signature of a function IMPORT or a tag: its inline `(import …)` / `(export …)` clauses
+/// (a tag field's; an import descriptor has none), then a type use, then NOTHING — the rules are
+/// [`read_type_use`]'s, and anything left over is malformed rather than skipped.
+///
+/// ⚠️ This was a fourth, rule-free copy of the type-use loop ending in `_ => {}`: it enforced no
+/// clause order, never checked a `(type x)` against the clauses beside it (and dropped them),
+/// and skipped any other form in silence. wasm-tools refuses all of those.
+fn parse_tag_type(items: &[Sexpr], b: &mut ModuleBuild) -> Result<u32> {
+    let mut j = 0;
+    while items.get(j).is_some_and(|s| matches!(s.keyword(), Some("import" | "export"))) {
+        j += 1;
+    }
+    let (type_ref, sig) =
+        read_type_use(&b.types, &b.type_names, items, &mut j, true, &mut b.deferred_type_uses)?;
+    after_import_signature(items.get(j))?;
     Ok(type_ref.unwrap_or_else(|| intern_sig_outside_rec(&mut b.types, &b.rec_groups, sig)))
 }
 
@@ -3061,6 +3116,8 @@ struct Ctx<'a> {
     /// `memory.init`/`data.drop`. A `&mut` to one field, borrowed disjointly from the name
     /// tables — the same trick that lets a body intern a block signature.
     needs_data_count: &'a mut bool,
+    /// [`ModuleBuild::deferred_type_uses`], for the type uses a body reads.
+    deferred_type_uses: &'a mut Vec<(u32, Sig)>,
 }
 
 impl Ctx<'_> {
@@ -3204,6 +3261,7 @@ macro_rules! ctx_for {
             label_count: 0,
             label_names: Vec::new(),
             needs_data_count: &mut $b.needs_data_count,
+            deferred_type_uses: &mut $b.deferred_type_uses,
         }
     };
 }
@@ -5002,6 +5060,30 @@ enum BlockTy {
 /// `parse_sig`'s own order state resets per call and can never observe a sequence. A first attempt put
 /// the rule there and moved exactly one assertion out of forty.
 fn parse_type_use(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<(Option<u32>, Sig)> {
+    // A block type / `call_indirect` signature cannot name its parameters.
+    read_type_use(ctx.types, ctx.type_names, items, j, false, ctx.deferred_type_uses)
+}
+
+/// A **type use** (§6.4.4) — `(type x)? (param …)* (result …)*` — read from `items[*j..]`, with
+/// its three rules: that clause ORDER, a `(type x)` given with explicit clauses must MATCH them
+/// (and name a function type), and — where `named_params` is false — no `$name` on a parameter.
+///
+/// 🔒 **The one authority for those rules.** Block types, `call_indirect`, and function / tag
+/// import signatures all read here. The rules were once copied per site, and every copy that was
+/// missed kept all three defects: the IMPORT and TAG copy (`parse_tag_type`, until 2026-09-19)
+/// enforced none, and where `(type x)` was present it DISCARDED the explicit clauses, so
+/// `(import "a" "b" (func (type 0) (param i64)))` built an import of type 0's signature — a
+/// module other than the one the text describes, which wasm-tools refuses. (Function
+/// *definitions* keep their own loop because locals interleave with it; they enforce the same
+/// three rules there.)
+fn read_type_use(
+    types: &[TypeDef],
+    type_names: &[Option<String>],
+    items: &[Sexpr],
+    j: &mut usize,
+    named_params: bool,
+    deferred: &mut Vec<(u32, Sig)>,
+) -> Result<(Option<u32>, Sig)> {
     let mut sig = Sig::default();
     let mut type_ref = None;
     let (mut seen_param, mut seen_result) = (false, false);
@@ -5011,7 +5093,7 @@ fn parse_type_use(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<(Opti
                 if type_ref.is_some() || seen_param || seen_result {
                     return Err(Error::UnexpectedToken);
                 }
-                type_ref = Some(resolve_by_name(ctx.type_names, nth(want_list(s)?, 1)?)?);
+                type_ref = Some(resolve_by_name(type_names, nth(want_list(s)?, 1)?)?);
                 *j += 1;
             }
             Some("param" | "result") => {
@@ -5019,7 +5101,7 @@ fn parse_type_use(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<(Opti
                 if is_param && seen_result {
                     return Err(Error::UnexpectedToken);
                 }
-                if is_param && want_list(s)?.get(1).is_some_and(is_id) {
+                if is_param && !named_params && want_list(s)?.get(1).is_some_and(is_id) {
                     return Err(Error::UnexpectedToken);
                 }
                 if is_param {
@@ -5027,7 +5109,7 @@ fn parse_type_use(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<(Opti
                 } else {
                     seen_result = true;
                 }
-                let one = parse_sig(core::slice::from_ref(s), ctx.type_names, None)?;
+                let one = parse_sig(core::slice::from_ref(s), type_names, None)?;
                 sig.params.extend(one.params);
                 sig.results.extend(one.results);
                 *j += 1;
@@ -5037,13 +5119,16 @@ fn parse_type_use(ctx: &mut Ctx, items: &[Sexpr], j: &mut usize) -> Result<(Opti
     }
     if let Some(ti) = type_ref {
         if seen_param || seen_result {
-            let declared = match ctx.types.get(ti as usize) {
-                Some(TypeDef::Func(s)) => s,
+            match types.get(ti as usize) {
+                Some(TypeDef::Func(d)) => {
+                    if d.params != sig.params || d.results != sig.results {
+                        return Err(Error::TypeUseMismatch);
+                    }
+                }
+                // Not defined yet — possibly an implicit type. Decided once all types exist.
+                None => deferred.push((ti, sig.clone())),
                 // Naming a non-function type here is malformed, not merely unmatched.
-                _ => return Err(Error::UnexpectedToken),
-            };
-            if declared.params != sig.params || declared.results != sig.results {
-                return Err(Error::UnexpectedToken);
+                Some(_) => return Err(Error::UnexpectedToken),
             }
         }
     }
@@ -5277,7 +5362,7 @@ mod tests {
             asm(r#"(module (type $sig (func))
                     (func (block (type $sig) (result i32) (i32.const 0)) (unreachable)))"#)
                 .unwrap_err(),
-            Error::UnexpectedToken
+            Error::TypeUseMismatch
         );
         // Params disagree in arity.
         assert_eq!(
@@ -5285,7 +5370,7 @@ mod tests {
                     (func (i32.const 0) (block (type $sig) (param i32) (result i32))
                      (unreachable)))"#)
                 .unwrap_err(),
-            Error::UnexpectedToken
+            Error::TypeUseMismatch
         );
         // An exact restatement is accepted — the check must not reject agreement.
         assert!(
@@ -5301,6 +5386,55 @@ mod tests {
                 .is_ok()
         );
     }
+
+    /// The same rules on the two sites that had NONE until 2026-09-19 — a function IMPORT's
+    /// signature and a TAG's (imported or defined). wasm-tools refuses every case below; wasmrt
+    /// accepted all of them, and for a mismatch built the import from `(type x)` alone, silently
+    /// discarding the clauses beside it.
+    #[test]
+    fn the_type_use_rules_apply_to_imports_and_tags() {
+        for (src, e) in [
+            (r#"(module (type (func (param i32))) (import "a" "b" (func (type 0) (param i64))))"#,
+             Error::TypeUseMismatch),
+            (r#"(module (import "a" "b" (func (type 0) (param i64))) (type (func (param i32))))"#,
+             Error::TypeUseMismatch),
+            (r#"(module (type (func (param i32))) (import "a" "b" (tag (type 0) (param i64))))"#,
+             Error::TypeUseMismatch),
+            (r#"(module (type (func (param i32))) (tag (type 0) (param i64)))"#,
+             Error::TypeUseMismatch),
+            (r#"(module (type (func (param i32))) (import "a" "b" (func (param i32) (type 0))))"#,
+             Error::UnexpectedToken),
+            (r#"(module (type (func (param i32))) (import "a" "b" (func (type 0) (local i32))))"#,
+             Error::UnexpectedToken),
+        ] {
+            assert_eq!(asm(src).unwrap_err(), e, "{src}");
+        }
+        // `(type x)` may name an IMPLICIT type — one appended for an inline signature further
+        // down — so the match is decided once every type exists. Checked immediately, the first
+        // two were REFUSED (index 0 did not exist yet) and the last two refused for the wrong
+        // cause; `bindgen_fixtures/fnany_50.wat` is the corpus instance.
+        for src in [
+            r#"(module (import "a" "b" (func (type 0) (param i32))) (func (param i32)))"#,
+            r#"(module (func (type 0) (param i32)) (func (param i32)))"#,
+        ] {
+            asm(src).unwrap_or_else(|e| panic!("{src} must assemble: {e:?}"));
+        }
+        for src in [
+            r#"(module (import "a" "b" (func (type 0) (param i64))) (func (param i32)))"#,
+            r#"(module (func (type 0) (param i64)) (func (param i32)))"#,
+        ] {
+            assert_eq!(asm(src).unwrap_err(), Error::TypeUseMismatch, "{src}");
+        }
+        for src in [
+            r#"(module (type (func (param i32))) (import "a" "b" (func (type 0) (param i32))))"#,
+            r#"(module (import "a" "b" (func $f (param $x i32) (result i32))))"#,
+            r#"(module (type $t (func (param i32))) (tag $e (export "x") (type $t)))"#,
+            r#"(module (tag $e (import "a" "b") (param i32)))"#,
+        ] {
+            asm(src).unwrap_or_else(|e| panic!("{src} must assemble: {e:?}"));
+        }
+    }
+
 
     /// The same type-use rules on a **function definition** and on **`call_indirect`** — each had its
     /// own copy of the loop, and therefore its own copy of all three defects. `parse_type_use` is now
@@ -5323,7 +5457,7 @@ mod tests {
         assert_eq!(
             asm(r#"(module (type $s (func)) (func (type $s) (result i32) (i32.const 0)))"#)
                 .unwrap_err(),
-            Error::UnexpectedToken
+            Error::TypeUseMismatch
         );
         // `call_indirect`'s type use: order, named parameter, and inline mismatch.
         assert_eq!(
@@ -5344,7 +5478,7 @@ mod tests {
             asm(r#"(module (type $s (func)) (table 0 funcref)
                     (func (result i32) (call_indirect (type $s) (result i32) (i32.const 0))))"#)
                 .unwrap_err(),
-            Error::UnexpectedToken
+            Error::TypeUseMismatch
         );
         // …and the canonical spellings all still assemble.
         assert!(asm("(module (func (param i32) (result i32) (local.get 0)))").is_ok());

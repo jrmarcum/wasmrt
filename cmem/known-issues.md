@@ -28,7 +28,29 @@ spec: `best-practices.md` §3.8b, exactly. **One `wasmtime compile` on our outpu
 wasmtime 48), raw bytes refused at decode, and the ops moved to internal tags above `0xff` so the
 byte space cannot claim them again.
 
-## 🟡 OPEN — a type-use mismatch on an IMPORT is caught 32 KB late, as `StackUnderflow`
+## ✅ CLOSED 2026-09-19 — the import type-use check, and the wider defect behind it
+
+**Refused now with wasmtime's own reason** (*"inline function type doesn't match type reference"*,
+`wat::Error::TypeUseMismatch`) for both corpus files; the custom-sections gate reads **0 differ**.
+⚠️ **The logged cause was a third of it** (*"a cost logged beside a defect is a hypothesis about its
+cause"*). `parse_tag_type` — the signature reader for EVERY function import and tag — was a **fourth,
+rule-free copy of the type-use loop**: no clause order, no match check, `(type x)` silently DISCARDING
+the clauses beside it (an import of the wrong signature), and a `_ => {}` that skipped any other form.
+It now reads through `read_type_use`, the one authority block types and `call_indirect` already used.
+Found beside it, same class:
+* **An inline-import function's body and locals were accepted and thrown away** —
+  `(func (import "a" "b") nop)` assembled; wasm-tools refuses. Refused now.
+* **`(exact (type 0))` was dropped** (custom-descriptors), importing `(func)`: in
+  `exact-func-import.wast` a wrong module LINKED. Now `Unsupported("custom-descriptors")` — a skip,
+  pending track D. That file went 7/5/12 → **7/3/17**.
+* **The right refusal, for the wrong cause**: `fnany_50.wat` defines no types, so its `(type 0)`
+  names an IMPLICIT type. Checking at once found index 0 absent (`UnexpectedToken`). The check is
+  now DEFERRED until every type exists (`ModuleBuild::deferred_type_uses`) — which also stopped
+  wasmrt REFUSING valid modules like `(import "a" "b" (func (type 0) (param i32))) (func (param i32))`.
+
+*The original entry, kept as the record:*
+
+## 🟡 (was OPEN) — a type-use mismatch on an IMPORT is caught 32 KB late, as `StackUnderflow`
 
 `bindgen_fixtures/fnany_50.wat` and `hostfn_50.wat` are **corpus defects** — wasmtime refuses them
 too — but the two engines refuse them for different reasons, and ours is the worse one:
