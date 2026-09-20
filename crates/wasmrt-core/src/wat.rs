@@ -4394,6 +4394,12 @@ fn emit_op_with_immediates(
             uleb(&mut ctx.out, u64::from(ti));
         }
         O::ArrayNewData | O::ArrayInitData => {
+            // ⚠️ These name a data segment exactly as `memory.init` does, so they require the
+            // data-count section too — and only `memory.init`/`data.drop` set this flag, because
+            // the list was written before GC landed and nothing re-read it. The result was an
+            // emitter defect of the T10a kind: `wasmrt wat` produced a module wasmrt itself ran
+            // happily and `wasm-tools validate` refused with "data count section required".
+            *ctx.needs_data_count = true;
             let ti = resolve_by_name(ctx.type_names, imm(0)?)?;
             let d = resolve_by_name(ctx.data_names, imm(1)?)?;
             uleb(&mut ctx.out, u64::from(ti));

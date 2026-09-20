@@ -1611,3 +1611,107 @@ instrument was ours and trusted:
 instrument that cannot register the thing you are looking for returns a confident wrong answer.**
 Before trusting a check, make it fail once on purpose. That is the same discipline as the mutation
 test, applied to the harness instead of the code.
+
+---
+
+## §1.9 — **A SECOND AUTHORITY ON A GRAMMAR FAILS ON WHATEVER WAS ADDED AFTER IT WAS WRITTEN** (2026-09-19)
+
+`module.rs` carried `skip_const_expr`: forty lines whose only job was to walk an initializer
+expression to its `end` without mistaking an operand byte for the terminator. To do that it had to
+know every constant instruction's immediate shape — so it was a **second copy of the instruction
+grammar**, written from the subset of instructions that existed the day it was written.
+
+It cost two defects, and both were the **reject-valid** direction, which is the direction this
+project has otherwise been lucky to avoid:
+
+* `struct.new_desc` / `struct.new_default_desc` (custom-descriptors, `0xFB 0x20`/`0x21`) were not in
+  its match, so their type index stayed in the byte stream and was read as an opcode.
+* `ref.null`'s heap type was read with a bare `read_var_s33`, which cannot see the `exact` prefix
+  (`0x62 typeidx`) — the **fourth** private copy of the heap-type grammar.
+
+⚠️ **Both were invisible for small type indices.** A stranded index byte of `0x00` decodes as
+`unreachable`, consumes nothing, and the walk still lands on the real `end` — the right answer for
+the wrong reason. The first probe of each used type index 0 and **agreed with wasm-tools**. Only at
+index **11** does the stranded byte become `0x0B`, which *is* `end`: the expression terminates early,
+the section comes up short, and a valid module is refused with `section size mismatch`.
+
+🎓 **A probe that happens to pick the benign input reports "no defect" in exactly the same words as a
+correct implementation.** When a bug is "a byte is left in the stream", the input has to make that
+byte *mean* something — pick the operand value that collides with a terminator, not the first one
+that comes to mind.
+
+The fix is structural, not a patch: const expressions are now walked by `opcode::decode_expr`, the
+same function that decodes function bodies, and `skip_const_expr` is deleted. An instruction cannot
+be legal in a body and unknown in an initializer any more, because there is only one reader. Same
+shape as `read_value_type_from` (§1.8) and `parse_type_use` before it — **the durable fix for "two
+copies disagree" is one copy, never a third.**
+
+---
+
+## §3.13 — **READ-AND-DISCARD IS NOT VALIDATION** (2026-09-19)
+
+Four defects found in one review, all the same shape: a field whose **undefined values were never
+rejected**, because the code read the bits it wanted and threw the rest away.
+
+| field | what the code did | what it accepted |
+|---|---|---|
+| `br_on_cast` castflags | took bits 0–1 for nullability | `0xff` ran as `0x03` |
+| `atomic.fence`'s reserved byte | `r.read_byte()?;` | any byte |
+| element-segment elemkind | `r.read_byte()?;` | any byte |
+| element-segment flags | `read_var_u32`, tested bits 0–2 | flags `8` silently became flags `0` — a **different segment form** |
+
+And a fifth of the same family from the SIMD decoder: `if sub > MAX_SIMD_SUB { reject }`. ⚠️ **A
+CEILING IS NOT MEMBERSHIP.** The `0xFD` space is not dense — it has 20 holes below its top, and all
+20 decoded into an `Op::Simd` the interpreter would then be handed.
+
+🎓 The general rule: **examining the bits a form needs is not the same as rejecting the bits no form
+defines.** A reserved byte is reserved only if something refuses a non-zero one; otherwise it is just
+a byte you skipped. Every one of these five was a *silent* acceptance — the module ran, and produced
+an answer for bytes that are not WebAssembly.
+
+🔬 **How the holes were found: sweep the space, do not read the table.** Every `0xFD` sub-opcode in
+`0x00..=0x113` was handed to wasmrt and to wasm-tools as a one-instruction module, and the 20
+disagreements fell out in one run. The same method found the value-type defects the day before
+(§1.8). Reading a specification's opcode table to decide what is assigned is how the holes got in.
+
+---
+
+## §3.8d — **THE OUTSIDE READER IS NOW A GATE, NOT A GOOD HABIT** (2026-09-19)
+
+§3.8b says to hand wasmrt's output to an outside reader whenever a format-level change lands, and it
+has earned its keep four times (the `(ref any)` internal tag, `try_table`'s catch label, the raw
+`0xc5` trunc_sat opcodes, and now this). ⚠️ **Every one of those was found by remembering to do it.**
+
+The fifth was found the same way and it is the reason the habit is now a script: `array.new_data` and
+`array.init_data` name a data segment exactly as `memory.init` does, so they require the data-count
+section — and **neither** wasmrt's decoder (which enforced the requirement for `memory.init` and
+`data.drop` only) **nor** wasmrt's assembler (which set the "emit a data count" flag at those same two
+sites) knew it. The two agreed perfectly, the module ran, and `wasm-tools validate` on our own
+emitted bytes said `data count section required`. **The list was written before GC existed and
+nothing re-read it when GC landed** — the T10a emitter mechanism, seventh instance, and the second
+one where the *assembler* emitted a module that is not WebAssembly.
+
+`scripts/wat-corpus.ts` now runs the whole corpus as **assemble → decode+validate → `wasm-tools
+validate`**, so all 528 modules wasmrt emits are read by someone who did not learn the conventions
+from us. 🔒 **Proved it can fail**: with both fixes reverted, the gate reports
+`WASM-TOOLS REFUSED OUR BYTES` (§5.9 — a gate you have not seen fail is a hypothesis). It also
+checks the output file **exists** rather than trusting the assembler's exit text, because an
+unrecognised assembler failure otherwise reappears as "wasm-tools could not read the file" — a true
+statement filed under the wrong heading.
+
+---
+
+## §8.1b — **LINE ENDINGS ARE NOT UNIFORM WITHIN THIS REPO** (2026-09-19)
+
+Three scripted edits in one session silently matched nothing: `crates/wasmrt-core/src/module.rs` is
+**CRLF** and `crates/wasmrt-core/src/wat.rs` is **LF**, and a pattern containing `\n` matches only
+the second. A fourth failed differently — `sed 's/…&mut r)/…/'` died on "invalid back reference".
+
+Each time, the edit reported success and the rebuild "passed". ⚠️ **A no-op edit followed by a
+passing test is indistinguishable from a correct edit followed by a passing test** — which is
+§5.4c/§8.1a's lesson arriving through a new door. Two of these were *mutation* tests, where a silent
+no-op means the mutation never happened and the gate never proved anything.
+
+🔒 The practice that caught all four: **every scripted edit asserts its own application** — the
+replacement throws `MUTATION DID NOT APPLY` when the text did not change, and prints the byte delta
+when it did. Cheap, and it converts a silent wrong result into a loud stop.

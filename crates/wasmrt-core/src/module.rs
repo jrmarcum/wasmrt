@@ -789,7 +789,19 @@ pub fn decode(bytes: &[u8]) -> DecodeResult<Module> {
     } else if code
         .iter()
         .flat_map(|c| c.ir.iter())
-        .any(|i| matches!(i.op, crate::opcode::Op::MemoryInit | crate::opcode::Op::DataDrop))
+        .any(|i| {
+            matches!(
+                i.op,
+                // ⚠️ GC adds two more instructions that name a data segment. The list was written
+                // when bulk-memory was the only proposal with any, and nothing re-read it when GC
+                // landed: `array.new_data` / `array.init_data` in a data-count-less module were
+                // accepted here while wasm-tools says "data count section required".
+                crate::opcode::Op::MemoryInit
+                    | crate::opcode::Op::DataDrop
+                    | crate::opcode::Op::ArrayNewData
+                    | crate::opcode::Op::ArrayInitData
+            )
+        })
     {
         // …and when ABSENT it is required, if any body references a data segment (bulk-memory).
         // The count is what lets `memory.init`'s segment index be checked without having read the
@@ -1051,48 +1063,6 @@ fn read_storage_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<Storage
             Ok(StorageType::I16)
         }
         _ => Ok(StorageType::Val(read_val_type(r, kinds)?)),
-    }
-}
-
-/// Skip a constant init expression (§5.4.9): a short instruction sequence terminated by
-/// `end` (0x0B), handling const-expr opcodes so an operand byte is never mistaken for the
-/// terminator.
-fn skip_const_expr(r: &mut Reader) -> DecodeResult<()> {
-    loop {
-        match r.read_byte()? {
-            0x0b => return Ok(()), // end
-            0x41 | 0x23 | 0xd2 => r.skip_leb(5)?, // i32.const / global.get / ref.func
-            0x42 => r.skip_leb(10)?,              // i64.const
-            0x43 => {
-                r.read_bytes(4)?; // f32.const
-            }
-            0x44 => {
-                r.read_bytes(8)?; // f64.const
-            }
-            0xd0 => {
-                r.read_var_s33()?; // ref.null (heaptype s33)
-            }
-            0xfd => {
-                // SIMD prefix — only `v128.const` is a constant instruction.
-                if r.read_var_u32()? == 0x0c {
-                    r.read_bytes(16)?;
-                }
-            }
-            0xfb => {
-                // GC prefix — the constant GC instructions carry immediates to skip.
-                match r.read_var_u32()? {
-                    0x00 | 0x01 | 0x06 | 0x07 => {
-                        r.read_var_u32()?; // struct.new* / array.new* : type index
-                    }
-                    0x08 => {
-                        r.read_var_u32()?; // array.new_fixed : type index + count
-                        r.read_var_u32()?;
-                    }
-                    _ => {}
-                }
-            }
-            _ => {} // other zero-operand ops (extended-const arithmetic, etc.)
-        }
     }
 }
 
@@ -1697,9 +1667,17 @@ fn read_byte_vec(r: &mut Reader) -> DecodeResult<Vec<u8>> {
 }
 
 /// Capture the raw bytes of a constant expression (through its `end`).
+///
+/// 🔒 The expression is walked by [`crate::opcode::decode_expr`] — the same decoder that reads
+/// function bodies — and the instructions are dropped; only the byte range is wanted here. This
+/// used to be a hand-written `skip_const_expr` that knew the immediate shape of *some* constant
+/// instructions, and the two it did not know (`struct.new_desc`, and `ref.null` with an `exact`
+/// heap type) each made a VALID module undecodable. See `decode_expr`'s own comment: a second
+/// authority on the instruction grammar is the T10a mechanism, and it fails the same way every
+/// time — silently, on whatever was added after it was written.
 fn read_const_expr_bytes(r: &mut Reader) -> DecodeResult<Vec<u8>> {
     let start = r.pos();
-    skip_const_expr(r)?;
+    crate::opcode::decode_expr(r)?;
     Ok(r.input()[start..r.pos()].to_vec())
 }
 
@@ -1728,6 +1706,14 @@ fn decode_element_section(d: &Decoder, r: &mut Reader) -> DecodeResult<Vec<Eleme
     let mut list = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let flags = r.read_var_u32()?;
+        // §5.5.12 defines exactly EIGHT segment forms, so the flags field is three bits. It was
+        // read as an unbounded `u32` and only bits 0..2 were ever examined, which meant `flags = 8`
+        // decoded as flags 0 — a different segment form — instead of being refused; wasm-tools
+        // says "invalid flags byte in element segment". ⚠️ Examining the bits a form needs is not
+        // the same as rejecting the bits no form defines.
+        if flags > 7 {
+            return Err(DecodeError::MalformedFlag);
+        }
         let mut table_index = 0u32;
         let mut offset_expr: Vec<u8> = Vec::new();
         let mut funcs: Vec<u32> = Vec::new();
@@ -1751,7 +1737,12 @@ fn decode_element_section(d: &Decoder, r: &mut Reader) -> DecodeResult<Vec<Eleme
         if flags & 0b100 == 0 {
             // Func-index form. Non-flag-0 variants carry a leading elemkind byte.
             if flags != 0 {
-                r.read_byte()?; // elemkind (0x00 = funcref)
+                // elemkind: `0x00` (funcref) is the only one defined, and the byte was being read
+                // and discarded — wasm-tools: "only the function external type is supported in
+                // elem segment".
+                if r.read_byte()? != 0x00 {
+                    return Err(DecodeError::MalformedFlag);
+                }
             }
             funcs = read_func_vec(r)?;
             // ⚠️ §5.5.12 with function-references: the funcidx **shorthand** forms have type

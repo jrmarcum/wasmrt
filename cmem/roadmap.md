@@ -188,12 +188,30 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
-**State: 🎯 64,598 / 0 / 0 over 288 files — ZERO FAILED, ZERO SKIPPED, ZERO UNRUN.** 525 workspace tests,
-clippy **clean** (`-D warnings`, all targets), C-ABI gate PASSED, Miri **32/32**, `.wat` corpus **531/535**
-(the denominator moved: wasmtk has 3 more files; the same 4 corpus defects), custom-sections gate **531 agree / 4
-refused by both / 0 differ**, shipped cdylib **531,968 B**, everything committed and pushed. Day 4 (below) found
-the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4, did track P, patched the
-era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
+**State: 🎯 64,603 / 0 / 0 over 288 files — ZERO FAILED, ZERO SKIPPED, ZERO UNRUN.** **580 workspace tests**,
+clippy **clean** (`-D warnings`, all targets), C-ABI gate PASSED, Miri **32/32**, `.wat` corpus
+**528 / 532 files** — 🆕 **and all 528 are now accepted by `wasm-tools`, not just by us**
+(`scripts/wat-corpus.ts`; the same 4 corpus defects, which wasm-tools refuses on the same lines),
+custom-sections gate **531 agree / 4 refused by both / 0 differ**, shipped cdylib **531,968 B**,
+everything committed and pushed. Day 4 (below) found the runner manufacturing passes, did track A,
+fixed the cdylib dead-code leak, closed #4, did track P, patched the era-pinned threads snapshot
+(owner-directed) and **finished TRACK D (D1–D4)**.
+
+🔴 **DAY 5 — A DECODER REVIEW FOUND EIGHT DEFECTS, AND FIXING ONE FOUND A NINTH IN THE ASSEMBLER**
+(2026-09-19, `known-issues.md` top). Every one was reproduced against wasm-tools 1.259 **before**
+anything changed, and two were the opposite direction from how they were filed: a private
+`skip_const_expr` — a second, partial copy of the instruction grammar — **refused two VALID modules**
+(`struct.new_desc`, and `ref.null` with an `exact` heap type; benign at type index 0, fatal at 11,
+where the stranded immediate byte IS `0x0B` = `end`). It is deleted; const exprs go through
+`opcode::decode_expr`, the reader that decodes function bodies. The other six were fields whose
+undefined values were read and discarded — `br_on_cast` flags, `atomic.fence`'s reserved byte, the
+elemkind byte, element flags `8`, **20 unassigned SIMD sub-opcodes** (a ceiling is not membership),
+and `array.new_data`/`array.init_data` missing from the data-count requirement. ⚠️ **That last one
+made one of our OWN tests fail, which is how the ninth surfaced: the assembler had the identical
+gap, so `wasmrt wat` emitted modules wasm-tools refuses** — the seventh instance of the T10a emitter
+mechanism. 🔒 Response: `scripts/wat-corpus.ts` ends the `.wat` gate at an **outside reader**, and it
+was proved to fail by reverting both fixes. Conformance **unchanged at 64,603 / 0 / 0**, per-file
+gate clean — these are all paths the spec suite does not reach.
 
 ✅ **SETTLED: 64,603 / 0 / 0 over 288 files (2026-09-19, late).** wasmtk finished — the fix went into
 **their runner**, and the vendored patch was narrowed: the 5 × "multiple memories" assertions were

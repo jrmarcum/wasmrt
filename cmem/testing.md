@@ -159,12 +159,13 @@ one spelling its feature was built with. **Test the spellings, not the flag** (`
 
 ### 🔧 2026-09-19 — day 4, part 11: the gates are TypeScript now (**567 tests**)
 
-`scripts/` is four `.ts` files run by **Deno or Bun** (`node:` builtins only, so either works, and so
+`scripts/` is five `.ts` files run by **Deno or Bun** (`node:` builtins only, so either works, and so
 does node). The commands:
 
     CC=gcc deno run -A scripts/c-gate.ts            deno run -A scripts/miri-gate.ts
     deno run --allow-read scripts/conformance-diff.ts <baseline.txt> <current.txt>
     deno run -A scripts/custom-sections-diff.ts target/release/wasmrt.exe @watlist.txt
+    deno run -A scripts/wat-corpus.ts [corpus-root]         # added 2026-09-19, see below
 
 🔒 **Each port was checked to still FAIL when it should**, not merely to agree today:
 conformance-diff reproduces the shell version's output and exit status on lost passes, more failures,
@@ -172,6 +173,40 @@ a newly-failing clean file and an honest improvement; custom-sections-diff repro
 535-file corpus **and** still reports a difference when handed an assembler wrapper that strips custom
 sections. ⚠️ A ported gate that quietly stops failing is worse than no gate — this file's own history
 records two such holes.
+
+### 🆕 2026-09-19 — `scripts/wat-corpus.ts`: the `.wat` gate now ends at an OUTSIDE READER (**580 tests**)
+
+    deno run -A scripts/wat-corpus.ts            # default root: ../wasmtk/tests
+
+**assemble → decode+validate (wasmrt) → `wasm-tools validate` (not us).** Current reading:
+**532 files, 4 known corpus defects, 528 assembled AND accepted by wasm-tools.** The four are not
+ours — wasm-tools refuses the same *source* on the same lines (two spell `anyfunc`; two carry an
+inline function type that disagrees with its `(type …)` reference) and they are named in the script
+so a *new* failure cannot hide among them.
+
+⚠️ **The third step is the entire point.** The first two are wasmrt checking wasmrt: the decoder
+learned its conventions from the assembler, so their agreement is not evidence (§3.8b). It was added
+the day `array.new_data` was found to need the data-count section in **both** the decoder and the
+assembler — our modules ran here and were refused by wasm-tools, which is the definition of a
+format-level defect this project cannot see from the inside.
+
+🔒 **Verified it can fail**, per §5.9: with both fixes reverted, the gate reports
+`WASM-TOOLS REFUSED OUR BYTES` and exits 1. It also asserts the output file **exists** rather than
+trusting the assembler's exit text — an unrecognised assembler failure otherwise reappears as
+"wasm-tools could not read the file", a true statement filed under the wrong heading.
+
+**`tests/decoder-strictness.wast`** joins the regression corpus the same day: 8 `assert_malformed`
+cases (unassigned SIMD sub-opcodes, `atomic.fence`'s reserved byte, `br_on_cast` reserved flag bits,
+element-segment flags `8`, a non-zero elemkind, `array.new_data` with no data count) and **three
+modules that must still be ACCEPTED** — the two custom-descriptors const-expr modules that a
+hand-written skipper could not read, and a `br_on_cast` with *defined* flags, so the new flags check
+cannot pass by refusing everything.
+
+⚠️ **A scoring quirk, measured while mutation-checking that file:** a bare `(module binary …)`
+directive is counted as an adjudicated assertion only when it **fails** — the file reports 8 passed
+with three such modules present, and 8 passed / 3 failed when all three are corrupted. The verdicts
+are right and `conformance-diff.ts`'s "no clean file started failing" still catches a regression;
+but the denominator is outcome-dependent, so do not read a file's total as its directive count.
 
 ### 🔒 2026-09-19 — day 4, part 10: the pin gate and the execution bound (**564 tests**)
 
@@ -1068,7 +1103,8 @@ tests, 7 regressions for the table-initializer defects, and 26 C-ABI tests.
 - **`tests/c_smoke.c` — behaviour, from real C.** Compiled by a C compiler against the shipped header,
   so it proves two things no Rust test can: that `wasmrt.h` is valid C, and that its declarations match
   the exported symbols.
-- **Miri (`scripts/miri-gate.ts`) — 28/28 including `lifecycle_fuzz`**, which drives randomized
+- **Miri (`scripts/miri-gate.ts`) — 32/32 including `lifecycle_fuzz`** (28 was the figure on record
+  while the crate already had 31; ⚠️ **re-count it every run**), which drives randomized
   creation/use/destruction orders (including the ones the header discourages) and touches handles whose
   store is already gone. **A normal allocator cannot tell a use-after-free from a pass** — it hands back
   freed memory that still looks right. The fuzz is seeded and reproducible on purpose: one that finds a

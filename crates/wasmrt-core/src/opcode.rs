@@ -687,6 +687,17 @@ pub fn atomic_natural_align_log2(sub: u32) -> u32 {
 /// Highest `0xFD` sub-opcode wasmrt decodes — the tail of the relaxed-SIMD range.
 const MAX_SIMD_SUB: u32 = 0x113;
 
+/// The holes below [`MAX_SIMD_SUB`]: sub-opcodes inside the range that no proposal assigns.
+///
+/// 🔬 Not read off a table — MEASURED. Every sub-opcode in `0x00..=0x113` was handed to wasmrt and
+/// to wasm-tools 1.259 as a one-instruction body, and these 20 are exactly the values wasm-tools
+/// answers with "unknown 0xfd subopcode" (`cmem/best-practices.md` §1.8: sweep the space, do not
+/// read the table). A ceiling check alone let all 20 decode.
+const UNASSIGNED_SIMD: [u32; 20] = [
+    0x9a, 0xa2, 0xa5, 0xa6, 0xaf, 0xb0, 0xb2, 0xb3, 0xb4, 0xbb, 0xc2, 0xc5, 0xc6, 0xcf, 0xd0, 0xd2,
+    0xd3, 0xd4, 0xe2, 0xee,
+];
+
 /// Highest `0xFE` atomic sub-opcode wasmrt decodes (`i64.atomic.rmw32.cmpxchg_u`).
 const MAX_ATOMIC_SUB: u32 = 0x4e;
 
@@ -694,9 +705,9 @@ const MAX_ATOMIC_SUB: u32 = 0x4e;
 fn read_block_type(r: &mut Reader) -> DecodeResult<BlockType> {
     let v = r.read_var_s33()?;
     if v >= 0 {
-        if v > u32::MAX as i64 {
-            return Err(DecodeError::UnsupportedOpcode);
-        }
+        // No range check: `read_var_s33` sign-extends bit 32, so a NON-NEGATIVE result is at most
+        // `u32::MAX` by construction. The `v > u32::MAX` guard that used to sit here could not
+        // fire, and a branch that cannot fire is decoration that reads like a defence (§4.4).
         return Ok(BlockType::TypeIndex(v as u32));
     }
     if v == -64 {
@@ -835,6 +846,12 @@ fn read_gc_field(r: &mut Reader) -> DecodeResult<Imm> {
 /// bit 1 = dst nullable), a label index, then the src & dst heap types.
 fn read_br_cast(r: &mut Reader) -> DecodeResult<Imm> {
     let flags = r.read_byte()?;
+    // ⚠️ Only those two bits are defined (GC §5.4.6). The byte was read for its two bits and the
+    // rest thrown away, so `br_on_cast 0xff` decoded as `br_on_cast 0x03` and RAN — wasm-tools
+    // answers "invalid cast flags: 11111111". Verified against it across `0x00..=0xff`.
+    if flags & !0b11 != 0 {
+        return Err(DecodeError::MalformedFlag);
+    }
     let label = r.read_var_u32()?;
     let src_ht = read_heap_type(r)?;
     let dst_ht = read_heap_type(r)?;
@@ -922,7 +939,10 @@ fn decode_simd(r: &mut Reader, sub: u32) -> DecodeResult<Instr> {
             }
         }
         _ => {
-            if sub > MAX_SIMD_SUB {
+            // ⚠️ `sub <= MAX_SIMD_SUB` is NOT the same question as "this sub-opcode exists": the
+            // 0xFD space is not dense. A ceiling alone accepted 20 unassigned sub-opcodes, each
+            // decoding to an `Op::Simd` the interpreter would then be asked to run.
+            if sub > MAX_SIMD_SUB || UNASSIGNED_SIMD.contains(&sub) {
                 return Err(DecodeError::UnsupportedOpcode);
             }
         }
@@ -949,7 +969,12 @@ fn decode_atomic(r: &mut Reader, sub: u32) -> DecodeResult<Instr> {
     };
     match sub {
         0x03 => {
-            r.read_byte()?; // atomic.fence: a reserved 0x00
+            // atomic.fence's operand is a RESERVED byte, not a memory index: it must be 0x00
+            // (threads §5.4.9). Reading it and discarding it accepted `0xFE 0x03 0x01`, which
+            // wasm-tools calls "nonzero byte after `atomic.fence`".
+            if r.read_byte()? != 0x00 {
+                return Err(DecodeError::MalformedFlag);
+            }
         }
         0x00 | 0x01 | 0x02 | 0x10..=MAX_ATOMIC_SUB => at.mem = read_mem_arg(r)?,
         _ => return Err(DecodeError::UnsupportedOpcode),
@@ -989,17 +1014,48 @@ fn read_try_table(r: &mut Reader) -> DecodeResult<Imm> {
 
 /// Decode a function body's raw bytes into a flat instruction list. Nesting and branch
 /// targets are left to validation. Owned immediates are freed when the `Vec` drops.
+///
+/// The body is the *whole* expression, so nothing may follow its terminating `end`.
 pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
     let mut r = Reader::new(body);
+    let list = decode_expr(&mut r)?;
+    if !r.at_end() {
+        return Err(DecodeError::UnbalancedEnd);
+    }
+    Ok(list)
+}
+
+/// Decode one `expr` (§5.4.9) from `r`, stopping **after** the `end` that terminates it and
+/// leaving the reader on the next byte. Nesting and branch targets are left to validation.
+///
+/// 🔒 **THIS IS THE ONE AUTHORITY ON THE INSTRUCTION GRAMMAR.** It exists because there used to be
+/// a second one: `module.rs` carried a hand-written `skip_const_expr` whose only job was to find an
+/// init expression's `end` without mistaking an operand byte for it, and which therefore had to
+/// know every constant instruction's immediate shape. It knew a *subset*, which is the T10a
+/// mechanism exactly — and it cost two defects, both found on 2026-09-19 and both the
+/// **reject-valid** direction:
+///   * `struct.new_desc` / `struct.new_default_desc` (custom-descriptors, `0xFB 0x20`/`0x21`) were
+///     absent from its match, so their type index stayed in the stream as an opcode. With type
+///     index 11 that byte is `0x0B` — `end` — and the expression "terminated" early, leaving the
+///     global section short: `decode failed: section size mismatch` on a module wasm-tools accepts.
+///   * `ref.null`'s heap type was read with a bare `read_var_s33`, which cannot see the
+///     custom-descriptors `exact` prefix (`0x62 typeidx`), so `(ref.null (exact 11))` mis-skipped
+///     the same way — a **fourth** private copy of the heap-type grammar.
+///
+/// Both vanish structurally here: a const expr is decoded by the decoder that decodes everything
+/// else, so an instruction cannot be legal in a body and unknown in an initializer ever again.
+pub fn decode_expr(r: &mut Reader) -> DecodeResult<Vec<Instr>> {
     let mut list: Vec<Instr> = Vec::new();
     // Open control structures, counting the expression itself. `end` (and the legacy `delegate`,
     // which terminates a `try` in place of one) closes one; reaching zero ends the expression.
     let mut depth: usize = 1;
 
-    while !r.at_end() {
-        // The expression's own terminator has already been read, so nothing may follow it.
-        if depth == 0 {
-            return Err(DecodeError::UnbalancedEnd);
+    while depth != 0 {
+        // `depth` is still open, so the expression's terminator has not been read: running out of
+        // bytes here is a MISSING end, which is the distinction the tail of this function used to
+        // draw after the loop.
+        if r.at_end() {
+            return Err(DecodeError::MissingEnd);
         }
         // Where this instruction starts, for trap backtraces. Captured before the opcode byte is
         // consumed, so it points at the instruction rather than its first immediate.
@@ -1011,10 +1067,10 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
             let instr = match r.read_var_u32()? {
                 0x00 => Instr { offset: 0, op: Op::StructNew, imm: Imm::GcType(r.read_var_u32()?) },
                 0x01 => Instr { offset: 0, op: Op::StructNewDefault, imm: Imm::GcType(r.read_var_u32()?) },
-                0x02 => Instr { offset: 0, op: Op::StructGet, imm: read_gc_field(&mut r)? },
-                0x03 => Instr { offset: 0, op: Op::StructGetS, imm: read_gc_field(&mut r)? },
-                0x04 => Instr { offset: 0, op: Op::StructGetU, imm: read_gc_field(&mut r)? },
-                0x05 => Instr { offset: 0, op: Op::StructSet, imm: read_gc_field(&mut r)? },
+                0x02 => Instr { offset: 0, op: Op::StructGet, imm: read_gc_field(&mut *r)? },
+                0x03 => Instr { offset: 0, op: Op::StructGetS, imm: read_gc_field(&mut *r)? },
+                0x04 => Instr { offset: 0, op: Op::StructGetU, imm: read_gc_field(&mut *r)? },
+                0x05 => Instr { offset: 0, op: Op::StructSet, imm: read_gc_field(&mut *r)? },
                 0x06 => Instr { offset: 0, op: Op::ArrayNew, imm: Imm::GcType(r.read_var_u32()?) },
                 0x07 => Instr { offset: 0, op: Op::ArrayNewDefault, imm: Imm::GcType(r.read_var_u32()?) },
                 0x08 => Instr {
@@ -1056,25 +1112,25 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                 0x14 => Instr {
                     offset: 0,
                     op: Op::RefTest,
-                    imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut r)? }),
+                    imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut *r)? }),
                 },
                 0x15 => Instr {
                     offset: 0,
                     op: Op::RefTest,
-                    imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut r)? }),
+                    imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut *r)? }),
                 },
                 0x16 => Instr {
                     offset: 0,
                     op: Op::RefCastOp,
-                    imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut r)? }),
+                    imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut *r)? }),
                 },
                 0x17 => Instr {
                     offset: 0,
                     op: Op::RefCastOp,
-                    imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut r)? }),
+                    imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut *r)? }),
                 },
-                0x18 => Instr { offset: 0, op: Op::BrOnCast, imm: read_br_cast(&mut r)? },
-                0x19 => Instr { offset: 0, op: Op::BrOnCastFail, imm: read_br_cast(&mut r)? },
+                0x18 => Instr { offset: 0, op: Op::BrOnCast, imm: read_br_cast(&mut *r)? },
+                0x19 => Instr { offset: 0, op: Op::BrOnCastFail, imm: read_br_cast(&mut *r)? },
                 // custom-descriptors (`0x20..0x26`).
                 0x20 => Instr { offset: 0, op: Op::StructNewDesc, imm: Imm::GcType(r.read_var_u32()?) },
                 0x21 => Instr { offset: 0, op: Op::StructNewDefaultDesc, imm: Imm::GcType(r.read_var_u32()?) },
@@ -1082,15 +1138,15 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                 0x23 => Instr {
                     offset: 0,
                     op: Op::RefCastDescEq,
-                    imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut r)? }),
+                    imm: Imm::RefCast(RefType { nullable: false, heap: read_heap_type(&mut *r)? }),
                 },
                 0x24 => Instr {
                     offset: 0,
                     op: Op::RefCastDescEq,
-                    imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut r)? }),
+                    imm: Imm::RefCast(RefType { nullable: true, heap: read_heap_type(&mut *r)? }),
                 },
-                0x25 => Instr { offset: 0, op: Op::BrOnCastDescEq, imm: read_br_cast(&mut r)? },
-                0x26 => Instr { offset: 0, op: Op::BrOnCastDescEqFail, imm: read_br_cast(&mut r)? },
+                0x25 => Instr { offset: 0, op: Op::BrOnCastDescEq, imm: read_br_cast(&mut *r)? },
+                0x26 => Instr { offset: 0, op: Op::BrOnCastDescEqFail, imm: read_br_cast(&mut *r)? },
                 // The externref bridge. An `externref` is a WRAPPER: `extern.convert_any` boxes
                 // an internal reference, `any.convert_extern` unboxes one, and null maps to null
                 // both ways (§4.4.7.3). The wrapper bit lives in `Value`'s high half, so the two
@@ -1164,13 +1220,13 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
 
         if b0 == 0xfd {
             let sub = r.read_var_u32()?;
-            list.push(Instr { offset: at, ..decode_simd(&mut r, sub)? });
+            list.push(Instr { offset: at, ..decode_simd(&mut *r, sub)? });
             continue;
         }
 
         if b0 == 0xfe {
             let sub = r.read_var_u32()?;
-            list.push(Instr { offset: at, ..decode_atomic(&mut r, sub)? });
+            list.push(Instr { offset: at, ..decode_atomic(&mut *r, sub)? });
             continue;
         }
 
@@ -1185,7 +1241,7 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
 
         let imm = match immediate_kind(b0) {
             ImmKind::None => Imm::None,
-            ImmKind::BlockType => Imm::BlockType(read_block_type(&mut r)?),
+            ImmKind::BlockType => Imm::BlockType(read_block_type(&mut *r)?),
             ImmKind::Label => Imm::Label(r.read_var_u32()?),
             ImmKind::BrTable => {
                 let n = r.read_vec_len()?;
@@ -1204,7 +1260,7 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
             ImmKind::Local => Imm::Local(r.read_var_u32()?),
             ImmKind::Global => Imm::Global(r.read_var_u32()?),
             ImmKind::Table => Imm::Table(r.read_var_u32()?),
-            ImmKind::Mem => Imm::Mem(read_mem_arg(&mut r)?),
+            ImmKind::Mem => Imm::Mem(read_mem_arg(&mut *r)?),
             ImmKind::MemIndex => Imm::MemIndex(r.read_var_u32()?),
             ImmKind::I32c => Imm::I32(r.read_var_i32()?),
             ImmKind::I64c => Imm::I64(r.read_var_i64()?),
@@ -1223,13 +1279,13 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
                     // accepted wasmrt's INTERNAL tags as wire bytes and could not read the long
                     // form `0x63`/`0x64` at all, so `select (result (ref $t))` never decoded.
                     let b = r.read_byte()?;
-                    tys.push(read_value_type_from(&mut r, i64::from(b) - 0x80)?);
+                    tys.push(read_value_type_from(&mut *r, i64::from(b) - 0x80)?);
                 }
                 Imm::SelectTypes(tys)
             }
-            ImmKind::RefType => Imm::RefType(read_heap_type(&mut r)?),
+            ImmKind::RefType => Imm::RefType(read_heap_type(&mut *r)?),
             ImmKind::Tag => Imm::Tag(r.read_var_u32()?),
-            ImmKind::TryTable => read_try_table(&mut r)?,
+            ImmKind::TryTable => read_try_table(&mut *r)?,
             // These kinds belong to `0xFB`/`0xFC`-prefixed ops decoded above; reaching
             // here means a raw synthetic-tag byte, which is malformed.
             ImmKind::Unsupported => return Err(DecodeError::UnsupportedOpcode),
@@ -1240,8 +1296,8 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
         list.push(Instr { op, offset: at, imm });
     }
 
-    // An `expr` is terminated by its matching `end` (§5.4.9). `depth` is 0 only when that `end`
-    // has been read, so this covers both "ran out of bytes" and "an opener was never closed".
+    // An `expr` is terminated by its matching `end` (§5.4.9); the loop above exits only when that
+    // `end` has been read, and reports the "ran out of bytes first" case as `MissingEnd`.
     //
     // ⚠️ This was a **terminator** check — "the last instruction is an `end`" — on the reasoning
     // that full balance is `precompute_control_flow`'s job and two authorities on one rule is
@@ -1252,10 +1308,6 @@ pub fn decode_body(body: &[u8]) -> DecodeResult<Vec<Instr>> {
     // and was refused by the validator as `ControlUnderflow`: an `assert_malformed` answered with
     // an `assert_invalid` verdict. A counter is not a second authority on nesting; it is the
     // weaker property the decoder is entitled to check on its own.
-    if depth != 0 {
-        return Err(DecodeError::MissingEnd);
-    }
-
     Ok(list)
 }
 

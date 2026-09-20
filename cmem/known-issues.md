@@ -1,5 +1,77 @@
 # Known Issues
 
+## ✅ CLOSED 2026-09-19 — a DECODER REVIEW found EIGHT, and the fix for one found a NINTH in the ASSEMBLER
+
+The decoder read end to end after the WASI review, for the same reason: it is the first code to touch
+a hostile file. Eight findings, **each reproduced against wasm-tools 1.259 before anything was
+changed** (`--features all`, one hand-built module per case) — the standing rule is prove, don't
+assume, and two of the eight turned out to be the opposite direction from how they were filed.
+
+### 🔴 1–2. Two VALID modules were refused (`decode failed: section size mismatch`)
+
+`module.rs` had a private `skip_const_expr` — a second, partial copy of the instruction grammar
+whose job was to find an initializer's `end`. It did not know `struct.new_desc` /
+`struct.new_default_desc` (`0xFB 0x20`/`0x21`), and it read `ref.null`'s heap type with a bare
+`read_var_s33`, which cannot see custom-descriptors' `exact` prefix (`0x62 typeidx`). Either way an
+immediate byte was left in the stream and read as an opcode.
+
+⚠️ **Benign for small type indices** — a stranded `0x00` is `unreachable` and the walk still finds
+the real `end`, so the first probe of each *agreed* with wasm-tools. At type index **11** the
+stranded byte is `0x0B` = `end`: the expression terminates early and the section comes up short.
+
+🔒 Fixed structurally: const expressions go through `opcode::decode_expr`, the same reader that
+decodes function bodies, and `skip_const_expr` is **deleted** (`best-practices.md` §1.9).
+
+### 🟠 3–7. Five fields whose undefined values were accepted
+
+All five were silent: the module decoded, validated and **ran**.
+
+| # | field | accepted | wasm-tools |
+| --- | --- | --- | --- |
+| 3 | `br_on_cast` castflags | bits 2–7 ignored, so `0xff` ran as `0x03` | `invalid cast flags: 11111111` |
+| 4 | element-segment flags | `flags = 8` decoded as a **different segment form** | `invalid flags byte in element segment` |
+| 5 | SIMD sub-opcode | 20 unassigned values below `MAX_SIMD_SUB` | `unknown 0xfd subopcode` |
+| 6 | element-segment elemkind | any byte | `only the function external type is supported` |
+| 7 | `atomic.fence` reserved byte | any byte | `nonzero byte after \`atomic.fence\`` |
+
+⚠️ #5's ceiling check (`sub > MAX_SIMD_SUB`) is the instructive one: **a ceiling is not membership**.
+The 20 holes were found by sweeping `0x00..=0x113` against wasm-tools, not by reading the table —
+the same method that found the value-type defects the day before (`best-practices.md` §3.13).
+
+### 🟠 8. `array.new_data` / `array.init_data` did not require the data-count section
+
+The requirement listed `memory.init` and `data.drop`: it was written before GC added two more
+instructions that name a data segment, and nothing re-read it when GC landed.
+
+### 🔴 9. …and wasmrt's ASSEMBLER had the identical gap — so it emitted modules that are not WebAssembly
+
+Fixing #8 made one of our own tests fail, which is how this surfaced: `needs_data_count` was set at
+the same two sites, so `wasmrt wat` produced a module **wasmrt ran happily and `wasm-tools validate`
+refused** with `data count section required`. Seventh instance of the T10a emitter mechanism, and
+the second where the assembler's output is not a valid module.
+
+🔒 **The response is a gate, not just a fix**: `scripts/wat-corpus.ts` now runs
+assemble → decode+validate → **`wasm-tools validate`** over the whole corpus, so every byte wasmrt
+emits is read by an engine that did not learn the conventions from us (§3.8b/§3.8d). Proved it can
+fail by reverting both fixes: it reports `WASM-TOOLS REFUSED OUR BYTES`.
+
+### Evidence and regression
+
+`tests/decoder-strictness.wast` — 8 `assert_malformed` cases plus three modules that must still be
+**accepted** (the two from #1–2, and a `br_on_cast` with defined flags, so the flags check cannot
+pass by refusing everything). ⚠️ Mutation-checked: a bare `(module binary …)` directive is scored
+only when it FAILS, so the file was run with all three corrupted to confirm the runner reports 3
+failures — otherwise those three lines would be decoration.
+
+Gates after: **64,603 / 0 / 0** (unchanged, "no file lost a pass"), 580 tests, clippy clean, Miri
+32/32, C-ABI PASSED, `.wat` corpus **528/532 + all 528 accepted by wasm-tools** (the 4 are the known
+corpus defects wasm-tools refuses on the same lines).
+
+⚠️ One review finding was **not** a defect and was removed as decoration instead: `read_block_type`'s
+`v > u32::MAX` guard cannot fire, because `read_var_s33` sign-extends bit 32 and a non-negative
+result is at most `u32::MAX` by construction (§4.4).
+
+
 ## ✅ CLOSED 2026-09-19 — a WASI SUBSYSTEM REVIEW found TEN, including a SANDBOX ESCAPE
 
 `wasi/fs.rs` + `wasi/mod.rs` read end to end (~2,800 lines) while waiting on wasmtk. This code had
