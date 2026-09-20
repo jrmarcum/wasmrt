@@ -85,6 +85,22 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `deno run -A scripts/miri-gate.ts` (needs `rustup component add miri`; ~28s).
 
+### 🔧 2026-09-19 — day 4, part 11: the gates are TypeScript now (**567 tests**)
+
+`scripts/` is four `.ts` files run by **Deno or Bun** (`node:` builtins only, so either works, and so
+does node). The commands:
+
+    CC=gcc deno run -A scripts/c-gate.ts            deno run -A scripts/miri-gate.ts
+    deno run --allow-read scripts/conformance-diff.ts <baseline.txt> <current.txt>
+    deno run -A scripts/custom-sections-diff.ts target/release/wasmrt.exe @watlist.txt
+
+🔒 **Each port was checked to still FAIL when it should**, not merely to agree today:
+conformance-diff reproduces the shell version's output and exit status on lost passes, more failures,
+a newly-failing clean file and an honest improvement; custom-sections-diff reproduces 531/4/0 over the
+535-file corpus **and** still reports a difference when handed an assembler wrapper that strips custom
+sections. ⚠️ A ported gate that quietly stops failing is worse than no gate — this file's own history
+records two such holes.
+
 ### 🔒 2026-09-19 — day 4, part 10: the pin gate and the execution bound (**564 tests**)
 
 **`crates/wasmrt/tests/cli_pin_gate.rs`** (8) — armed/unarmed, pinned/unpinned, `enforce` absolute, a

@@ -280,6 +280,35 @@ reached them. ✅ **The owner relayed the narrowing the same day and wazmrt is a
 (§1d: reconcile against code that has stopped moving). Our copy stays at v10 + unnumbered owner decisions
 until then; the mismatch is a normal in-flight state, not an error.
 
+##### 🔧 DAY 4, part 11 — the TOOLING RULES, and the four gates ported. `[x]`
+
+Two owner rules (`design-decisions.md`, "TOOLING RULES"): **every script is TypeScript run by Deno or
+Bun**, and **no heredocs**. Both gates-of-the-project and ad-hoc session scripting are covered.
+
+**All four gates ported, originals removed:** `c-gate.sh`/`miri-gate.sh`/`conformance-diff.sh`/
+`custom-sections-diff.py` → `.ts`, importing `node:` builtins only so one file runs under Deno, Bun or
+node. 🔒 **Each port was verified to STILL FAIL when it should** — the only property worth checking
+here, because `conformance-diff`'s own header records two holes that got in from ad-hoc
+re-implementation. conformance-diff: byte-identical output AND exit status against the shell version on
+all three regression shapes plus an honest improvement. custom-sections-diff: the same 531/4/0 over the
+535-file corpus, and it still reports a difference when fed an assembler wrapper that strips custom
+sections. Every reference to the old names updated across `cmem/`, both READMEs and the source
+comments — a command naming a file that no longer exists is the stale-doc problem paid for twice this
+week already.
+
+🎓 **The heredoc rule is a FAILURE MODE, not a preference.** In one session: an unterminated-quote
+parse error; non-ASCII mangled to `?` so an edit **applied nothing while reporting success**; backticks
+executed inside what should have been a comment; and a `perl` pattern that matched nothing against a
+CRLF file, so a **mutation test "passed"**. The last two are silent-wrong.
+
+⚠️ **A correction worth keeping: I asserted Bun was written in Zig, and it is not.** The Zig→Rust
+rewrite merged 2026-05-14 and shipped in Bun 1.4 (2026-08-20) — right at the assistant's knowledge
+cutoff. Worse than the stale fact was the defence of it: `process.versions.zig` and a string count in
+the binary were read as evidence of the IMPLEMENTATION language when they are evidence about the
+**toolchain**. 🎓 *Running the artifact answers behaviour; it does not answer provenance. For "what is
+this built in / who ships it / when did it change", go to the source's own release notes* —
+`best-practices.md` §2.5.
+
 ##### 🔒 DAY 4, part 10 — T9e (the pin gate) + T9i (the execution bound) + the CLI convergence. `[x]`
 
 Owner: **full convergence, pin gate included** — which fixes the order, because the contract forbids a

@@ -49,6 +49,26 @@ under "not a bug", so nobody returns to it. That makes it the more dangerous of 
 cluster off, spend the minute it takes to reproduce it *outside* the thing you scoped out. If it
 reproduces, the scope note is about the tests, not about the bug.
 
+### 1.1b A COMMENT OUTLIVES WHAT IT DESCRIBES — and the closer it sits, the longer it survives
+
+Three in one day, each contradicted by code within a few lines or by a number in the same repo:
+
+* `wasmrt.h` said tail calls were *"deliberately"* not implemented — **three lines above the
+  `WASMRT_FEATURE_TAIL_CALL` it had exported since they landed** five weeks earlier. It read as a
+  policy, so nobody re-checked it; it was simply stale.
+* `known-issues.md` carried a ⚠️⚠️ **OPEN** heading for the `try_table` catch-label defect that had
+  been fixed on day 2 — the entry two rows above it says *"both now fixed and pinned by tests"*.
+* `README.md` told the public tail calls were "the one scope item not yet implemented".
+
+⚠️ **The pattern: prose that states a DECISION ages worst**, because a reader treats "deliberately"
+or "OPEN" as something someone chose, not something someone measured, and re-measuring a decision
+feels like second-guessing a person. That is exactly §1.1a's scope-note trap, one level up.
+
+**Apply:** when a feature lands, grep the repo for its name — header prose, README, `known-issues`
+headings — not just the code. A claim in a header ships to every embedder. And when closing an
+entry, close its HEADING: a "✅ fixed" buried in the body under an "OPEN" title is still an open
+item to everyone who skims.
+
 ### 1.2 Survey the measurement, don't just read the entry
 
 The roadmap said the remaining text-parser work was "`func.wast` 21". Surveying the worst in-scope files
@@ -68,6 +88,23 @@ global initializer, a type definition, a section — is worth its file's skips.
 ### 1.4 Diff the OUTPUT counts, not exit codes
 
 A pass/fail count that moved is evidence; an exit code is not. This is binding across the project.
+
+### 1.4a A rule that works around a LYING exit status is a reminder; fixing the status is a fix
+
+§1.4 exists because `wasmrt <file>` exited 0 whatever validation said, so a shell loop keyed on `$?`
+counted every module as valid. The rule was written, recorded — **and then broken again by the
+session that wrote it**: the 2026-09-19 `.wat` corpus loop keyed on that same status and reported
+"531 validated" as a measurement when it was an inference. Re-measured by reading the verdict text,
+the figure happened to hold. It was still not measured.
+
+✅ **What actually closed it** was making the status true (2026-09-19): summarize exits 1 on an
+invalid module, `wast` exits 1 on a failed assertion or an unreadable script, and no arguments is a
+usage error. `wasmrt wast <dir>` is now usable as a CI gate, which it never was.
+
+**Apply:** when a tool's status is wrong, the fix is the tool, not a note telling future readers to
+avoid it — a note has to be remembered by everyone, forever, including the person who wrote it an
+hour ago. 🎓 *A test runner's exit status must say whether the tests passed.* Until it does, no
+amount of documentation makes it safe to build on.
 
 ### 1.5 Know what your measurement tool omits
 
@@ -178,6 +215,26 @@ the decision, not after the implementation. A benefit claimed on the consumer's 
 much a hypothesis as a cost figure (§1.1) or a scope note (§1.1a) — and it is the one that quietly
 selects an architecture. ⚠️ The tell here was available from day one: the loader header is in a sibling
 repo, and reading it takes minutes.
+
+### 2.5 RUNNING the artifact answers BEHAVIOUR, not PROVENANCE
+
+This project's strongest rule is *verify by running, never by reading* (§1, §3A.2). It has a limit,
+and 2026-09-19 found it: asked whether Bun is written in Rust, the assistant said Zig (true at its
+training cutoff, false since 2026-05-14), and then defended it with the wrong kind of evidence —
+`process.versions.zig` from the running binary, and a count of `zig` vs `rustc` strings inside the
+executable. Both are real measurements. **Neither measures what was asked**: they describe the
+toolchain that BUILT and LINKED the binary, not the language it is written in. The owner's one-line
+reply — *"they may still be using zig as a cross platform compiler toolchain for the linker"* — was
+the correct reading of the very data being cited.
+
+The project's own history has the same shape from the other direction: `wazmrt <module> <export>`
+does not validate, so "the oracle accepts it" measured a different question than the one asked
+(§2.3a).
+
+**Apply:** classify the question first. *Behaviour* ("what does it do with these bytes?") is settled
+by running it. **Provenance** — what is it written in, who owns it, when did it change, what does the
+licence say — is settled by the project's own published record, and a binary's self-report is at best
+circumstantial. When a claim will leave this repo, cite the release note, not the artifact.
 
 ### 2.3 A decision resting on a false premise must be re-derived, not defended
 
@@ -796,6 +853,21 @@ test result. And note which direction this error runs — it manufactures false 
 verdicts, which cost a good check rather than shipping a bad one, but the wasted work is real and the
 temptation is to delete the check.
 
+### 4.2b A gate you PORT is a gate you must re-prove can fail
+
+Porting the four gates to TypeScript (2026-09-19) meant every check this project trusts was
+rewritten in an afternoon. "It prints the same thing today" proves only that both agree on inputs
+that pass — which is the half that cannot catch a regression. `conformance-diff`'s own header
+records two holes that entered exactly this way.
+
+So each port was driven to FAIL: the conformance gate on all three regression shapes (lost passes,
+more failures, a clean file that starts failing) plus an honest improvement, with byte-identical
+output AND exit status; the custom-sections gate over the full 535-file corpus, then against a
+**fake assembler that strips custom sections**, which it must report as a difference.
+
+**Apply:** a rewrite, a refactor or a port of a check is not done when it agrees on green inputs.
+Feed it the failure it exists to catch, and compare the OLD and NEW verdicts on that input.
+
 ### 4.3 A guard placed one call-level away from the iteration it guards is NO check
 
 The type-use clause-order rule was first written in `parse_sig` and moved **one** assertion out of
@@ -857,6 +929,23 @@ prefer an error over both.
 
 ---
 
+### 4.9 One ceiling covering TWO paths needs a check on each — one passing test hides the other's absence
+
+The iteration budget (T9i) bounds non-termination. A guest can run forever two ways, and they share
+nothing: a **loop back-edge**, and a **tail-call hop** — which reuses the interpreter's frame by
+design, so it makes no backward branch and grows no call depth. The call-depth ceiling cannot see it
+either.
+
+⚠️ **Each tick is invisible to the other's test.** Mutation-verified both ways: delete the back-edge
+tick and `(loop (br 0))` runs forever while the tail-call test still passes; delete the tail-call
+tick and `(func $f (return_call $f))` runs forever while the loop test still passes. A single
+"runaway guest is stopped" test would have passed with either half missing.
+
+**Apply:** when one limit is meant to cover several mechanisms, enumerate the mechanisms and pin each
+separately. The one to look for is the mechanism that is *cheap by design* — a tail call, a reused
+buffer, an elided frame — because the thing that makes it efficient is usually the thing that makes
+it invisible to the counter.
+
 ## 5. Tests
 
 ### 5.1 Assert where a check STOPS working, not only where it starts
@@ -908,6 +997,36 @@ see it — neither side is wrong alone, and neither could find it alone.
 **Apply:** when a security or interop property depends on two implementations producing the same
 bytes, compare the bytes in CI, over a corpus, not on one hand-picked file. The tiny file agreed; the
 529 real ones did not.
+
+### 5.4c A test that needs a SPECIFIC failure must change the OUTCOME, not just the message
+
+`tests/descriptor-casts.wast` asserted `assert_trap … "null descriptor reference"`. It passed with
+the null-descriptor check **deleted** — because this runner (like wazmrt's) treats any trap as
+satisfying `assert_trap` and never compares the message. The assertion read as specific and was not.
+
+✅ Fixed by building cases whose RESULT differs: a null descriptor with a null value on a nullable
+target would otherwise *succeed*, and a `br_on_cast_desc_eq_fail` would otherwise *branch*. Both
+mutations are now caught.
+
+**Apply:** know what your harness actually compares. If it ignores the error text, an assertion that
+only names the text is decoration (§4.1) — find an input where the wrong behaviour produces a
+different value, exit status or control flow, and assert that instead.
+
+### 5.4d A FEATURE FLAG is part of a test's input — a harness that ignores it scores a different question
+
+The core `br_on_cast.wast` asserts a module INVALID; `proposals/custom-descriptors/br_on_cast.wast`
+asserts the same module VALID. Both are right: custom-descriptors *relaxes* the rule. The runner ran
+every file with every feature enabled, so one of the two was wrong **by construction**, and no amount
+of engine work could fix it — the suite was being asked a question the files were not written
+against.
+
+✅ Fixed by `wast::features_for_script`: the standardized language, plus the one proposal a
+`proposals/<name>/` directory tests, which is what canonical runners do.
+
+**Apply:** when a corpus contains the same construct under different feature sets, the feature set is
+an INPUT to every assertion in it. Two files disagreeing is a clue to check the harness before
+suspecting either file — and a proposal that *relaxes* an existing rule is the case that produces
+this, because it makes previously-invalid modules valid rather than adding new syntax.
 
 ### 5.5 Skips are never folded into passes
 
