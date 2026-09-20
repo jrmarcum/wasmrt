@@ -232,9 +232,9 @@ clean and the wasmtk patch is the only thing left uncommitted, deliberately (bel
 * The `custom/` work will **convert skips into verdicts**, and some will be failures.
 
 ✅ **Every gate is green and re-verified on this host**: 503 workspace tests, C-ABI gate (74 symbols),
-Miri **31/31**, `conformance-diff.sh` per file, `.wat` corpus 528/532. ⚠️ **Miri needs
+Miri **31/31**, `conformance-diff.ts` per file, `.wat` corpus 528/532. ⚠️ **Miri needs
 `rustup component add miri` on a fresh machine** — it is a rustup component, not a separate install,
-and `rust-toolchain.toml` already pins the nightly it requires. `bash scripts/miri-gate.sh`, ~28s.
+and `rust-toolchain.toml` already pins the nightly it requires. `deno run -A scripts/miri-gate.ts`, ~28s.
 
 🎓 **Three things to carry into tomorrow, all paid for today:**
 1. **Re-measure the corpus before trusting a delta.** wasmtk syncs it; the file count is part of the
@@ -587,7 +587,7 @@ with) before it was built, not read off the spec:
 | malformed / misplaced | **module refused** (a parse error, not a warning) | `wat::Error::Annotation(reason)`, worded as the suite words it; the runner prefix-matches the reason |
 | unknown `(@foo …)` | ignored | ignored |
 
-🔬 **The EXTERNAL gate — `scripts/custom-sections-diff.py`.** Assembles each file with both tools and
+🔬 **The EXTERNAL gate — `scripts/custom-sections-diff.ts`.** Assembles each file with both tools and
 compares section ORDER and every custom section's bytes (hint offsets normalised past the locals
 vector, whose packing legitimately differs). **528/532 of the `.wat` corpus byte-identical**; the other
 four are the known corpus defects (2 refused by both) and item #4 (2 wasm-tools refuses). ⚠️ Its first
@@ -754,7 +754,7 @@ memory's page size"*). That is a **wrong module**, not a missing feature, and it
    passes that were not regressions** on this same file family.
 2. **Skips will RISE when X1 lands**, because a silently-accepted module becomes an honest refusal.
 
-🔒 **The gate stays `scripts/conformance-diff.sh`, per file** — but a per-file loss that is one of the
+🔒 **The gate stays `scripts/conformance-diff.ts`, per file** — but a per-file loss that is one of the
 two above is *evidence the work is landing*, and the commit must say which.
 
 ###### 🔧 CROSS-CUTTING — do these first; they are not part of any one track
@@ -901,7 +901,7 @@ current numbers) → M/A's text-format gap → the decision above → then W →
 3. For any track touching casts or type identity: a **by-construction wrong-answer test** per arm.
 4. Output handed to an outside reader — `wasmtime compile out.wasm` — for anything format-level
    (§3.8b). Two wire divergences this week say this is not optional.
-5. `scripts/conformance-diff.sh` green, or the commit names which of the two predicted movements it is.
+5. `scripts/conformance-diff.ts` green, or the commit names which of the two predicted movements it is.
 
 ---
 
@@ -917,7 +917,7 @@ current numbers) → M/A's text-format gap → the decision above → then W →
 | threads | 13 | 18 | M / A |
 | wide-arithmetic | 1 | 108 | W / S5 |
 
-**No file lost a pass at any step** (`scripts/conformance-diff.sh`, run between every landing).
+**No file lost a pass at any step** (`scripts/conformance-diff.ts`, run between every landing).
 444 core tests, 490 workspace, clippy clean. The `.wat` corpus went **532/532 → 529/532**, and all
 three are **corpus defects wasmtime refuses on the same lines** — two ArtOfWebAssembly files spelling
 `anyfunc`, and `dynrt_lib_modc.wat` declaring `(local $alist i32)` four times in one function.
@@ -1038,7 +1038,7 @@ silent-wrong-output class and 55% of the core failures.
 
 🚦 **Expect the skip total to fall on its own, and expect the failure count to RISE at times** as
 cascades convert into verdicts. **The gate stays "no file lost a pass", per file** —
-`scripts/conformance-diff.sh`, never the totals.
+`scripts/conformance-diff.ts`, never the totals.
 
 ##### 📐 Phase 2 — the RESIDUAL SKIPS. `[x]` **S1/S2/S3/S6/S7 done 2026-08-20; S4 and S5 remain**
 
@@ -1618,7 +1618,7 @@ diff the OUTPUT counts, not exit codes (`testing.md`). `[ ]` = not started.
     which drives randomized creation/use/destruction orders (including discouraged ones) and touches
     handles whose store is gone — a normal allocator cannot tell a use-after-free from a pass.
     **Mutation-verified:** deleting the store-tag check makes the cross-store test fail. Runners:
-    `scripts/c-gate.sh`, `scripts/miri-gate.sh`.
+    `scripts/c-gate.ts`, `scripts/miri-gate.ts`.
   - **Conformance: 61,013/751/3,094 → 61,033/738/3,075 (98.8%)** — `table.wast` 12 failures → 2,
     `elem.wast` 17 → 13, `linking.wast` +4 passes. The one file that got worse is `i31.wast`
     (+1 visible failure, −1 skip): a module that now builds and meets the already-logged GC-const-expr

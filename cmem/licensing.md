@@ -48,7 +48,7 @@ states the fact):
 | `NOTICE` | ✅ | |
 | `crates/wasmrt-capi/include/wasmrt.h` | ✅ | the shipped C header |
 | `tests/c_smoke.c`, `tests/abi_symbols.c` | ✅ | added at T8 |
-| `scripts/c-gate.sh`, `scripts/miri-gate.sh` | ✅ | added at T8 |
+| `scripts/c-gate.ts`, `scripts/miri-gate.ts` | ✅ | added at T8 |
 | `Cargo.toml` | ✅ *(as `license = "MIT OR Apache-2.0"`)* | the field **is** the SPDX expression; no separate comment needed |
 | `README.md` | ✅ **added 2026-08-07 (T9d)** | was the one gap; now carries the tag plus a pointer to the empty Component Ledger |
 | `crates/*/README.md` | ✅ | added 2026-08-07 with the per-crate crates.io listing metadata |

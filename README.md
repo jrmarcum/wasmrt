@@ -116,8 +116,8 @@ cargo build --workspace          # native: CLI + static lib + cdylib
 cargo test  --workspace
 cargo build -p wasmrt-core --no-default-features --target wasm32-unknown-unknown  # freestanding
 
-scripts/c-gate.sh                # compile + run the C-ABI gates against the shipped header
-scripts/miri-gate.sh             # the C ABI under Miri (needs: rustup component add miri)
+scripts/c-gate.ts                # compile + run the C-ABI gates against the shipped header
+scripts/miri-gate.ts             # the C ABI under Miri (needs: rustup component add miri)
 ```
 
 On Windows, use the `x86_64-pc-windows-gnullvm` toolchain host (LLVM-MinGW + UCRT — libc-free, no MSVC).

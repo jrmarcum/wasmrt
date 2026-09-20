@@ -214,7 +214,7 @@ plus two `(register …)` bookkeeping commands whose target no longer builds.
 listed a file only when it had failures or skips, so a CLEAN file carried no recorded pass count — and
 passes it later lost to SKIPS were invisible to "no file lost a pass".
 `custom-page-sizes/memory_max.wast` went **2 passed → 0 passed / 6 skipped** and
-`scripts/conformance-diff.sh` printed *"no file lost a pass"*. Every file prints a row now, and the same
+`scripts/conformance-diff.ts` printed *"no file lost a pass"*. Every file prints a row now, and the same
 gate reports **four** affected files instead of two. The gate's own header records two earlier holes of
 this family; this is the third. 🎓 *It could fail — but only for files that were already failing.*
 
@@ -510,7 +510,7 @@ to fix two assertions is a bad trade, and guessing at the remaining site is how 
 wrong claims happened.
 
 **For the focused pass:** work from the spec text for §3.3.8.10, fix all sites in one change, rewrite
-`eh_try_table_catches_throw`’s comment and bytes, and use `scripts/conformance-diff.sh` — which now
+`eh_try_table_catches_throw`’s comment and bytes, and use `scripts/conformance-diff.ts` — which now
 catches the newly-failing direction that hid these three.
 
 

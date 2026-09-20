@@ -769,7 +769,7 @@ thing it guards.
 
 ### 4.1a A comparison gate's "agree" must count only what it COMPARED
 
-`scripts/custom-sections-diff.py` (2026-09-19) scored a file both tools refused as agreement — reasonable
+`scripts/custom-sections-diff.ts` (2026-09-19) scored a file both tools refused as agreement — reasonable
 for a corpus with known-bad files, and fatal for a probe: **two of my own probes were malformed, both
 tools refused them, and the gate reported "7/7 agree" having compared no bytes at all**. The headline
 now reads *"N compared byte-for-byte and agree, M refused by both, K differ"*. 🎓 An outcome that does
@@ -1334,7 +1334,7 @@ reader — applied to your own decoder.
 
 ## §4.5 — **A CLEAN FILE HAS NO ROW, SO IT CANNOT LOSE A PASS** (2026-09-17)
 
-`scripts/conformance-diff.sh` enforces this project's central rule, *no file lost a pass*. Its header
+`scripts/conformance-diff.ts` enforces this project's central rule, *no file lost a pass*. Its header
 already records two holes closed the hard way (keying on basenames; iterating only baseline rows). **This
 is the third, and it is their sibling:** the runner printed a file's row only when it had failures or
 skips, so a **clean** file had no recorded pass count at all — and passes it later lost to **skips** were

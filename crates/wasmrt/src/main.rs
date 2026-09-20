@@ -1239,7 +1239,7 @@ fn run_wast(rest: &[String]) -> ExitCode {
                 }
                 // ⚠️⚠️ **EVERY file prints a row, including a clean one.** The condition here
                 // was `verbose || s.failed > 0 || s.skipped > 0`, and that left the per-file gate
-                // (`scripts/conformance-diff.sh`) structurally blind in one direction: a clean
+                // (`scripts/conformance-diff.ts`) structurally blind in one direction: a clean
                 // file is absent from the baseline, so it has no recorded pass count, so passes
                 // it later loses to SKIPS cannot be detected. The gate's own header records two
                 // earlier holes of this family; this is the third, and X1 landed in it —
@@ -1301,7 +1301,7 @@ fn run_wast(rest: &[String]) -> ExitCode {
     // unconditionally SUCCESS — a failed assertion, an unparseable script and an unreadable file
     // all exited 0 — so no CI job could gate on `wasmrt wast`. wazmrt and `wasmtime wast` both
     // exit non-zero (measured 2026-09-19). SKIPS do not fail the run: they are reported
-    // separately, and the per-file gate (`scripts/conformance-diff.sh`) is what judges them.
+    // separately, and the per-file gate (`scripts/conformance-diff.ts`) is what judges them.
     if failed > 0 || errored > 0 {
         ExitCode::FAILURE
     } else {

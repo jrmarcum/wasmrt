@@ -50,7 +50,7 @@ but **not `wasmrt_feature_t`**, so it was gated at one entry point of two — ex
 prevent, and what T10b had predicted. Both are pinned by DATA now. 🎓 **A gate that cannot fail is
 decoration; a gate that exists only in a doc comment is not even that** (§4.4).
 🔬 **A THIRD HOLE IN THE PER-FILE GATE**: a clean file carried no row, so passes it lost to **skips**
-were invisible — `memory_max.wast` went 2 passed → 0 and `conformance-diff.sh` printed *"no file lost a
+were invisible — `memory_max.wast` went 2 passed → 0 and `conformance-diff.ts` printed *"no file lost a
 pass"*. Every file prints a row now, and the same gate then reported four affected files instead of two.
 ✅ **`Op` IS `#[repr(u16)]` WITH ITS TAGS ABOVE `0xff` (owner-directed, 2026-09-17) — TRACK D IS
 UNBLOCKED** with 0xEB free tags. Measured before adopting: **free on size** (`Instr` stays 80 bytes),
@@ -354,6 +354,16 @@ to a contract surface, not after** — any CLI option, any security check (pin, 
 `--dir`/`--ro-dir`), any resource ceiling, any exit code. A change shipped without coordinating is how
 the two stop being swappable, and it will not announce itself. The full procedure is the binding trigger
 in [`cmem/INDEX.md`](cmem/INDEX.md).
+
+## 🔒 Tooling rules (owner, 2026-09-19)
+
+**Scripts are TypeScript, run by Deno or Bun** — `deno run -A scripts/x.ts` / `bun scripts/x.ts`,
+importing `node:` builtins only so one file runs under either. That covers `scripts/` *and* ad-hoc
+scripting in a session. The four gates were ported the same day and each was verified to still FAIL
+when it should. **⛔ And no heredocs**: write the script to a file and run the file. A heredoc's
+quoting has silently mangled non-ASCII, executed backticks it should have quoted, and made an edit
+apply nothing while reporting success — the silent-wrong class. Detail and the evidence:
+`cmem/design-decisions.md`, "TOOLING RULES".
 
 ## "Update the project memory" = update `cmem/`
 

@@ -924,7 +924,7 @@ impl Lcg {
 ///
 /// Drives objects through randomized creation, use and destruction orders — including the
 /// orders an embedder is *not* supposed to use — and touches handles after their store is
-/// gone. Under **Miri** (`scripts/miri-gate.sh`) a use-after-free or double-free here is a
+/// gone. Under **Miri** (`scripts/miri-gate.ts`) a use-after-free or double-free here is a
 /// hard error rather than a value that happens to look plausible; run plain, it still
 /// checks that none of it panics or reports nonsense.
 #[test]

@@ -8,7 +8,7 @@ done = **full Rust↔oracle parity on both targets** (see `../cmem/testing.md`).
 
 ## C-ABI gates — built, and each catches what the others cannot
 
-Run both with **`../scripts/c-gate.sh`** (add `--release` for the release lib).
+Run both with **`../scripts/c-gate.ts`** (add `--release` for the release lib).
 
 - **`abi_symbols.c` ✅ 74/74 symbols resolve.** Takes the address of every function
   `wasmrt.h` declares, forcing the linker to resolve it. A function DECLARED in the
@@ -22,7 +22,7 @@ Run both with **`../scripts/c-gate.sh`** (add `--release` for the release lib).
   and checks that a foreign-store handle is refused. Its module bytes are embedded
   rather than loaded, so the gate has no fixture dependency and fails for exactly
   one reason: the ABI.
-- **Miri ✅ 26/26** via **`../scripts/miri-gate.sh`**, including `lifecycle_fuzz`
+- **Miri ✅ 26/26** via **`../scripts/miri-gate.ts`**, including `lifecycle_fuzz`
   (in `crates/wasmrt-capi/src/tests.rs`), which drives randomized creation, use and
   destruction orders — including the ones the header discourages — and touches
   handles whose store is already gone. A normal allocator hands back freed memory

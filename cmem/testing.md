@@ -83,7 +83,7 @@ adjudicated 64,142 → 64,134, passes unchanged because the removed assertions w
 sweep, and **Track W complete** (`wide-arithmetic.wast` **0/1/108 → 107/0/0**). No file lost a pass at
 any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **528/532** ⚠️ *(not 530 — the corpus loop keyed on the CLI's exit status, which is 0 even when validation fails; reading the verdict instead exposed two pre-existing failures. All four are corpus defects wasmtime also refuses.)*.
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
-Run with `bash scripts/miri-gate.sh` (needs `rustup component add miri`; ~28s).
+Run with `deno run -A scripts/miri-gate.ts` (needs `rustup component add miri`; ~28s).
 
 ### 🔒 2026-09-19 — day 4, part 10: the pin gate and the execution bound (**564 tests**)
 
@@ -181,9 +181,9 @@ whenever memory code changes. The runner now VALIDATES `(module definition …)`
 
 `custom/` **0/1/20 → 20/0/0** (the custom-annotations feature); earlier the same day the whole-module
 quote fix moved 64,068/66/549 → 64,067/65/550 by removing six FALSE passes. 514 workspace tests.
-⚠️ **C-ABI gate needs `CC=gcc` on this host** (no `cc` on PATH): `CC=gcc bash scripts/c-gate.sh`.
+⚠️ **C-ABI gate needs `CC=gcc` on this host** (no `cc` on PATH): `CC=gcc deno run -A scripts/c-gate.ts`.
 
-**`scripts/custom-sections-diff.py <wasmrt.exe> <file.wat | @list.txt>…`** — assembles each file with
+**`scripts/custom-sections-diff.ts <wasmrt.exe> <file.wat | @list.txt>…`** — assembles each file with
 `wasmrt wat` AND `wasm-tools parse` and compares section order plus every custom section's bytes
 (`@custom` placement, the `name` section, branch hints normalised past the locals vector). **Run it
 whenever the assembler's output changes.** Baseline: `.wat` corpus **528 compared byte-for-byte and
@@ -193,7 +193,7 @@ wasmrt's own decoder cannot be this gate: it reads the name section leniently an
 
 ### 🔬 2026-09-17 — A THIRD HOLE IN THE PER-FILE GATE: a clean file has no row
 
-`scripts/conformance-diff.sh` enforces *no file lost a pass*, and its header already records two holes
+`scripts/conformance-diff.ts` enforces *no file lost a pass*, and its header already records two holes
 closed the hard way. **The third:** the runner printed a file's row only when `failed > 0 || skipped > 0`,
 so a **clean** file carried **no recorded pass count** — and passes it later lost to **skips** could not
 be detected.
@@ -980,7 +980,7 @@ tests, 7 regressions for the table-initializer defects, and 26 C-ABI tests.
 - **`tests/c_smoke.c` — behaviour, from real C.** Compiled by a C compiler against the shipped header,
   so it proves two things no Rust test can: that `wasmrt.h` is valid C, and that its declarations match
   the exported symbols.
-- **Miri (`scripts/miri-gate.sh`) — 28/28 including `lifecycle_fuzz`**, which drives randomized
+- **Miri (`scripts/miri-gate.ts`) — 28/28 including `lifecycle_fuzz`**, which drives randomized
   creation/use/destruction orders (including the ones the header discourages) and touches handles whose
   store is already gone. **A normal allocator cannot tell a use-after-free from a pass** — it hands back
   freed memory that still looks right. The fuzz is seeded and reproducible on purpose: one that finds a
@@ -1094,9 +1094,9 @@ divergence rather than chasing it.
   the LEB accept/reject vectors and the ValType-packing bit ops (pure, high-value).
 - **C-ABI behavior — ✅ BUILT at T8 (2026-08-06).** `tests/c_smoke.c`: compile → instantiate (with a host
   import) → call → read/write memory → global → trap → teardown, plus a foreign-handle rejection. Run
-  via `scripts/c-gate.sh`.
+  via `scripts/c-gate.ts`.
 - **C-ABI link completeness — ✅ BUILT at T8. `tests/abi_symbols.c`, 74/74 symbols.** Same runner.
-- **C-ABI memory safety — ✅ BUILT at T8.** `scripts/miri-gate.sh` runs the whole capi surface under
+- **C-ABI memory safety — ✅ BUILT at T8.** `scripts/miri-gate.ts` runs the whole capi surface under
   **Miri**, including the randomized `lifecycle_fuzz` (wazmrt #22). A normal allocator can't catch a
   double-free/UAF; the detecting allocator is the oracle. Less risk than wazmrt here because wasmrt's
   capi uses **checked value handles**, not a refcount object model — the fuzz still guards

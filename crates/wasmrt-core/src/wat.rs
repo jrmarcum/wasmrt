@@ -7998,7 +7998,7 @@ mod emitter_coverage_tests {
     // Each expected module below is wasm-tools 1.259's output for the same source, BYTE FOR
     // BYTE — for these three, wasmrt's encoding of everything else coincides with it, so the
     // whole module can be compared rather than a section. The corpus-scale check, which cannot
-    // compare whole modules, is `scripts/custom-sections-diff.py`.
+    // compare whole modules, is `scripts/custom-sections-diff.ts`.
 
     fn asm(src: &str) -> Result<Vec<u8>> {
         assemble(src.as_bytes())

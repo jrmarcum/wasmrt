@@ -3,6 +3,52 @@
 Load-bearing decisions for the `wasmrt` port. **Do not silently revert these.** Detail + rationale:
 `docs/port/` (esp. `00-synthesis.md`, `06-build-docs-licensing.md`).
 
+## 🔒 TOOLING RULES (owner, 2026-09-19) — scripts are TypeScript, and no heredocs
+
+### 1. Every project script is TypeScript, run by Deno or Bun
+
+**Owner's rule.** `scripts/` holds `.ts` files, and ad-hoc scripting in a session is a `.ts` file
+too. Not bash, not Python. Both runtimes are Rust-built (Bun since its
+[Zig→Rust rewrite](https://bun.com/blog/bun-in-rust), merged 2026-05-14, shipped in 1.4), and both
+are installed here. The scripts import from `node:` builtins only (`node:fs`, `node:child_process`,
+`node:path`, `node:process`), so **one file runs under Deno, Bun or node** — no runtime is pinned.
+
+    deno run -A scripts/c-gate.ts          bun scripts/c-gate.ts
+
+🔻 **The four gates were ported on the day the rule landed** — `c-gate.sh`, `miri-gate.sh`,
+`conformance-diff.sh` and `custom-sections-diff.py` — and each port was verified against the script
+it replaced: **same verdict on the same inputs, and still FAILING when it should.** The
+conformance gate was checked on all three regression shapes (lost passes, more failures, a clean
+file that started failing) plus an honest improvement, with byte-identical output and exit status;
+the custom-sections gate was run over the whole 535-file corpus for the same 531/4/0, and then
+against an assembler wrapper that strips custom sections, which it must report as a difference.
+⚠️ **That last check is the one that matters**: `conformance-diff`'s own header records two holes
+that got in because the check was re-implemented ad hoc. A ported gate that quietly stops failing
+is worse than no gate.
+
+**Why, beyond the language:** the host's bash and Python have cost this project real time —
+`python3` is a Store stub that HANGS (must be `python`), the working copy is CRLF so `\n`-only
+`perl`/`sed` patterns silently fail to match, and see rule 2. One runtime removes all of it, and
+wasmtk's own tooling is TypeScript already, so the scripts now match the consumer project.
+
+### 2. ⛔ NO HEREDOCS — write the file, then run it
+
+**Owner's rule, and it is about a failure mode, not a preference.** A heredoc (`<<EOF`,
+`<<'PYEOF'`) that carries code into `bash`, `python -c` or `git commit -F -` goes through at least
+two levels of quoting, and the failures are **silent or misleading**:
+
+| what happened, in one session | result |
+| --- | --- |
+| a heredoc containing an apostrophe | `unexpected EOF while looking for matching quote` — the script never ran |
+| non-ASCII (`—`, `§`, `’`) through `python -c` | mangled to `?` mid-string, so the anchor did not match and **the edit silently applied nothing** |
+| backticks inside a double-quoted `-c` string | the shell EXECUTED them: a comment ended up reading *"a file called \"* |
+| `\n` in a `perl -0pi -e` pattern against a CRLF file | matched nothing, and the mutation test then "passed" |
+
+**The rule:** write the script to a file (the scratchpad, or `scripts/` if it is worth keeping) and
+run the file. Editing source? Prefer the `Edit` tool, which matches exactly and fails loudly.
+🎓 The cost of ignoring this is not a broken script — it is a script that reports success while
+doing nothing, which is the silent-wrong class this project ranks worst (`best-practices.md` §3.1).
+
 ## 🔒 The oracle is RETIRED — wasmrt stands alone (owner, 2026-08-11)
 
 **wasmrt no longer refers back to the `wazmrt` repo.** Through T9 wazmrt was a frozen oracle and
