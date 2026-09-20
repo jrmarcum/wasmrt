@@ -1,5 +1,35 @@
 # Known Issues
 
+## 🗂 BACKLOG AUDIT 2026-09-20 — **eight headings said OPEN; the code said otherwise**
+
+Asked "are there any other outstanding issues to fix?", the honest answer needed the backlog RE-RUN,
+not re-read. Every entry below was measured against `target/release/wasmrt` today and closed with the
+measurement quoted in place:
+
+| entry | what it claimed | what it does |
+| --- | --- | --- |
+| import type-use mismatch | `StackUnderflow` at offset 32168 | `inline function type doesn't match type reference` — **wasm-tools' exact wording**, at the import |
+| the proposal list spelled 3× | nothing compares them | `the_header_feature_enum_matches_feature_of_and_the_rust_list` **parses `wasmrt.h`** and round-trips every integer (T10b) |
+| GC identity across a link | 🔴 REAL BUG, wrong in both directions | `gc_cross_module_type_index.wast` **3/0/0**, `externref_is_not_a_gc_index.wast` **17/0/0** |
+| T9a#4's table half | 🚦 decision gate, blocked on the `funcref` encoding | an imported table links and dispatches into the reference's **owner** (42, not the caller's 7) |
+| `interop.md` flag POSITION | ⚠⚠ DIVERGENT AND LIVE — a trailing `--dir` is donated to the guest | applied: `cannot preopen …`, rc 1; a trailing unknown flag is `unknown flag`, rc 1 |
+| `interop.md` F1 | `wasmrt m.wasm f` summarizes, rc 0 | names the missing export, rc **1** |
+| three trailing "🔧 Open" sections | open, "all unfixed" | resolved by later passes; marked 🗄 HISTORICAL at the heading, bullets left as written |
+| wasmtk's threads patch (roadmap #1) | uncommitted in their tree | committed by wasmtk (`a0025812753`) |
+
+🆕 **One of the eight left a real gap behind it**: the decision gate was closed by a pass whose
+property nothing pinned. `tests/imported_table_dispatches_to_the_owner.wast` now does — B holds a
+decoy at its own index 0, so the file distinguishes *dispatched to the owner* from *dispatched to
+whatever sits at that index*, and it was proved to fail by resolving the call against `ctx.inst`
+(the pre-T9a#4 behaviour): **4 passed, 2 failed.**
+
+⚠️ **And one source comment was worse than any of the doc entries**: `interp.rs`'s module header said
+imported tables *"still reject loudly … until a `funcref` carries its owning instance"* — a condition
+met six weeks earlier, contradicting code a few hundred lines below it (§1.1b). Corrected.
+
+🎓 **The shape to keep**: a heading is a claim, and a claim nobody re-measures decays into
+misinformation that reads like a to-do list. Re-run the backlog, do not re-read it.
+
 ## ✅ CLOSED 2026-09-20 — a VALIDATOR REVIEW found EIGHT, and two of them were not in the validator
 
 The validator read end to end after the decoder, for the same reason: it is the last thing standing
@@ -422,7 +452,16 @@ Found beside it, same class:
 
 *The original entry, kept as the record:*
 
-## 🟡 (was OPEN) — a type-use mismatch on an IMPORT is caught 32 KB late, as `StackUnderflow`
+## ✅ CLOSED (fixed 2026-09-19; this heading still read 🟡 until the backlog audit on 2026-09-20)
+
+**A type-use mismatch on an IMPORT is caught 32 KB late, as `StackUnderflow`** — re-measured
+2026-09-20 on `bindgen_fixtures/fnany_50.wat`: wasmrt now answers
+`inline function type doesn't match type reference`, **which is wasm-tools' and wasmtime's exact
+wording**, at the import rather than at offset 32168. The `.wat` corpus is 528/532 for the two
+`anyfunc` files and these two, all four being corpus defects the outside reader refuses on the
+same lines. ⚠️ The entry below is the original report, kept for the reasoning.
+
+### The original report (2026-09-17)
 
 `bindgen_fixtures/fnany_50.wat` and `hostfn_50.wat` are **corpus defects** — wasmtime refuses them
 too — but the two engines refuse them for different reasons, and ours is the worse one:
@@ -953,7 +992,18 @@ is rejected.** Sibling of the `--no-verify`/`--yes` flag-region hazard recorded 
 means one thing to the host and another to the guest, with nothing marking the boundary.** The `--`
 end-of-flags marker wasmrt still lacks is exactly that marker.
 
-## ⬜ OPEN (found 2026-08-19) — the proposal list is spelled THREE times and nothing compares them
+## ✅ CLOSED 2026-09-17 (T10b) — the proposal list is spelled THREE times, and now a test compares them
+
+`wasmrt-capi/src/tests.rs::the_header_feature_enum_matches_feature_of_and_the_rust_list` **parses
+`wasmrt.h` itself**, asserts `wasmrt_feature_t` is contiguous from 0, round-trips every integer
+through `feature_of`, and asserts integer `n` is `Feature::ALL[n]` — names and values, not
+lengths. `features.rs::every_feature_is_reachable_through_the_c_abi_by_a_stable_integer` pins the
+core side against `Features`' own fields (a count derived from `Debug`, so it grows on its own).
+It earned its keep immediately: **`WideArithmetic` reached the Rust enum and the struct but not
+`wasmrt_feature_t`**, exactly the defect this entry predicted. ⚠️ Confirmed still present and
+passing in the 2026-09-20 audit. The original analysis follows.
+
+### The original report (2026-08-19)
 
 **Severity: latent, not live.** No proposal is mis-gated today. What is missing is the check that keeps
 that true, and the defect it would catch is the one wazmrt actually shipped: *a header advertising a
@@ -1096,7 +1146,18 @@ the same reason as the T9 `InstanceId` fix: this is a cross-module path the suit
 
 ---
 
-## 🔴 REPORTED FROM wazmrt, 2026-08-14 — GC reference identity across a link
+## ✅ CLOSED — GC reference identity across a link (reported from wazmrt 2026-08-14)
+
+Re-measured 2026-09-20: both live findings are fixed and both reproducers are green —
+`tests/gc_cross_module_type_index.wast` **3/0/0** (finding 1, the type index read against the
+reader's module) and `tests/externref_is_not_a_gc_index.wast` **17/0/0** (finding 3, the
+host-`externref`/GC-index overlap, closed when S1 landed the bridge with a tagged
+representation). Finding 2 was never a defect — it is an immunity to protect, and the note on
+not consolidating `gc_heap` per instance still stands. The report below is kept whole, including
+the correction wasmrt sent back, because **a retracted finding is kept so the wrong lesson does
+not propagate**.
+
+### The original report
 
 wazmrt hit a cross-module GC-reference defect, fixed it, and swept for the same class here. Three
 findings, worst first. **The first is verified by EXECUTION against `target/release/wasmrt` 0.9.0,
@@ -2149,7 +2210,16 @@ The natural proposal — *instance id in bits 32–63, function index in 0–31*
 `I31_TAG = 1 << 63`**. Any packing has to fit under bit 63 (e.g. instance in 32–62) or restructure the
 tag bits deliberately. Worth having on paper before that decision rather than discovering it during.
 
-## 🚦 DECISION-GATE — the TABLE half of T9a#4 is still open (found 2026-08-07)
+## ✅ CLOSED — the TABLE half of T9a#4 (found 2026-08-07, decided and shipped in T9's ninth pass)
+
+**Re-measured 2026-09-20**, because a decision gate that has been walked through is worse than a
+closed one: two modules, a table exported by A and imported by B, B holding a decoy function at
+its own index 0. `call_indirect` through the shared slot returns **42** — A's function, the
+reference's OWNER — not B's 7. So the encoding decision this gate was waiting on was taken (a
+`funcref` carries its owning instance in bits 62..32, and instance 0 packs to the bare index) and
+imported tables link. The analysis below is what made the decision, kept whole.
+
+### The original decision gate (2026-08-07)
 
 *(The memory half is DONE — see the section above. What follows applies to **tables only**.)*
 
@@ -2190,7 +2260,16 @@ to the wrong function is worse than one that refuses to link. `LinkError::Unsupp
 `Trap::UnsupportedImportKind` are a correct, loud refusal, and **two tests now pin that refusal** so it
 cannot be lifted by accident.
 
-## 🔧 Open — found 2026-08-08 by the T9a#4 work
+## 🗄 HISTORICAL (was "🔧 Open") — found 2026-08-08 by the T9a#4 work
+
+⚠️ **Re-measured 2026-09-20; the heading was stale.** *Cross-module type canonicalisation* landed
+as T9h's store-wide `TypeRegistry` (`type-equivalence.wast` is **11/0/0** and the whole suite is
+at zero failures, so the "1 assertion residual" is gone); *imported globals* are shared rather
+than snapshotted (`tests/an_imported_global_is_shared.wast`, green); and *malformed import names*
+are refused at decode (`utf8-import-field.wast` **176/0/0**, and the runner scores an
+`assert_malformed` only on a decode-stage rejection). The other two bullets were never defects:
+a host callback carries no declared signature by construction, and the single control-nesting
+authority is deliberate and pinned. Kept for the reasoning.
 
 - **No cross-module type canonicalisation.** A `ValType` naming a concrete GC type carries a module-local
   type index, so import matching across two modules cannot decide subtyping and falls back to structural
@@ -2216,7 +2295,12 @@ cannot be lifted by accident.
   not make the sharing live. Only a concern if a consumer imports a mutable global and expects writes to
   propagate.
 
-## 🔧 Open — noted at T8 (2026-08-06)
+## 🗄 HISTORICAL (was "🔧 Open") — noted at T8 (2026-08-06)
+
+⚠️ **The heading was stale.** Trap backtraces landed at T9a#7 (the bullet already says so), and
+**imported memories and tables both link today** — measured 2026-09-20, an imported table
+dispatches into the reference's owner. `wasmrt_caller_get_memory` is unchanged and is a
+deliberate honest `false`, not a defect. Kept for the reasoning.
 
 - ~~**Trap backtraces are still empty, and the C ABI now says so out loud.**~~ ✅ **RESOLVED at T9a#7
   (2026-08-08).** The T8 bet — freeze the frame API's shape now, fill it in later — paid off: real
@@ -2267,7 +2351,13 @@ preopen while a guest runs) is written up in `security-model.md`. Do not re-liti
 interpreter alike — deliberate, oracle-faithful. `legacy/try_delegate.wast` failing is the *correct*
 outcome.
 
-## 🔧 Open — found by the wasmtk corpus run (2026-08-05), all unfixed
+## 🗄 HISTORICAL (was "🔧 Open … all unfixed") — found by the wasmtk corpus run (2026-08-05)
+
+⚠️ **"All unfixed" stopped being true on 2026-08-07** (`ref.null $t`) and the rest followed. The
+`.wat` corpus is **528 of 532** today, and every one of the four remaining is a **corpus defect
+that wasm-tools refuses on the same lines** — two files spelling `anyfunc`, two with an import
+type-use mismatch. Kept for the reasoning, and because it is the run that established the corpus
+reaches what the spec suite does not.
 
 The spec testsuite never exercised these; the **wasmtk** corpus did. All four are measured against the
 frozen oracle, so each says what wazmrt does with the same input.

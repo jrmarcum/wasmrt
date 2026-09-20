@@ -58,7 +58,7 @@ and by wasm-tools, at the same offsets. The conservative "restore the frame's in
 `end`" IS the rule; only the unreachable-code exemption was wrong.
 
 **Gates after the review**, all re-run on this host: workspace tests **588**, conformance
-64,603 / 0 / 0 over 288 files, repo `tests/*.wast` **230 / 0 / 0** over 17 files (3 of them new), `.wat` corpus
+64,603 / 0 / 0 over 288 files, repo `tests/*.wast` **236 / 0 / 0** over 18 files (4 of them new), `.wat` corpus
 **528 / 532** with all 528 accepted by wasm-tools, custom-sections **528 agree / 4 refused by both /
 0 differ**, Miri **32 / 32**, C-ABI gate PASSED, clippy clean.
 

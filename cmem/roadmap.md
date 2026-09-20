@@ -191,7 +191,7 @@ are ranked on *assertions unblocked*, which is what the ranking rule above actua
 **State: 🎯 64,603 / 0 / 0 over 288 files, unchanged by the day's eight fixes.** **588 workspace tests**,
 clippy clean, C-ABI gate PASSED, Miri **32/32**, `.wat` corpus **528 / 532** (all 528 accepted by
 wasm-tools), custom-sections **528 agree / 4 refused by both / 0 differ**, repo `tests/*.wast`
-**230 / 0 / 0** over 17 files, and three NEW differential gates that each start green and were each
+**236 / 0 / 0** over 18 files, and three NEW differential gates that each start green and were each
 proved able to fail: `scripts/feature-gate-sweep.ts`, `scripts/index-type-sweep.ts`,
 `scripts/differential-fuzz.ts`.
 

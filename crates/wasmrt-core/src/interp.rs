@@ -11,9 +11,14 @@
 //! enough to run a compute module (`fib`, `factorial`, `add`). Float arithmetic and linear
 //! memory land in 0.6.1; tables, reference types, GC, SIMD, threads, and exception handling in
 //! later 0.6.x slices. **Anything not yet executed traps loudly** ([`Trap::UnsupportedInstruction`]),
-//! never silent-wrong. Host imports link through [`Imports`], as do imported **memories**
-//! (shared with the exporting instance, never copied); imported **tables** still reject loudly
-//! ([`Trap::UnsupportedImportKind`]) until a `funcref` carries its owning instance.
+//! never silent-wrong. Host imports link through [`Imports`], as do imported **memories** and
+//! **tables** — both shared with the exporting instance, never copied.
+//!
+//! ⚠️ This said imported tables *"still reject loudly … until a `funcref` carries its owning
+//! instance"*. That condition was met in T9's ninth pass — a `funcref` packs (owner, index) in
+//! bits 62..32 — and the sentence outlived it by six weeks, which is §1.1b: **a comment outlives
+//! what it describes, and this one contradicted code a few hundred lines below it.** Measured
+//! 2026-09-20: `call_indirect` through an imported table dispatches into the reference's owner.
 
 use alloc::vec;
 use alloc::vec::Vec;
