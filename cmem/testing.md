@@ -85,6 +85,30 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `deno run -A scripts/miri-gate.ts` (needs `rustup component add miri`; ~28s).
 
+⚠️⚠️ **THE `0 FAILED` IS PROVISIONAL — THE CORPUS IS BEING EDITED UNDER US (2026-09-19, late).**
+wasmtk is **reverting the owner-directed `proposals/threads/` patch and re-evaluating the issue**, so
+the failure count is a moving target and **must not be quoted** until they finish. Measured before
+standing down (owner: *"they are in process, do not rerun on the wasmtk side"*):
+
+| corpus state | passed | failed |
+| --- | --- | --- |
+| patch fully applied (this morning) | 64,598 | **0** |
+| revert in progress (same evening) | **64,598** | **5** — `threads/imports.wast` 3, `threads/memory.wast` 2 |
+| their pristine HEAD (a full revert) | — | **11** in those two files (6 + 5) |
+
+🔒 **PASSES NEVER MOVED: 64,598 both times.** Nothing regressed in the engine — the failures are
+assertions the patch had REMOVED, coming back. They are the era-pinned contradiction: that snapshot
+asserts `(memory 0x1_0000_0000)` *malformed* and multi-memory/multi-table *invalid*, which core
+`memory.wast` contradicts under Wasm 3.0. Both files cannot pass at once; that is a corpus defect,
+not ours, and it is what wasmtk is re-evaluating.
+
+✅ **The per-file gate did its job** — it reported `MORE FAILURES … 0 -> 3` and `0 -> 2` rather than
+netting them against the unchanged pass total.
+
+🎓 *When the corpus can move, the denominator is a measurement* (§1.7) — **and so is the numerator.**
+A conformance headline is a joint statement about an engine and a corpus, so it is only quotable
+when BOTH have stopped moving. That is also why `1.0.0` is on hold (HANDOFF item 8).
+
 ### 🔧 2026-09-19 — day 4, part 11: the gates are TypeScript now (**567 tests**)
 
 `scripts/` is four `.ts` files run by **Deno or Bun** (`node:` builtins only, so either works, and so

@@ -195,6 +195,14 @@ refused by both / 0 differ**, shipped cdylib **531,968 B**, everything committed
 the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4, did track P, patched the
 era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
 
+⚠️⚠️ **THE CONFORMANCE HEADLINE IS IN FLUX — wasmtk is REVERTING the `proposals/threads/` patch and
+re-evaluating (owner, 2026-09-19 late).** Measured before standing down: passes **unchanged at
+64,598**, failures **0 → 5** (a full revert to their HEAD would be 11 in those two files). The engine
+did not move; those are era-pinned assertions the patch had removed, contradicting core `memory.wast`
+under Wasm 3.0. **Do not quote a failure count, and do not re-run against the wasmtk tree, until they
+finish.** T13's *zero failed* clause therefore depends on a corpus decision that is not ours —
+which is a release-gating fact, not a scoreboard one. Detail: `testing.md`, at the head of the day-4 entries.
+
 🔒 **T9e AND T9i ARE DONE (2026-09-19) — `pin` was the last open T9 item, and the execution bound was
 the last DIVERGENT row in the security contract.** The CLI now accepts wazmrt's whole shape (bare-path
 run modes, `--features`, `--env`, the ceilings, the verification flags, `--`, both `--dir` separators),

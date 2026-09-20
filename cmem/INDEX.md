@@ -52,7 +52,7 @@ order: ~~track A~~ ✅ **done 2026-09-19 as the custom-annotations feature** (`c
 ~~track D~~ ✅ **done 2026-09-19 (D1–D4) — the corpus is at ZERO failed / ZERO skipped** → ~~the two 🟡 OPEN
 decoder defects~~ ✅ **done 2026-09-19 — three, one more than logged (DAY 4 part 7)** → **`1.0.0` release prep.**
 
-Working tree is **ahead of the published v0.9.0**. Suite 🎯 **64,598 / 0 / 0 — 100%, zero failed, zero skipped,
+Working tree is **ahead of the published v0.9.0**. ⚠️⚠️ **THE FAILURE COUNT IS IN FLUX — wasmtk is reverting the `proposals/threads/` patch and re-evaluating (2026-09-19 late); it read 0 that morning and 5 that evening, a full revert is 11, and PASSES NEVER MOVED (64,598). Do not quote a failure count, and do not re-run against the wasmtk tree, until they finish.** Previously: Suite 🎯 **64,598 / 0 / 0 — 100%, zero failed, zero skipped,
 zero unrun** over **288** files (day 4, 2026-09-19); **525 workspace tests**; clippy **clean** (the 3 pre-existing
 warnings fixed in D3/D4); C-ABI gate PASSED (74 symbols); `.wat` corpus
 **531/535** *(denominator +3 on 2026-09-19 — new wasmtk files; was 528/532)* ⚠️ *(not 530 — the corpus loop keyed on the CLI's exit status, which is 0 even when validation fails; reading the verdict instead exposed two pre-existing failures. All four are corpus defects wasmtime also refuses.)*; **no file lost a TRUE pass** in any pass, across T9's eighteen and T13's four days — day 4 removed one FALSE pass (`custom-page-sizes.wast`), exposed by the whole-module-quote fix.
