@@ -411,10 +411,17 @@ quoting has silently mangled non-ASCII, executed backticks it should have quoted
 apply nothing while reporting success — the silent-wrong class. Detail and the evidence:
 `cmem/design-decisions.md`, "TOOLING RULES".
 
-🔒 **LINE ENDINGS ARE LF, EVERYWHERE (2026-09-20).** `.gitattributes` says `* text=auto eol=lf`, which
-overrides `core.autocrlf` on every machine, and `scripts/eol-gate.ts` fails if any tracked text file
-holds a CR (`--fix` rewrites them). **Write LF and match on `\n`; a script no longer needs a CRLF
-branch.** ⚠️ This replaces the old "endings are not uniform, so every pattern must handle both"
+🔒 **LINE ENDINGS ARE LF, EVERYWHERE — GIT'S OWN STANDARD (owner, 2026-09-20).** `gitattributes(5)`:
+line endings are *"normalized to LF in the index"* on checkin and only *"may be converted"* to CRLF on
+checkout — **LF is what a repository stores; CRLF is a working-tree rendering.** Verified, not
+recalled: a CRLF file committed with `core.autocrlf=true` or with `* text=auto` is stored as **LF**,
+and only an unconfigured repo stores CRLF. So this repo standardises on git's form on both sides.
+`.gitattributes` carries `* text=auto eol=lf` (which overrides `core.autocrlf`, so no per-developer
+config is needed), **`crates/wasmrt-core/tests/line_endings.rs` fails any `cargo test` run if a text
+file holds a CR** — the attribute cannot stop an editor writing one *between* checkout and commit, and
+a gate with no trigger is a preference — and `scripts/eol-gate.ts` is the same check with `--fix` plus
+an index scan. **Write LF and match on `\n`; a script no longer needs a CRLF branch.** ⚠️ A fixture
+that genuinely needs a CR builds it from `\r` in Rust, never as a raw byte in a checked-in file. ⚠️ This replaces the old "endings are not uniform, so every pattern must handle both"
 (`best-practices.md` §8.1b) — which was measured and true: the index held **LF for all 111 text
 files** while the working tree held 12 CRLF and 99 LF, and which bucket a file was in depended only
 on whether git had last checked it out. Same file, different endings on different days, with nothing

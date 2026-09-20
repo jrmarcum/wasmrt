@@ -941,7 +941,12 @@ and **keep the suite green — diff the OUTPUT (N passed / N failed), not exit c
   commits the port was developed against; **nothing reads it.**
 - `scripts/c-gate.ts` — the C-ABI gate (link-completeness 74/74 + `c_smoke` compiled against the shipped
   header). `scripts/miri-gate.ts` — `wasmrt-capi` under Miri (32/32), incl. a lifecycle fuzz.
-- 🔒 `.gitattributes` + `scripts/eol-gate.ts` — **line endings are LF, everywhere** (2026-09-20).
+- 🔒 `.gitattributes` + `crates/wasmrt-core/tests/line_endings.rs` + `scripts/eol-gate.ts` — **line
+  endings are LF, everywhere, because LF is GIT'S canonical form** (owner, 2026-09-20): `gitattributes(5)`
+  normalizes to LF in the index on checkin and only MAY render CRLF on checkout (verified in a throwaway
+  repo, three configurations). The test runs under every `cargo test` — the attribute cannot stop an
+  editor writing a CR between checkout and commit — and the script adds `--fix` and an index scan.
+  Both proved able to fail. No `.bat`/`.cmd`/`.ps1`/`.sln` is tracked, so nothing wants CRLF.
   `* text=auto eol=lf` overrides `core.autocrlf`; the gate fails on any CR in a tracked text file,
   working tree or index (`--fix` rewrites them). Measured first: the index was ALREADY all-LF and the
   working tree held 12 CRLF files purely because git had checked them out — so scripted backslash-n edits

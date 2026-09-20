@@ -80,8 +80,31 @@ doing nothing, which is the silent-wrong class this project ranks worst (`best-p
 
 ### 3. 🔒 Line endings are **LF**, everywhere, on every machine (owner, 2026-09-20)
 
-*"if CRLF is what git wants, we need a rule for using it versus LF so this is a non issue"* — and the
-measurement said git does **not** want CRLF here.
+*"if CRLF is what git wants, we need a rule for using it versus LF so this is a non issue"* — then
+*"can we make the rule to standardize this on the git preference since we have no .bat or .sln files
+in this project?"* **Yes, and that is the rule: LF, because LF is git's own canonical form.**
+
+**Git's standard is not a preference, it is the storage format.** `gitattributes(5)`: *"When a
+matching file is added to the index, the file's line endings are **normalized to LF in the index**.
+Conversely, when the file is copied from the index to the working directory, its line endings **may
+be converted** from LF to CRLF depending on the `eol` attribute, the Git config, and the platform."*
+One direction only: LF is what a repository holds; CRLF is a working-tree rendering a checkout may
+produce. Verified rather than quoted from memory — a throwaway repo, one CRLF file, three settings:
+
+| committed | config / attributes | git STORED |
+| --- | --- | --- |
+| CRLF | `core.autocrlf=true` (this host's system default) | **LF** |
+| CRLF | `core.autocrlf=false`, no attributes | CRLF |
+| CRLF | `core.autocrlf=false`, `* text=auto` | **LF** |
+
+CRLF reaches the object database only when *nothing* is configured to normalize — by omission, never
+by design. So standardising on LF is not a house style over git's; it is **making the working tree
+agree with what the repository already contains**, which is why normalizing twelve files recorded no
+content change at all.
+
+✅ **And nothing here wants the other direction**: the tracked tree is `.md`, `.rs`, `.wast`, `.ts`,
+`.toml`, `.c`, `.h`, `.yml`, `.txt`, `.lock` — **no `.bat`, `.cmd`, `.ps1`, `.sln` or MSBuild
+project**, the only file types with a real CRLF requirement. Measured, not assumed.
 
 **What was actually true**, measured before deciding anything: all **111** tracked text blobs were
 already **LF in the index**, while the working tree held **12 CRLF and 99 LF** files. Nothing in the
@@ -90,15 +113,27 @@ Windows installer writes it), so a file becomes CRLF when *git* checks it out an
 tool writes it — which means **the same file has different endings depending on what touched it
 last**, and no file records which.
 
-**The rule, in three parts:**
+**The rule, in four parts:**
 
 1. **`.gitattributes`: `* text=auto eol=lf`.** `eol=lf` overrides `core.autocrlf`, so the working
    tree is LF on every machine with no per-developer git config, assumed or required.
-2. **`scripts/eol-gate.ts`** fails if any tracked text file holds a CR, in the working tree *or* in
-   the index; `--fix` rewrites them. An attribute is enforced by git at checkout and commit and
-   cannot stop an editor from writing CRLF in between — that gap is exactly where the defect lived.
-3. **Scripts match on `\n` and write `\n`.** No CRLF branch, no `\r?\n` defensiveness, no
+2. **A TRIGGER: `crates/wasmrt-core/tests/line_endings.rs`** walks the repository under every
+   `cargo test` and fails on any CR in a text file. The attribute alone is not enough — git enforces
+   it at checkout and at commit, and **cannot stop an editor or a generator from writing CRLF into a
+   file that then sits in the working tree looking normal**, which is precisely the gap the defect
+   lived in. *A gate with no trigger is a preference* (`best-practices.md` §4.2), so this one runs
+   with the test suite, like `regression_wast.rs`. Both it and the script below were proved able to
+   fail by converting one tracked file back to CRLF.
+3. **`scripts/eol-gate.ts`** is the same check plus `--fix` (it rewrites offenders) and it also
+   inspects the **index**, which a file-walking test cannot see. Use it to repair; the test is what
+   notices.
+4. **Scripts match on `\n` and write `\n`.** No CRLF branch, no `\r?\n` defensiveness, no
    "normalize first" preamble.
+
+⚠️ **A fixture that needs a real CR** — a lexer test for §6.2's source character set, say — builds it
+from `\r` in Rust source or from bytes, and does **not** embed a raw CR in a checked-in file. A CR
+that is content cannot be told from a CR that is an accident, and that ambiguity is what would force
+the gate to become advisory.
 
 ⚠️ **Nothing here needs CRLF**: no `.bat`/`.cmd`/`.ps1`/`.sln`, a Rust + Deno/Bun toolchain, all
 gates in TypeScript. A Windows-only script added later gets an explicit `*.bat text eol=crlf` line

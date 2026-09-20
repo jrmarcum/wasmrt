@@ -1703,11 +1703,20 @@ statement filed under the wrong heading.
 
 ## §8.1b — ~~**LINE ENDINGS ARE NOT UNIFORM WITHIN THIS REPO**~~ → **SETTLED BY A RULE (2026-09-20)**
 
-🔒 **Superseded as a coping rule, kept as the evidence.** Line endings are now **LF everywhere**:
-`.gitattributes` carries `* text=auto eol=lf` (which overrides `core.autocrlf`) and
-`scripts/eol-gate.ts` fails on any CR in a tracked text file, working tree or index. Scripts match
-on `\n` and write `\n`; the "handle both" branch below is no longer needed and should not be
-re-added. Detail and the measurement: `design-decisions.md`, "TOOLING RULES" §3.
+🔒 **Superseded as a coping rule, kept as the evidence.** Line endings are now **LF everywhere, which
+is git's own canonical form** — `gitattributes(5)` normalizes to LF in the index on checkin and only
+*may* render CRLF on checkout. `.gitattributes` carries `* text=auto eol=lf`,
+`crates/wasmrt-core/tests/line_endings.rs` fails any `cargo test` run on a CR in a text file, and
+`scripts/eol-gate.ts` adds `--fix` plus an index scan. Scripts match on `\n` and write `\n`; the
+"handle both" branch below is no longer needed and should not be re-added. Detail and the
+measurement: `design-decisions.md`, "TOOLING RULES" §3.
+
+🎓 **The general form of this, worth more than the endings themselves:** the fix that ends a class of
+defect is usually **a rule plus a trigger**, not more care. "Handle both endings" is care — it must
+be remembered at every call site, by everyone, forever. "The repository holds exactly one ending, and
+a test fails if it does not" is a rule, and it is checked by something that does not get tired.
+⚠️ Note which half of the old entry SURVIVED: every scripted edit still asserts its own application,
+because that one guards against a different failure — the pattern being wrong for any reason at all.
 
 🎓 **Why it was worth a rule rather than more care.** The split was never a decision: the index held
 **LF for all 111 text files**, and the working tree's 12 CRLF files were simply the ones git had
