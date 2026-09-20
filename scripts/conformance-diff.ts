@@ -30,6 +30,12 @@
 //      That hole hid three regressions (instance, throw, throw_ref) behind a
 //      "NO FILES LOST A PASS" verdict, and would have shipped them.
 //
+//   3. 🆕 The MIRROR of (2), found by review on 2026-09-19 and present in the shell
+//      version this file replaced: a file listed in the BASELINE and ABSENT from the
+//      current report was never checked. A script the runner failed to read or parse
+//      simply stops being listed, so every pass it used to have vanishes under a
+//      "no file lost a pass" verdict — the loudest possible regression, silently.
+//
 // ⚠️ A gate you retype is a gate that drifts. Both directions are checked here, once.
 //
 // 🔻 Ported from `conformance-diff.sh` (2026-09-19, the TypeScript scripting rule). The
@@ -72,7 +78,16 @@ for (const path of [...new Set([...a.keys(), ...b.keys()])].sort()) {
     if (now && now.failed > 0) {
       regressions.push(`  NEWLY FAILING  ${path}  (now ${now.failed} failed)`);
     }
-  } else if (now) {
+  } else if (!now) {
+    // In the baseline, gone from the current report: every pass it had is unaccounted for.
+    // (Comparing a SUBSET run against a full-corpus baseline trips this by construction — that
+    // is the honest answer, because the two reports are not about the same thing.)
+    if (was.passed > 0) {
+      regressions.push(
+        `  MISSING        ${path}  (was ${was.passed} passed; absent from the current report)`,
+      );
+    }
+  } else {
     if (now.passed < was.passed) {
       regressions.push(`  LOST PASSES    ${path}  ${was.passed} -> ${now.passed}`);
     } else if (now.failed > was.failed) {

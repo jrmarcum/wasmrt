@@ -1,5 +1,33 @@
 # Known Issues
 
+## ✅ CLOSED 2026-09-19 — a CODE REVIEW of the day's own work found SIX, and five were silent
+
+Run while waiting on wasmtk, over `6ea081d43..HEAD` (D3/D4, the value-type decoder, the pin gate,
+the iteration budget, the CLI convergence, the script port). **Five were written that same day**, and
+every one of them **succeeded while doing something other than what was asked** — no error, no
+warning. Each was reproduced on the real binary before the fix and is now pinned by a test in
+`crates/wasmrt/tests/cli_review_regressions.rs`, mutation-verified.
+
+| # | what it did | measured |
+| --- | --- | --- |
+| 1 | 🔴 **`wasmrt wasi` WIPED the guest's environment.** `WasiCtx::with_env` **assigns**; calling it twice (inherited, then `--env`) read as layering and was replacement. | guest saw **0** variables where it had seen 97; `--env FOO=1` → exactly 1 |
+| 2 | 🔒 **A pin DB that exists but cannot be READ counted as no DB** — root-owned `0600`, or a `0700` parent → `armed = false` → **everything ran unverified, silently.** Fail-OPEN, the mirror of the malformed-DB rule that fails closed. | `read_to_string(..).ok()` erased the distinction |
+| 3 | 🔒 **`wasmrt wast s.wast --verify enforce` accepted the flag and DROPPED it** — flags were parsed from a leading run only, while the file scan tolerated them anywhere. | after the path: **rc 0, script ran**; before it: rc 1, refused |
+| 4 | 🔒 **The bare-path `.wast` form discarded every flag written before the path**, because it rebuilt an argv and re-parsed it. | `wasmrt --verify enforce s.wast` → **rc 0, ran** |
+| 5 | ⚠️ **`--` did not force guest argv**: the first word after the marker was still matched against export names. | `wasmrt prog.wasm -- status` **called the export** (printed 42) instead of running `_start` with argv |
+| 6 | ⚠️ **The conformance gate never checked a file present in the BASELINE and absent from the CURRENT report** — so a script the runner failed to read loses all its passes under a "no file lost a pass" verdict. Carried over faithfully from the deleted shell version; **the third hole of this family** in that gate. | now reported as `MISSING` |
+
+🎓 **Three of the six are one root cause — a flag parsed in one place and honoured in another** —
+and all three hit the VERIFICATION flags, which is the worst place for it: a security flag that is
+accepted and silently dropped is more dangerous than one that is rejected, because the operator has
+evidence (no error) that it took effect. `best-practices.md` §4.10.
+
+⚠️ **What the day's own tests could not see.** The pin-gate and run-mode suites written hours earlier
+all passed throughout: they drive flags through the spelling each feature was built with, and every
+one of these defects lives in a DIFFERENT spelling of the same flag. A test written beside a feature
+inherits the author's assumption about how it will be called.
+
+
 ## ✅ CLOSED 2026-09-17 — `i32.trunc_sat_*` was EMITTED AS AN ILLEGAL OPCODE. Not WebAssembly.
 
 **The sixth instance of the T10a emitter mechanism, and the third wire divergence in a week.**

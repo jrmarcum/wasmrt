@@ -178,6 +178,22 @@ struct VerifyFlags {
     opt_out: bool,
 }
 
+/// The environment the guest sees: the host's, with `--env KEY=VALUE` overriding a variable of the
+/// same name and appending any that are new.
+///
+/// ⚠️ Override, not duplicate: WASI hands the guest a flat list, and two entries for one key is a
+/// shape no libc expects — `getenv` would return whichever the implementation happened to find.
+fn merged_env(overrides: &[(String, String)]) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    for (k, v) in overrides {
+        match env.iter_mut().find(|(ek, _)| ek == k) {
+            Some(slot) => slot.1 = v.clone(),
+            None => env.push((k.clone(), v.clone())),
+        }
+    }
+    env
+}
+
 /// A byte/count size: a plain number, or one with a `K`/`M`/`G` suffix (`512M`, `2G`).
 fn parse_size(s: &str) -> Option<usize> {
     let t = s.trim();
@@ -291,19 +307,24 @@ fn db_paths() -> (Vec<String>, String) {
 /// ⚠️ **A swap must never disarm SILENTLY.** When none of our paths has a DB but the sibling's does,
 /// that is said out loud — the operator pinned modules for a runtime they have just swapped out, and
 /// treating that as "unarmed" is exactly the failure §3.3 calls the most dangerous row in the file.
-fn resolve_default_db() -> Option<(String, String)> {
+fn resolve_default_db() -> Result<Option<(String, String)>, String> {
     let (ours, sibling) = db_paths();
     match choose_db(&ours, &sibling, |p| std::path::Path::new(p).exists()) {
-        DbChoice::Use(path) => std::fs::read_to_string(&path).ok().map(|t| (path, t)),
+        // ⚠️⚠️ PRESENT BUT UNREADABLE IS NOT ABSENT. This was `.ok()`, so a root-owned `0600` DB
+        // (or a `0700` parent) read as "no DB" → `armed = false` → **everything ran unverified,
+        // with no message**. That is the fail-OPEN mirror of the malformed-DB rule, which fails
+        // closed. An administrator installed a policy; being unable to read it is a refusal, not
+        // a licence.
+        DbChoice::Use(path) => read_db_file(&path).map(|t| t.map(|text| (path, text))),
         DbChoice::NoneButSiblingHasOne => {
             eprintln!(
                 "wasmrt: warning: a pin DB exists at {sibling} but not at {} — \
                  verification is NOT armed (move or copy it to the shared path)",
                 ours[0]
             );
-            None
+            Ok(None)
         }
-        DbChoice::None => None,
+        DbChoice::None => Ok(None),
     }
 }
 
@@ -331,6 +352,20 @@ fn choose_db(ours: &[String], sibling: &str, exists: impl Fn(&str) -> bool) -> D
     DbChoice::None
 }
 
+/// Read one pin DB. **Absent is fine; unreadable is not.**
+///
+/// ⚠️⚠️ This was `.ok()`, which made the two indistinguishable: a root-owned `0600` DB, or a `0700`
+/// parent, read as "no DB" → `armed = false` → **everything ran unverified, with no message.** That
+/// is fail-OPEN, the mirror of the malformed-DB rule which fails closed. An administrator who
+/// installs a policy the runtime then cannot read has not granted permission to skip it.
+fn read_db_file(path: &str) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read the pin DB {path}: {e}")),
+    }
+}
+
 /// Authorize the bytes that are about to run. `true` to proceed.
 ///
 /// 🔒 **Runs BEFORE validation** (`interop.md` §3.2): authorization first, so an unauthorized module
@@ -339,7 +374,14 @@ fn choose_db(ours: &[String], sibling: &str, exists: impl Fn(&str) -> bool) -> D
 fn verify_gate(loaded: &Loaded, flags: &VerifyFlags) -> bool {
     // The root-owned DB is read FIRST, because it declares the policy that decides whether the
     // user's own flags are allowed to matter at all.
-    let default_db = resolve_default_db();
+    let default_db = match resolve_default_db() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("wasmrt: {e}");
+            eprintln!("wasmrt: refusing to run {} unverified", loaded.path);
+            return false;
+        }
+    };
     let root_mode = default_db.as_ref().and_then(|(_, t)| pin::mode_from_db(t));
     let root_enforces = root_mode == Some(Mode::Enforce);
 
@@ -824,9 +866,12 @@ fn run_wasi_loaded(loaded: &Loaded, flags: &HostFlags, guest_argv: &[String]) ->
     // argv[0] is the module path, then whatever follows on our command line.
     let mut ctx = ctx
         .with_args(std::iter::once(path.to_string()).chain(guest_argv.iter().cloned()))
-        .with_env(std::env::vars())
-        // `--env KEY=VALUE` is applied after the inherited environment, so it wins.
-        .with_env(flags.env.iter().cloned());
+        // ⚠️⚠️ ONE call, with the merge done here. `WasiCtx::with_env` ASSIGNS rather than
+        // appends, so calling it twice — inherited environment, then `--env` — did not layer
+        // them: it **wiped the inherited environment**, and a guest that had seen the whole
+        // process environment suddenly saw nothing (measured: 0 variables). A second call that
+        // reads as additive and is not.
+        .with_env(merged_env(&flags.env));
     // **The guest reaches nothing it was not explicitly granted.** With no `--dir`, every
     // path call returns BADF; there is no implicit cwd preopen.
     for p in &flags.preopens {
@@ -918,9 +963,24 @@ fn run_bare_path(path: &str, rest: &[String], lead: HostFlags) -> ExitCode {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("wast"))
     {
-        let mut argv = std::vec![String::from(path)];
-        argv.extend(rest.iter().cloned());
-        return run_wast(&argv);
+        // ⚠️ The flags parsed BEFORE the path are carried through. Rebuilding an argv and
+        // re-parsing dropped them, so `wasmrt --verify enforce s.wast` ran the script — the same
+        // flag as a subcommand (`wasmrt wast --verify enforce s.wast`) refused it.
+        return match collect_wast_args(rest) {
+            Ok((mut files, verbose, trailing)) => {
+                let p = std::path::Path::new(path);
+                if p.is_dir() {
+                    collect_wast(p, &mut files);
+                } else {
+                    files.insert(0, p.to_path_buf());
+                }
+                run_wast_files(files, verbose, &lead.merge(trailing))
+            }
+            Err(e) => {
+                eprintln!("wasmrt: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
     // The trailing run of host flags — wazmrt's position. A single-dash token here is the guest's
     // (§2.4a), and everything from the first non-flag on is the export name or the guest's argv.
@@ -933,7 +993,13 @@ fn run_bare_path(path: &str, rest: &[String], lead: HostFlags) -> ExitCode {
     };
     let flags = lead.merge(trailing);
     warn_misplaced_host_flags(tail);
-    let tail: Vec<String> = if tail.first().is_some_and(|a| a == "--") {
+    // 🔒 An explicit `--` means "everything after this is the GUEST's", and that has to be
+    // remembered: without this flag the first word was still matched against the export names, so
+    // `wasmrt prog.wasm -- status` CALLED the export `status` instead of running `_start` with
+    // argv `["status"]`. The marker is the user saying which mode they want; second-guessing it
+    // makes `--` decorative (§2.4a).
+    let guest_argv_forced = tail.first().is_some_and(|a| a == "--");
+    let tail: Vec<String> = if guest_argv_forced {
         tail[1..].to_vec()
     } else {
         tail.to_vec()
@@ -966,8 +1032,18 @@ fn run_bare_path(path: &str, rest: &[String], lead: HostFlags) -> ExitCode {
     match tail.first() {
         // A word follows the path: an export name, or — when the module is a WASI command — the
         // guest's own argv (`prog.wasm install --yes`).
-        Some(first) if exports_func(first) => call_export(&loaded, &flags, first, &tail[1..]),
+        // An export name only when the user did NOT mark the rest as the guest's.
+        Some(first) if !guest_argv_forced && exports_func(first) => {
+            call_export(&loaded, &flags, first, &tail[1..])
+        }
         Some(_) if has_start => run_wasi_loaded(&loaded, &flags, &tail),
+        // `--` was given, so these are guest arguments — but there is no `_start` to give them to.
+        Some(_) if guest_argv_forced => {
+            eprintln!(
+                "wasmrt: {path} exports no `_start`, so the arguments after `--` have nowhere to go"
+            );
+            ExitCode::FAILURE
+        }
         Some(first) => {
             eprintln!(
                 "wasmrt: no exported function `{first}` in {path} (and it exports no `_start`)"
@@ -1122,63 +1198,72 @@ fn run_wast(rest: &[String]) -> ExitCode {
         eprintln!("wasmrt: usage: wasmrt wast <file.wast | directory>...");
         return ExitCode::FAILURE;
     }
-    // The verification flags are host flags here too; `wast` has no guest argv, so they may appear
-    // anywhere. ⚠️⚠️ A `.wast` EXECUTES the modules it contains, so it is gated like any other
-    // execute path — see `load_script`.
-    let (gate_flags, _) = match take_dir_flags(rest, false) {
-        Ok(v) => v,
+    match collect_wast_args(rest) {
+        Ok((files, verbose, flags)) => run_wast_files(files, verbose, &flags),
         Err(e) => {
             eprintln!("wasmrt: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // ⚠️ EVERY value-taking host flag, or its VALUE is mistaken for a script path — which is how
-    // `wast --max-iterations 1000 <dir>` first tried to run a script named "1000". One list,
-    // used both to validate the flags and to collect the files.
-    let known_value_flag = |a: &String| {
-        matches!(
-            a.as_str(),
-            "--pins" | "--verify" | "--features" | "--env" | "--dir" | "--ro-dir"
-                | "--max-memory" | "--max-table-elems" | "--max-iterations"
-        )
-    };
-    let mut skip_next = false;
-    for a in rest {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if known_value_flag(a) {
-            skip_next = true;
-            continue;
-        }
-        // §2.4a: `-v` and the verification flags are the only ones `wast` knows.
-        if is_flag(a) && a != "-v" && a != "--no-verify" && a != "--yes" {
-            return unknown_flag(a, false);
+            ExitCode::FAILURE
         }
     }
-    let verbose = rest.iter().any(|a| a == "-v");
+}
+
+/// Split `wast` arguments into scripts, `-v`, and host flags.
+///
+/// ⚠️⚠️ **Flags are honoured WHEREVER they appear, because `wast` has no guest argv.** This used to
+/// parse one leading run for the flags and then scan separately for the files, so
+/// `wasmrt wast s.wast --verify enforce` **accepted the flag and dropped it** — the script ran
+/// unverified while the same flag before the path refused it. A security flag that is silently
+/// ignored is worse than one that is rejected. The single pass also retires the hand-kept list of
+/// value-taking flags that the file scan needed, and which had already mistaken a flag's VALUE for
+/// a script path once.
+fn collect_wast_args(
+    rest: &[String],
+) -> Result<(Vec<std::path::PathBuf>, bool, HostFlags), String> {
+    let mut flags = HostFlags::default();
     let mut files: Vec<std::path::PathBuf> = Vec::new();
-    let mut skip_next = false;
-    for a in rest.iter().filter(|a| {
-        if skip_next {
-            skip_next = false;
-            return false;
+    let mut verbose = false;
+    let mut args = rest;
+    loop {
+        // `-v` is `wast`'s own flag and is not a host flag, so it is taken out first — otherwise
+        // the host-flag parser would stop at it and the rest of the line would be read as files.
+        while args.first().is_some_and(|a| a == "-v") {
+            verbose = true;
+            args = &args[1..];
         }
-        if known_value_flag(a) {
-            skip_next = true;
-            return false;
-        }
-        !a.starts_with('-')
-    }) {
-        let p = std::path::Path::new(a);
-        if p.is_dir() {
-            collect_wast(p, &mut files);
-        } else {
-            files.push(p.to_path_buf());
+        let (run, tail) = take_dir_flags(args, false)?;
+        flags = flags.merge(run);
+        match tail.first() {
+            None => break,
+            // `--` ends host flags for a guest; `wast` has no guest, so it means nothing here and
+            // saying so is better than reading it as a filename.
+            Some(a) if a == "--" => return Err(String::from("`--` has no meaning for `wast`")),
+            Some(a) if a == "-v" => {
+                verbose = true;
+                args = &tail[1..];
+            }
+            Some(a) => {
+                let path = std::path::Path::new(a);
+                if path.is_dir() {
+                    collect_wast(path, &mut files);
+                } else {
+                    files.push(path.to_path_buf());
+                }
+                args = &tail[1..];
+            }
         }
     }
     files.sort();
+    Ok((files, verbose, flags))
+}
+
+/// Run the scripts. Separate from the parsing so the **bare-path form** (`wasmrt script.wast`) can
+/// hand over the flags it already parsed — it used to rebuild an argv and re-parse, which silently
+/// **dropped every flag before the path**: `wasmrt --verify enforce s.wast` ran the script.
+fn run_wast_files(
+    files: Vec<std::path::PathBuf>,
+    verbose: bool,
+    gate_flags: &HostFlags,
+) -> ExitCode {
 
     let (mut passed, mut failed, mut skipped, mut errored) = (0usize, 0usize, 0usize, 0usize);
     let mut worst: Vec<(String, usize)> = Vec::new();
@@ -1606,6 +1691,29 @@ mod tests {
         assert_eq!(
             choose_db(&ours, sibling, |_| true),
             DbChoice::Use(String::from("/etc/wasmtk/pins"))
+        );
+    }
+
+    /// 🔒 Absent is fine; UNREADABLE is a refusal. A DB that exists but cannot be read must not
+    /// read as "unarmed" — that is the fail-open mirror of the malformed-DB rule. A directory
+    /// stands in for the unreadable file here, because it is the one shape that fails to read as
+    /// a string on every platform without needing privileges to set up.
+    #[test]
+    fn a_pin_db_that_exists_but_cannot_be_read_is_an_error_not_unarmed() {
+        let dir = std::env::temp_dir().join("wasmrt_pin_db_unreadable");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let err = read_db_file(dir.to_str().unwrap()).expect_err("a directory is not a DB");
+        assert!(err.contains("cannot read the pin DB"), "{err}");
+
+        let missing = std::env::temp_dir().join("wasmrt_pin_db_does_not_exist");
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(read_db_file(missing.to_str().unwrap()), Ok(None), "absent is fine");
+
+        let present = std::env::temp_dir().join("wasmrt_pin_db_present");
+        std::fs::write(&present, b"# mode: warn\n").expect("write");
+        assert_eq!(
+            read_db_file(present.to_str().unwrap()),
+            Ok(Some(String::from("# mode: warn\n")))
         );
     }
 

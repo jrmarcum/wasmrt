@@ -288,6 +288,26 @@ reached them. ✅ **The owner relayed the narrowing the same day and wazmrt is a
 (§1d: reconcile against code that has stopped moving). Our copy stays at v10 + unnumbered owner decisions
 until then; the mismatch is a normal in-flight state, not an error.
 
+##### 🔎 DAY 4, part 12 — a REVIEW of the day's own work: six findings, five silent. `[x]`
+
+Run while waiting on wasmtk, over `6ea081d43..HEAD`. **Five were written that day**, and every one
+**succeeded while doing something other than what was asked.** Full table in `known-issues.md` (top);
+the headline: `wasmrt wasi` **wiped the guest's environment** (97 variables → 0, because
+`WasiCtx::with_env` assigns and was called twice); a pin DB that exists but **cannot be read** counted
+as no DB (**fail-open**, everything ran unverified); `--verify enforce` was **accepted and dropped**
+in two spellings; `--` did not force guest argv; and the conformance gate never checked a file that
+vanished from the current report.
+
+All six fixed, pinned by `cli_review_regressions.rs` + a unit test, **mutation-verified** — and the
+`--` test **did not catch its mutation on the first attempt** (it asserted "nothing printed", which a
+stray `--` in argv also satisfies), so it was strengthened to assert the guest's ARGC. Strengthening
+it then exposed a broken fixture: one module cannot serve both run modes, because calling an export
+wires no imports (§5.4e). 572 tests, clippy clean, our own 13-file suite still 199/0/0.
+
+🎓 **§4.10 — parsing a flag proves it was ACCEPTED, not APPLIED**, and all three flag defects hit the
+VERIFICATION flags. ⚠️ **The day's own test suites passed throughout**: each drives the one spelling
+its feature was built with, and every defect lived in a different spelling of the same flag.
+
 ##### 🔧 DAY 4, part 11 — the TOOLING RULES, and the four gates ported. `[x]`
 
 Two owner rules (`design-decisions.md`, "TOOLING RULES"): **every script is TypeScript run by Deno or

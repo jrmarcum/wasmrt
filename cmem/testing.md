@@ -109,6 +109,19 @@ netting them against the unchanged pass total.
 A conformance headline is a joint statement about an engine and a corpus, so it is only quotable
 when BOTH have stopped moving. That is also why `1.0.0` is on hold (HANDOFF item 8).
 
+### 🔎 2026-09-19 — day 4, part 12: the review regressions (**572 tests**)
+
+`crates/wasmrt/tests/cli_review_regressions.rs` (4) pins what a code review of the day's own work
+found: `--env` must ADD to the inherited environment (a guest probe reports its variable count as its
+exit status), `wast` must honour host flags on either side of the script path, the bare-path `.wast`
+form must keep the flags written before it, and `--` must force guest argv (the probe reports its own
+ARGC, because "nothing was printed" is also true when a stray `--` reaches the guest). Plus a unit
+test that a pin DB which exists but cannot be READ is an error, not "unarmed".
+
+⚠️ **All of these passed the suites written hours earlier**, because those drive each flag through the
+one spelling its feature was built with. **Test the spellings, not the flag** (`best-practices.md`
+§4.10).
+
 ### 🔧 2026-09-19 — day 4, part 11: the gates are TypeScript now (**567 tests**)
 
 `scripts/` is four `.ts` files run by **Deno or Bun** (`node:` builtins only, so either works, and so

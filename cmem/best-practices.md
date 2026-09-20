@@ -929,6 +929,25 @@ prefer an error over both.
 
 ---
 
+### 4.10 Parsing a flag proves it was ACCEPTED — only the path that honours it proves it was APPLIED
+
+Three defects in one review (2026-09-19), all in the same hours-old code, all on the VERIFICATION
+flags: `wast s.wast --verify enforce` parsed the flag and dropped it; the bare-path `.wast` form
+rebuilt an argv and re-parsed it, discarding everything before the path; and `--` was consumed
+without being remembered, so the word after it was still matched against export names. Every one
+exited **0**.
+
+⚠️ **A security flag that is accepted and dropped is worse than one that is rejected.** A rejected
+flag sends the operator to the manual; a dropped one leaves them with evidence — a clean exit — that
+the policy applied. The shape to look for: a value parsed in one function and consumed in another,
+with a path between them that rebuilds, re-parses or reconstructs the arguments.
+
+**Apply:** for every flag, test the SPELLINGS, not the flag — before the path and after it, in each
+run mode that accepts it, and through the bare-path form as well as the subcommand. Assert the
+EFFECT (a refusal, a changed exit status, a different argv), never that the flag was accepted.
+🎓 The day's own tests passed throughout, because each exercised the one spelling its feature was
+built with.
+
 ### 4.9 One ceiling covering TWO paths needs a check on each — one passing test hides the other's absence
 
 The iteration budget (T9i) bounds non-termination. A guest can run forever two ways, and they share
@@ -1027,6 +1046,19 @@ against.
 an INPUT to every assertion in it. Two files disagreeing is a clue to check the harness before
 suspecting either file — and a proposal that *relaxes* an existing rule is the case that produces
 this, because it makes previously-invalid modules valid rather than adding new syntax.
+
+### 5.4e A fixture must be able to take the path it is testing
+
+The `--` regression test used one module that both exported `_start` (with a WASI import, to report
+its own argc) and exported `status`. It failed on the *unmutated* build: calling an export wires
+**no imports at all**, so the module could not be instantiated down the very path the second half of
+the test was checking. The fixture was impossible, not the code.
+
+**Apply:** when one test distinguishes two run modes, check that the fixture is valid in BOTH —
+different modes wire different things (imports, memory, a start function), and a fixture built for
+one can be uninstantiable in the other. A test that fails on correct code is cheap to spot; the
+same mistake in the other direction — a fixture that can only take one path, asserted as if it took
+both — passes forever.
 
 ### 5.5 Skips are never folded into passes
 
