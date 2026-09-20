@@ -3,12 +3,41 @@
 Load-bearing decisions for the `wasmrt` port. **Do not silently revert these.** Detail + rationale:
 `docs/port/` (esp. `00-synthesis.md`, `06-build-docs-licensing.md`).
 
+## 🔒 PROVE, DO NOT ASSUME (owner, 2026-09-19)
+
+> *"new rule. do not guess or assume, prove or validate before acting."*
+
+**Binding on every claim that leaves this session** — a report, a commit message, a `cmem/` entry, a
+contract row, a test's expected value. If it has not been measured, run it; if it cannot be run, say
+which it is. The rule was written after three misses in one day, and the shape of each is worth
+keeping because none of them felt like a guess at the time:
+
+| what was asserted | what it actually was |
+| --- | --- |
+| "Bun is written in Zig" | true at a training cutoff, **false since 2026-05-14** — and then defended with `process.versions` and a string count, which measure the TOOLCHAIN, not the language (§2.5) |
+| `walk(link, follow)` returns `NOTCAPABLE` | it returns **`NOENT`** — an absolute symlink target is re-rooted at the preopen, so the guessed errno went into a test that then failed |
+| "the probe returns in under 10s" as a proxy for "it did not allocate 4 GiB" | measured **0.111s** alone, but the assertion **failed under the parallel harness** — it measured the machine, not the code (§5.4f) |
+
+🎓 **The rule is cheap to follow and the violations are expensive**: each of the three cost more time
+to unpick than the measurement would have taken — one command each. The three shapes to watch:
+**a fact from training** (verify against the source's own record), **a value inside a test** (run the
+code and read the answer before asserting it), and **a proxy for the property you actually mean**
+(assert the property, or measure it directly and record the number).
+
 ## 🔒 TOOLING RULES (owner, 2026-09-19) — scripts are TypeScript, and no heredocs
 
-### 1. Every project script is TypeScript, run by Deno or Bun
+### 1. Every script is TypeScript, run by Deno or Bun — **no bash, and NO PYTHON**
 
-**Owner's rule.** `scripts/` holds `.ts` files, and ad-hoc scripting in a session is a `.ts` file
-too. Not bash, not Python. Both runtimes are Rust-built (Bun since its
+**Owner's rule, restated 2026-09-19 because it was being honoured in `scripts/` and ignored
+everywhere else:** *"python scripts not allowed either, only deno or bun"*. `scripts/` holds `.ts`
+files, **and so does every throwaway edit script a session writes** — the ad-hoc half is the half
+that gets skipped, and it is where the damage happened (a `python -c` string executed backticks it
+should have quoted, and mangled non-ASCII into a silent no-op). Not bash, not Python, not `perl -pi`.
+For editing source, prefer the `Edit` tool; for anything scripted, write a `.ts` and run it.
+
+**The session's own helper is `edit.ts`**: a spec of `[file, [[find, replace], …]]` where every
+`find` must match EXACTLY once or nothing is written and the run exits non-zero. JSON carries the
+text verbatim, so no shell quoting touches it — which is what made the Python one-liners dangerous. Both runtimes are Rust-built (Bun since its
 [Zig→Rust rewrite](https://bun.com/blog/bun-in-rust), merged 2026-05-14, shipped in 1.4), and both
 are installed here. The scripts import from `node:` builtins only (`node:fs`, `node:child_process`,
 `node:path`, `node:process`), so **one file runs under Deno, Bun or node** — no runtime is pinned.

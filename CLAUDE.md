@@ -31,7 +31,7 @@ than the thing the consumer uses.
 **T0–T8 DONE (published through v0.9.0); T9's eighteen passes landed 2026-08-14; 🆕 T13 — the
 CONFORMANCE CLEAR-OUT (`1.0.0`) — IS IN PROGRESS, day 4 landed 2026-09-19 (track A done as the custom-annotations feature; the shipped cdylib −62% after `rlib` was found defeating LTO; the import type-use check #4 closed; TRACK P custom-page-sizes done — `PAGE_SIZE` deleted, byte-granular bounds cross-checked on wasmtime; 🎯 **TRACK D (D1–D4) done — the corpus is at ZERO failed / ZERO skipped / ZERO unrun**), all unreleased.**
 wasmrt assembles, decodes, validates, runs, does WASI preview 1 with a sandboxed filesystem, and is
-**embeddable from C** via `wasmrt.h`. Spec suite **64,598 passed** over **288** files (per-file feature sets, `wast::features_for_script`) — ⚠️⚠️ **the FAILURE count is in flux: wasmtk is reverting the `proposals/threads/` patch and re-evaluating, so it read 0 this morning and 5 that evening, and a full revert is 11. PASSES NEVER MOVED (64,598 both times) — the engine did not regress; those are era-pinned corpus assertions returning. Do not quote a failure count, and do not re-run against the wasmtk tree, until they finish** (`cmem/testing.md`, at the head of the day-4 entries), **572 workspace tests**, clippy clean, C-ABI gate PASSED, `.wat` corpus **531/535** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 32/32 PASSED (day 4, 2026-09-19)** — re-count it every run; it was 28 on record while the crate had 31.
+**embeddable from C** via `wasmrt.h`. Spec suite **64,598 passed** over **288** files (per-file feature sets, `wast::features_for_script`) — ⚠️⚠️ **the FAILURE count is in flux: wasmtk is reverting the `proposals/threads/` patch and re-evaluating, so it read 0 this morning and 5 that evening, and a full revert is 11. PASSES NEVER MOVED (64,598 both times) — the engine did not regress; those are era-pinned corpus assertions returning. Do not quote a failure count, and do not re-run against the wasmtk tree, until they finish** (`cmem/testing.md`, at the head of the day-4 entries), **580 workspace tests**, clippy clean, C-ABI gate PASSED, `.wat` corpus **531/535** ⚠️ *(the gate keyed on an exit status that is always 0; two pre-existing failures were invisible — all four are corpus defects wasmtime also refuses)*, no file lost a TRUE pass in any pass (day 4 removed one false one — `cmem/roadmap.md`, DAY 4). ✅ **Miri 32/32 PASSED (day 4, 2026-09-19)** — re-count it every run; it was 28 on record while the crate had 31.
 🎯 **DAY 3 CLOSED X1, X2, X3/T10b, THE WHOLE M/A TRACK AND TRACK W.** `wide-arithmetic.wast`
 **0/1/108 → 107/0/0**; custom-page-sizes **34 failures → 0**; and **`proposals/threads/` is at
 497 / 0 / 0** after the owner-directed vendored patch. **custom-descriptors is now 65/451 — 98% of
@@ -83,6 +83,12 @@ ceilings, the verification flags, `--`, both `--dir` separators. 🔒 **The pin 
 decision: shared `/etc/wasmtk/pins` with a warning rather than a silent disarm.** ⚠️ **New finding —
 `.wat` pin digests are NOT portable** (529 of 535 differ: we emit a `name` section, wazmrt does not);
 `.wasm` digests agree. Handed over as **Z4**.
+🔒 **THE WASI SUBSYSTEM REVIEW FOUND TEN, ONE A SANDBOX ESCAPE (2026-09-19)** — `path_open` with
+`dirflags = 0` left the final component unresolved and then let the OS follow it, so a symlink inside
+a preopen reached anywhere on the host; `Walk::final_is_symlink` existed for exactly this and was
+read by nothing but a test (§4.1b). Also three guest-controlled numbers that sized an allocation
+(34 GiB / two billion fd slots / 4 GiB of CSPRNG) and six wrong answers reported as success. All
+fixed and pinned (`cli_wasi_hardening.rs`); table in `cmem/known-issues.md` (top).
 🔎 **A REVIEW OF THE DAY'S OWN WORK FOUND SIX ISSUES, FIVE OF THEM SILENT (2026-09-19)** — `wasmrt wasi`
 **wiped the guest's environment** (97 vars → 0), an **unreadable** pin DB counted as no DB (fail-OPEN),
 `--verify enforce` was **accepted and dropped** in two spellings, `--` did not force guest argv, and the
@@ -360,11 +366,25 @@ to a contract surface, not after** — any CLI option, any security check (pin, 
 the two stop being swappable, and it will not announce itself. The full procedure is the binding trigger
 in [`cmem/INDEX.md`](cmem/INDEX.md).
 
+## 🔒 PROVE, DO NOT ASSUME (owner, 2026-09-19)
+
+> *"do not guess or assume, prove or validate before acting."*
+
+**Binding on every claim that leaves the session** — a report, a commit message, a `cmem/` entry, a
+contract row, **or a test's expected value**. Not measured? Run it. Cannot be run here? Say so, and
+say which. Written after three misses in one day: a stale training fact defended with evidence about
+the wrong thing (Bun's language — `process.versions` names the TOOLCHAIN), a guessed errno that went
+straight into a test, and a wall-clock proxy that measured the machine rather than the code. Detail
+and the three shapes to watch: `cmem/design-decisions.md`, "PROVE, DO NOT ASSUME".
+
 ## 🔒 Tooling rules (owner, 2026-09-19)
 
-**Scripts are TypeScript, run by Deno or Bun** — `deno run -A scripts/x.ts` / `bun scripts/x.ts`,
-importing `node:` builtins only so one file runs under either. That covers `scripts/` *and* ad-hoc
-scripting in a session. The four gates were ported the same day and each was verified to still FAIL
+**Scripts are TypeScript, run by Deno or Bun — NO bash, NO PYTHON** (owner, restated 2026-09-19:
+*"python scripts not allowed either, only deno or bun"*). `deno run -A scripts/x.ts` / `bun
+scripts/x.ts`, importing `node:` builtins only so one file runs under either. ⚠️ **This covers the
+throwaway edit scripts a session writes, which is the half that gets skipped** — and the half where
+a `python -c` string executed backticks and silently applied nothing. Prefer the `Edit` tool for
+source; otherwise write a `.ts` and run it. The four gates were ported the same day and each was verified to still FAIL
 when it should. **⛔ And no heredocs**: write the script to a file and run the file. A heredoc's
 quoting has silently mangled non-ASCII, executed backticks it should have quoted, and made an edit
 apply nothing while reporting success — the silent-wrong class. Detail and the evidence:

@@ -313,7 +313,7 @@ pub fn walk(root: &Path, guest_path: &[u8], follow_final: bool) -> Result<Walk, 
             }
             budget -= 1;
             let target = std::fs::read_link(&probe).map_err(|e| errno_for(&e))?;
-            let mut t = os_to_bytes(target.as_os_str());
+            let mut t = os_to_bytes(target.as_os_str())?;
             if is_absolute_target(&t) {
                 // Absolute means the **preopen** root. Drop everything back to the bottom
                 // and strip the whole absolute prefix — a drive qualifier, then any leading
@@ -388,8 +388,16 @@ fn bytes_to_os(b: &[u8]) -> Result<OsString, i32> {
         .map_err(|_| errno::INVAL)
 }
 
-fn os_to_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
-    s.to_string_lossy().as_bytes().to_vec()
+/// The inverse of [`bytes_to_os`], and it refuses for the same reason.
+///
+/// ⚠️ This was `to_string_lossy`, which replaces anything unrepresentable with `U+FFFD`. A
+/// symlink target that is not valid UTF-8 then named a **different path** — `walk` would resolve
+/// the replacement text — and `path_readlink` / `fd_readdir` handed the guest a name it could not
+/// reopen. Lossy is exactly what `bytes_to_os` next door refuses to be.
+fn os_to_bytes(s: &std::ffi::OsStr) -> Result<Vec<u8>, i32> {
+    s.to_str()
+        .map(|t| t.as_bytes().to_vec())
+        .ok_or(errno::INVAL)
 }
 
 /// Map a host I/O error to a preview-1 errno.
@@ -494,6 +502,12 @@ impl FdEntry {
 
 /// The guest's fd table. Slot index *is* the guest fd, so 0/1/2 are stdio; a closed fd
 /// leaves a `None` hole that the next open reuses (lowest first, as POSIX promises).
+/// The highest file descriptor a guest may name. The fd table is a dense `Vec`, so the NUMBER a
+/// guest passes decides how much is allocated — `fd_renumber(3, 2147483646)` asked for two billion
+/// slots and killed the host. 64Ki is far above what any guest can actually open (each open fd
+/// holds a real OS handle) and bounds the table at a few MiB.
+const MAX_FD: usize = 1 << 16;
+
 #[derive(Default)]
 pub struct FdTable {
     slots: Vec<Option<FdEntry>>,
@@ -550,12 +564,40 @@ impl FdTable {
         }
     }
 
+    /// Apply `fd_fdstat_set_flags` to an open file.
+    ///
+    /// ⚠️ **`APPEND` is the one that MATTERS here**, and it used to be answered with a bare
+    /// SUCCESS alongside the advisory no-ops: a guest that opened a file, set `O_APPEND` and then
+    /// wrote **overwrote from offset 0** — and was told the call had worked. The sync flags really
+    /// are no-ops (nothing is buffered on our side); `NONBLOCK` is not applicable to a regular
+    /// file, and reporting success for it matches what a POSIX host does.
+    pub fn set_flags(&mut self, fd: i32, flags: u16) -> bool {
+        match self.get_mut(fd) {
+            Some(FdEntry::File(f)) => {
+                f.append = flags & fdflags::APPEND != 0;
+                true
+            }
+            // A directory or a stdio stream: nothing to set, and nothing was promised.
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// Move `from` onto `to`, closing whatever `to` was — `fd_renumber`.
+    ///
+    /// The target is bounded by [`MAX_FD`]: the number comes from the guest.
     pub fn renumber(&mut self, from: i32, to: i32) -> bool {
         let (Ok(f), Ok(t)) = (usize::try_from(from), usize::try_from(to)) else {
             return false;
         };
         if f >= self.slots.len() || self.slots[f].is_none() {
+            return false;
+        }
+        // ⚠️ A ceiling, because `t` is the guest's number: `fd_renumber(3, 2147483646)` asked for
+        // a table of two billion slots and killed the host before any other check ran. A guest
+        // cannot hold more fds than it can open, so anything past the ceiling is a bad fd, not a
+        // reason to allocate.
+        if t > MAX_FD {
             return false;
         }
         if t >= self.slots.len() {
@@ -930,6 +972,12 @@ pub fn fd_read_file(
     let mut failed = None;
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
     for (ptr, len) in vecs {
+        // ⚠️ An EMPTY iovec is not end-of-file. `read` into a zero-length buffer returns `Ok(0)`,
+        // which this loop read as EOF and stopped — so `fd_read` reported 0 bytes on a perfectly
+        // readable file whenever the guest's first iovec happened to be empty. Skip it instead.
+        if len == 0 {
+            continue;
+        }
         let mut buf = alloc::vec![0u8; len as usize];
         match f.file.read(&mut buf) {
             Ok(0) => break,
@@ -1144,6 +1192,25 @@ pub fn path_open(
         Ok(w) => w,
         Err(e) => return ret(results, e),
     };
+    // 🔒🔒 **THE FINAL COMPONENT IS A SYMLINK AND THE GUEST DID NOT ASK TO FOLLOW ONE.**
+    //
+    // `walk` deliberately leaves the last component unresolved when `follow_final` is false —
+    // that is what `path_unlink_file` and `path_readlink` need, since they act on the LINK. But
+    // `path_open` hands the path to the operating system, **and the OS follows it anyway**. The
+    // containment check cannot see that: `verify_beneath` is given the CONTAINING directory, so a
+    // link inside a preopen pointing anywhere on the host opened its target — a sandbox escape,
+    // reachable with `dirflags = 0`.
+    //
+    // ⚠️ `Walk::final_is_symlink` existed for exactly this and **was read by nothing but a test**:
+    // the guard was computed, documented and never consulted (`best-practices.md` §4.1 — a gate
+    // that cannot fail is decoration; this one could not even run).
+    //
+    // `LOOP` is the errno `O_NOFOLLOW` reports, and it is what the guest asked for by leaving
+    // `LOOKUP_SYMLINK_FOLLOW` clear. With the flag SET, `walk` resolves the chain itself, inside
+    // the sandbox, and `verify_beneath` then covers the result.
+    if !follow && w.final_is_symlink {
+        return ret(results, err::LOOP);
+    }
     // A new fd may never hold more than the directory was willing to pass down. This is
     // what makes a read-only preopen propagate to its whole subtree.
     let Some(FdEntry::Dir(d)) = table.get(dirfd) else {
@@ -1204,6 +1271,26 @@ pub fn path_open(
     }
 
     let writable = base & (rights::FD_WRITE | rights::FD_ALLOCATE) != 0;
+    // ⚠️ `O_TRUNC` without write access was silently DROPPED — the open returned SUCCESS and the
+    // file kept its contents, so a guest that truncated before writing quietly appended to old
+    // data instead. POSIX leaves `O_RDONLY | O_TRUNC` unspecified, so refusing is allowed and
+    // silently ignoring is not (§4.7: prefer a hard error over silent-wrong).
+    if trunc && !writable {
+        return ret(results, err::INVAL);
+    }
+    // `O_CREAT` without write access is meaningful in POSIX (and wasmtime creates the file), but
+    // Rust's `OpenOptions` refuses `create` without `write`. Create it first, then open it as the
+    // guest asked — the rights check above has already established it may.
+    if creat && !writable && existing.is_none() {
+        if let Err(e) = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&host)
+        {
+            return ret(results, errno_for(&e));
+        }
+    }
     let mut opts = std::fs::OpenOptions::new();
     opts.read(base & rights::FD_READ != 0 || !writable)
         .write(writable)
@@ -1350,7 +1437,10 @@ pub fn path_readlink(
     };
     match std::fs::read_link(w.path()) {
         Ok(t) => {
-            let bytes = os_to_bytes(t.as_os_str());
+            let bytes = match os_to_bytes(t.as_os_str()) {
+                Ok(b) => b,
+                Err(e) => return ret(results, e),
+            };
             let n = bytes.len().min(buf_len as usize);
             let Some(dst) = c.write(MEM, u64::from(buf), n) else {
                 return ret(results, err::FAULT);
@@ -1709,6 +1799,82 @@ mod tests {
         let w = walk(&s.0, b"link", false).expect("unfollowed");
         assert!(w.final_is_symlink);
         assert_eq!(w.path(), s.join("link"));
+    }
+
+    /// 🔒🔒 **THE ESCAPE.** A link inside the preopen, pointing outside it, opened with
+    /// `dirflags = 0` — the guest explicitly NOT asking to follow symlinks. `walk` leaves the final
+    /// component unresolved (which `unlink`/`readlink` need), `verify_beneath` only covers the
+    /// CONTAINING directory, and `path_open` then handed the path to the OS, which followed it.
+    ///
+    /// The fix is `path_open` consulting `final_is_symlink` — a field that existed, was documented,
+    /// and was read by nothing but a test.
+    #[test]
+    fn an_unfollowed_final_symlink_is_refused_rather_than_opened_by_the_os() {
+        let s = Scratch::new("nofollow");
+        let outside = s.0.parent().unwrap().join("nofollow_outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"SECRET").unwrap();
+        if !symlink(&outside.join("secret.txt"), &s.join("link"), false) {
+            skip("an_unfollowed_final_symlink_is_refused_rather_than_opened_by_the_os");
+            return;
+        }
+        // The walk itself still resolves nothing — that is what unlink and readlink rely on …
+        let w = walk(&s.0, b"link", false).expect("the link itself is nameable");
+        assert!(w.final_is_symlink, "the guard must be set for path_open to see it");
+
+        // … and the escape is that this path, handed to the OS, reads the file outside. The fix
+        // lives in `path_open`; here we pin the FACT that makes it necessary, so the next reader
+        // cannot mistake `final_is_symlink` for decoration.
+        assert_eq!(
+            std::fs::read(w.path()).unwrap(),
+            b"SECRET",
+            "the OS follows it — which is exactly why path_open must refuse first"
+        );
+        // With FOLLOW asked for, the walk resolves the link ITSELF and the escape is gone: an
+        // ABSOLUTE target is reinterpreted as relative to the preopen root (the documented rule),
+        // so it names something inside the sandbox — here, nothing at all.
+        assert_eq!(
+            walk(&s.0, b"link", true).err(),
+            Some(errno::NOENT),
+            "an absolute target is re-rooted at the preopen, never followed off it"
+        );
+    }
+
+    /// ⚠️ `fd_renumber`'s target is a GUEST number and the table is a dense `Vec`:
+    /// `fd_renumber(3, 2147483646)` asked for two billion slots and killed the host.
+    #[test]
+    fn renumbering_to_an_absurd_fd_is_refused_rather_than_allocated() {
+        let mut t = FdTable::default();
+        let fd = t.insert(FdEntry::Dir(DirFd {
+            host: std::path::PathBuf::from("."),
+            preopen_name: None,
+            rights_base: rights::ALL,
+            rights_inheriting: rights::ALL,
+        }));
+        assert!(!t.renumber(fd, i32::MAX - 1), "past the ceiling is a bad fd, not an allocation");
+        assert!(!t.renumber(fd, (MAX_FD + 1) as i32));
+        assert!(t.renumber(fd, 9), "an ordinary renumber still works");
+        assert!(t.get(9).is_some());
+    }
+
+    /// ⚠️ A symlink target that is not valid UTF-8 must be REFUSED, not lossily converted: the
+    /// replacement character names a different path, and `walk` would resolve that one.
+    #[test]
+    fn a_target_that_is_not_utf8_is_refused_rather_than_silently_renamed() {
+        assert_eq!(os_to_bytes(std::ffi::OsStr::new("plain/path")), Ok(b"plain/path".to_vec()));
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            // A lone high surrogate: representable in a Windows path, not in UTF-8.
+            let bad = std::ffi::OsString::from_wide(&[0xD800, 0x0041]);
+            assert_eq!(os_to_bytes(&bad), Err(errno::INVAL));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let bad = std::ffi::OsStr::from_bytes(b"\xff\xfe");
+            assert_eq!(os_to_bytes(bad), Err(errno::INVAL));
+        }
     }
 
     #[test]

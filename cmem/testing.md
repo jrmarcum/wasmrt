@@ -109,6 +109,20 @@ netting them against the unchanged pass total.
 A conformance headline is a joint statement about an engine and a corpus, so it is only quotable
 when BOTH have stopped moving. That is also why `1.0.0` is on hold (HANDOFF item 8).
 
+### 🔒 2026-09-19 — day 4, part 13: the WASI hardening tests (**580 tests**)
+
+`crates/wasmrt/tests/cli_wasi_hardening.rs` (5, guest-driven through the real CLI): the unfollowed
+symlink must report `LOOP` rather than the target's contents; an absurd `iovs_len`, `fd_renumber`
+target and `random_get` length must fault or refuse **without aborting the host**; and `O_APPEND` set
+after open must actually append. Plus unit tests in `wasi/fs.rs` for the fd ceiling, the non-UTF-8
+target refusal, and the escape's precondition.
+
+⚠️ **The escape test needs a real FILE symlink** (Developer Mode on Windows) and skips loudly
+without one. 🔻 **A directory JUNCTION is not a substitute** — wasmrt refuses those at the walk, so a
+probe built on one reports a false all-clear; that mistake cost an hour before the real case was
+staged. 🎓 §5.4f: the first version of the `random_get` test asserted wall-clock time and failed in
+the parallel harness while passing alone.
+
 ### 🔎 2026-09-19 — day 4, part 12: the review regressions (**572 tests**)
 
 `crates/wasmrt/tests/cli_review_regressions.rs` (4) pins what a code review of the day's own work

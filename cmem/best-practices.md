@@ -948,6 +948,22 @@ EFFECT (a refusal, a changed exit status, a different argv), never that the flag
 🎓 The day's own tests passed throughout, because each exercised the one spelling its feature was
 built with.
 
+### 4.1b A guard that is COMPUTED and never CONSULTED is not a guard
+
+`Walk::final_is_symlink` was set on every walk, carried in the struct, documented in the type — and
+read by **nothing but a test**. `path_open` then handed the unresolved path to the OS, which follows
+a final symlink whatever the guest asked for, and a link inside a preopen pointing anywhere on the
+host opened its target. A **sandbox escape**, sitting behind a field written specifically to prevent
+it (2026-09-19; `known-issues.md`).
+
+It is §4.1 one step earlier: a gate that cannot fail is decoration, and this one could not even run.
+The field read as a guard to every reviewer — including the one who wrote the code — because the
+name and the doc comment described the check, and only the call graph says whether it happens.
+
+**Apply:** a computed safety value must have a consumer in the same commit, and the cheap way to
+check is to grep the field name and look at what is NOT a test. `cargo`'s dead-code warning does not
+fire on a `pub` field of a `pub` struct, so the compiler will not tell you.
+
 ### 4.9 One ceiling covering TWO paths needs a check on each — one passing test hides the other's absence
 
 The iteration budget (T9i) bounds non-termination. A guest can run forever two ways, and they share
@@ -1059,6 +1075,18 @@ different modes wire different things (imports, memory, a start function), and a
 one can be uninstantiable in the other. A test that fails on correct code is cheap to spot; the
 same mistake in the other direction — a fixture that can only take one path, asserted as if it took
 both — passes forever.
+
+### 5.4f A wall-clock assertion in a parallel test runner measures the MACHINE
+
+The fix for "`random_get` allocates and fills 4 GiB before bounds-checking the destination" was
+pinned with `assert!(elapsed < 10s)` as a proxy for "it did not do the work". It **passed alone and
+failed in the suite**: five guest-spawning tests run concurrently, so the clock was reading the
+machine's load. Measured directly afterwards, the probe answers FAULT in **0.111s**.
+
+**Apply:** assert the PROPERTY, not a timing proxy for it. When only a proxy exists, measure the
+real number once, record it in the comment, and leave the behavioural assertion (here: the errno) as
+the test — a flaky gate gets disabled, and then it guards nothing. See also §1.6: benchmarks belong
+in a same-session A/B/A, never in an assertion.
 
 ### 5.5 Skips are never folded into passes
 

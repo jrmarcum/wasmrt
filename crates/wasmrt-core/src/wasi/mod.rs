@@ -79,16 +79,22 @@ enum Sink {
 }
 
 impl Sink {
-    fn write(&mut self, fd: i32, bytes: &[u8]) {
+    /// ⚠️ The result is RETURNED, not discarded. This swallowed the error and `fd_write` still
+    /// reported the full length as written, so a closed pipe (`wasmrt … | head -1`) or a full disk
+    /// looked like success to the guest — which is how a program ends up believing it flushed.
+    fn write(&mut self, fd: i32, bytes: &[u8]) -> std::io::Result<()> {
         match self {
-            Sink::Capture(buf) => buf.extend_from_slice(bytes),
+            Sink::Capture(buf) => {
+                buf.extend_from_slice(bytes);
+                Ok(())
+            }
             Sink::Inherit => {
                 use std::io::Write;
-                let _ = if fd == FD_STDERR {
+                if fd == FD_STDERR {
                     std::io::stderr().write_all(bytes)
                 } else {
                     std::io::stdout().write_all(bytes)
-                };
+                }
             }
         }
     }
@@ -292,7 +298,16 @@ fn write_u64(c: &mut Caller<'_>, addr: u32, v: u64) -> Option<()> {
 }
 
 /// Read an `iovec` array: `count` pairs of (pointer, length).
+///
+/// ⚠️ **`count` is the guest's number, so it sizes nothing until it has been checked.** This was
+/// `Vec::with_capacity(count as usize)`, and `fd_write(1, 0, 0xFFFF_FFFF, 8)` asked for ~34 GiB and
+/// aborted the host before a single bounds check ran — a one-line denial of service from inside the
+/// sandbox, under `panic = "abort"`. The array itself must fit in guest memory, which is the real
+/// bound and needs no arbitrary ceiling: 8 bytes per entry, and the whole range readable.
 fn read_iovecs(c: &Caller<'_>, ptr: u32, count: u32) -> Option<Vec<(u32, u32)>> {
+    let bytes = u64::from(count).checked_mul(8)?;
+    // Reading the whole array first also answers FAULT before anything is allocated.
+    c.read(MEM, u64::from(ptr), usize::try_from(bytes).ok()?)?;
     let mut out = Vec::with_capacity(count as usize);
     for i in 0..count {
         let base = ptr.checked_add(i.checked_mul(8)?)?;
@@ -351,7 +366,16 @@ fn fd_write(
         } else {
             &mut ctx.stdout
         };
-        sink.write(fd, &chunk);
+        // A failed write is reported, not counted. Whatever went out before it still did, so the
+        // count returned with the error is the truth — that is what lets a guest retry the rest.
+        if let Err(e) = sink.write(fd, &chunk) {
+            let code = crate::wasi::fs::errno_for(&e);
+            drop(ctx);
+            if write_u32(c, nwritten, total).is_none() {
+                return errno(results, ERRNO_FAULT);
+            }
+            return errno(results, code);
+        }
         total = total.saturating_add(len);
     }
     if write_u32(c, nwritten, total).is_none() {
@@ -380,11 +404,15 @@ fn fd_read(
     };
     let mut total: u32 = 0;
     for (ptr, len) in vecs {
+        // An EMPTY iovec is not end-of-file — skip it rather than reporting EOF on a stream that
+        // still has bytes (the same defect as the file path in `fs.rs`).
+        if len == 0 {
+            continue;
+        }
         let chunk = {
-            let mut ctx = ctx.borrow_mut();
+            let ctx = ctx.borrow();
             let start = ctx.stdin_pos.min(ctx.stdin.len());
             let take = (len as usize).min(ctx.stdin.len() - start);
-            ctx.stdin_pos = start + take;
             ctx.stdin[start..start + take].to_vec()
         };
         if chunk.is_empty() {
@@ -394,6 +422,10 @@ fn fd_read(
             return errno(results, ERRNO_FAULT);
         };
         dst.copy_from_slice(&chunk);
+        // ⚠️ CONSUMED ONLY ONCE THE BYTES ARE SAFELY IN GUEST MEMORY. The position used to move
+        // before the write, so a FAULT ate the bytes permanently: the guest retried with a good
+        // pointer and got the NEXT chunk, silently losing what it never received.
+        ctx.borrow_mut().stdin_pos += chunk.len();
         total = total.saturating_add(chunk.len() as u32);
     }
     if write_u32(c, nread, total).is_none() {
@@ -588,9 +620,19 @@ fn dispatch(
         "path_symlink" => fs::path_symlink(&ctx.borrow().fds, c, args, results),
         "path_rename" => fs::path_rename_or_link(&ctx.borrow().fds, c, args, results, false),
         "path_link" => fs::path_rename_or_link(&ctx.borrow().fds, c, args, results, true),
+        // ⚠️ `fd_fdstat_set_flags` was in this list, so `fcntl(F_SETFL, O_APPEND)` returned
+        // SUCCESS and set nothing: the next write went to offset 0 over the file's contents.
+        "fd_fdstat_set_flags" => {
+            let (fd, flags) = (arg(args, 0), arg(args, 1) as u16);
+            if ctx.borrow_mut().fds.set_flags(fd, flags) {
+                errno(results, ERRNO_SUCCESS)
+            } else {
+                errno(results, ERRNO_BADF)
+            }
+        }
         // Advisory or already-durable: nothing to do, and reporting success is honest
         // because there is no writeback cache of our own to flush.
-        "fd_fdstat_set_flags" | "sched_yield" | "fd_advise" | "fd_sync" | "fd_datasync" => {
+        "sched_yield" | "fd_advise" | "fd_sync" | "fd_datasync" => {
             errno(results, ERRNO_SUCCESS)
         }
         // Deliberately NOSYS rather than a silent success: a guest that needs a real
@@ -630,7 +672,14 @@ fn dispatch(
         }
         "random_get" => {
             let (buf, len) = (arg(args, 0) as u32, arg(args, 1) as u32);
-            let mut bytes = vec![0u8; len as usize];
+            // ⚠️ The destination is checked BEFORE the work. This allocated `len` bytes and ran
+            // ChaCha20 over them first, so `random_get(0, 0xFFFF_FFFF)` from a one-page guest cost
+            // 4 GiB and seconds of keystream to then answer FAULT. Nothing the guest cannot
+            // receive is ever generated.
+            let mut bytes = match c.write(MEM, u64::from(buf), len as usize) {
+                Some(_) => vec![0u8; len as usize],
+                None => return errno(results, ERRNO_FAULT),
+            };
             ctx.borrow_mut().rng.fill(&mut bytes);
             let Some(dst) = c.write(MEM, u64::from(buf), bytes.len()) else {
                 return errno(results, ERRNO_FAULT);

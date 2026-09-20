@@ -1,5 +1,61 @@
 # Known Issues
 
+## ✅ CLOSED 2026-09-19 — a WASI SUBSYSTEM REVIEW found TEN, including a SANDBOX ESCAPE
+
+`wasi/fs.rs` + `wasi/mod.rs` read end to end (~2,800 lines) while waiting on wasmtk. This code had
+never had a dedicated review; it is the surface T12 exists for.
+
+### 🔴 1. The escape: an unfollowed final symlink was opened by the OS anyway
+
+`path_open` with `dirflags = 0` — the guest saying *do not follow symlinks* — resolved every
+component but the last (which is what `unlink`/`readlink` need), checked containment on the
+**containing directory**, and then handed the path to `OpenOptions::open`. **The OS follows the final
+link.** A symlink inside a preopen pointing anywhere on the host was readable and writable.
+
+⚠️ **`Walk::final_is_symlink` existed for exactly this and was read by nothing but a test** —
+computed, documented, never consulted (`best-practices.md` §4.1b). `path_open` now returns `LOOP`,
+the errno `O_NOFOLLOW` reports. With FOLLOW *set*, `walk` resolves the chain itself inside the
+sandbox and an absolute target is re-rooted at the preopen, so that path was never the hole.
+
+🔬 **Proven both ways on this host**: a guest probe reading the link's target got `TOP SECRET`
+before the fix and `LOOP` after (`crates/wasmrt/tests/cli_wasi_hardening.rs`). ⚠️ A directory
+*junction* is NOT a substitute for the test — wasmrt refuses those at the walk, so an early probe
+using one reported a false all-clear. The test needs a real file symlink, which needs Developer Mode.
+
+### 🟠 2–4. Three guest-controlled numbers sized an allocation
+
+Under `panic = "abort"` each is a one-line denial of service from inside the sandbox:
+
+| call | what the guest asked for |
+| --- | --- |
+| `fd_write(1, 0, 0xFFFF_FFFF, 8)` | `Vec::with_capacity` of ~34 GiB, before any bounds check |
+| `fd_renumber(3, 2147483646)` | a dense fd table of two billion slots |
+| `random_get(0, 0xFFFF_FFFF)` | 4 GiB allocated **and CSPRNG-filled** before the destination was checked |
+
+Fixed by checking first: the iovec array must fit in guest memory (8 bytes each), the fd table is
+bounded by `MAX_FD` (64Ki — far above what a guest can hold open), and `random_get` bounds-checks the
+destination before generating a byte.
+
+### 🟡 5–10. Six wrong answers, each reported as success
+
+* **`fd_fdstat_set_flags` set nothing** — it sat among the advisory no-ops, so `fcntl(F_SETFL,
+  O_APPEND)` returned SUCCESS and the next write **overwrote from offset 0**.
+* **`O_TRUNC` without write access was silently dropped** (SUCCESS, file unchanged); now `INVAL`.
+  **`O_CREAT` without write access** returned `NOENT` where wasmtime creates the file; now created.
+* **A zero-length iovec ended the read** — `Ok(0)` read as EOF, so `fd_read` reported 0 bytes on a
+  readable file whenever the first iovec was empty. Same shape on the stdin path.
+* **A failed `fd_write` to stdout/stderr reported full success** — the `write_all` error was dropped,
+  so a closed pipe or a full disk looked like a completed write.
+* **A non-UTF-8 symlink target was converted lossily**, so `walk` resolved a *different* path and
+  `path_readlink`/`fd_readdir` handed back names the guest could not reopen; now refused, as
+  `bytes_to_os` next door already did.
+* **stdin consumed bytes before writing them to guest memory** — a FAULT ate them permanently, so a
+  retry with a good pointer silently skipped data.
+
+**Pinned by** `cli_wasi_hardening.rs` (5 guest-driven cases) plus unit tests for the fd ceiling, the
+non-UTF-8 refusal and the escape's own precondition. 580 tests, clippy clean, C-ABI PASSED, Miri
+32/32.
+
 ## ✅ CLOSED 2026-09-19 — a CODE REVIEW of the day's own work found SIX, and five were silent
 
 Run while waiting on wasmtk, over `6ea081d43..HEAD` (D3/D4, the value-type decoder, the pin gate,

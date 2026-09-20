@@ -288,6 +288,36 @@ reached them. ✅ **The owner relayed the narrowing the same day and wazmrt is a
 (§1d: reconcile against code that has stopped moving). Our copy stays at v10 + unnumbered owner decisions
 until then; the mismatch is a normal in-flight state, not an error.
 
+##### 🔒 DAY 4, part 13 — the WASI subsystem review: TEN findings, one a SANDBOX ESCAPE. `[x]`
+
+`wasi/fs.rs` + `wasi/mod.rs` read end to end while waiting on wasmtk — code that had never had a
+dedicated review, and the surface T12 exists for. Full table in `known-issues.md` (top).
+
+🔴 **The escape:** `path_open` with `dirflags = 0` left the final component unresolved (correct —
+`unlink`/`readlink` need that), checked containment on the CONTAINING directory, then handed the path
+to the OS, **which follows the final link**. A symlink inside a preopen pointing anywhere on the host
+was readable and writable. ⚠️ `Walk::final_is_symlink` existed for exactly this and **was read by
+nothing but a test** (§4.1b). Now `LOOP`, and proven both ways by a guest probe: `TOP SECRET` before,
+`LOOP` after.
+
+🟠 **Three guest numbers sized an allocation** (34 GiB iovec array, a two-billion-slot fd table, 4 GiB
+of CSPRNG output) — each an abort under `panic = "abort"`. 🟡 **Six wrong answers reported as
+success**, including `fcntl(F_SETFL, O_APPEND)` setting nothing and then overwriting from offset 0.
+
+**580 tests** (+8), clippy clean, C-ABI PASSED, Miri 32/32, wasm32 builds, our own 13-file suite
+199/0/0. ⚠️ The spec suite was **not** re-run: wasmtk is mid-revert and that corpus is theirs.
+
+🎓 Two lessons: **§4.1b a guard computed and never consulted is not a guard** (the compiler will not
+tell you — a `pub` field of a `pub` struct raises no dead-code warning), and **§5.4f a wall-clock
+assertion in a parallel runner measures the machine** — that one failed in the suite and passed
+alone, and the real number (0.111s) had to be measured directly.
+
+⚠️ **Two owner rules landed during this pass**, both after I broke them: **PROVE, DO NOT ASSUME**
+(three misses in a day — a stale training fact, a guessed errno inside a test, a timing proxy), and
+**no Python either — only Deno or Bun**, which I had been violating in every ad-hoc edit script while
+honouring it in `scripts/`. The session's helper is now `edit.ts`: anchored replacements that must
+match exactly once, with the text carried in JSON so no shell quoting touches it.
+
 ##### 🔎 DAY 4, part 12 — a REVIEW of the day's own work: six findings, five silent. `[x]`
 
 Run while waiting on wasmtk, over `6ea081d43..HEAD`. **Five were written that day**, and every one
