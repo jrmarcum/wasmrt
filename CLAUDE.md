@@ -411,6 +411,17 @@ quoting has silently mangled non-ASCII, executed backticks it should have quoted
 apply nothing while reporting success — the silent-wrong class. Detail and the evidence:
 `cmem/design-decisions.md`, "TOOLING RULES".
 
+🔒 **LINE ENDINGS ARE LF, EVERYWHERE (2026-09-20).** `.gitattributes` says `* text=auto eol=lf`, which
+overrides `core.autocrlf` on every machine, and `scripts/eol-gate.ts` fails if any tracked text file
+holds a CR (`--fix` rewrites them). **Write LF and match on `\n`; a script no longer needs a CRLF
+branch.** ⚠️ This replaces the old "endings are not uniform, so every pattern must handle both"
+(`best-practices.md` §8.1b) — which was measured and true: the index held **LF for all 111 text
+files** while the working tree held 12 CRLF and 99 LF, and which bucket a file was in depended only
+on whether git had last checked it out. Same file, different endings on different days, with nothing
+in the repo saying so — and the cost was **six mutation tests that silently applied nothing**, which
+reads exactly like a gate catching nothing. Normalizing changed **no content git records** (`git
+diff --numstat` was empty for all twelve).
+
 ## "Update the project memory" = update `cmem/`
 
 When asked to record/remember anything for the project, fold it into the matching `cmem/` file(s) and

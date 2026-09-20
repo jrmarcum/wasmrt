@@ -1,0 +1,26 @@
+# 🔒 LINE ENDINGS ARE LF, EVERYWHERE, ON EVERY MACHINE.
+#
+# Measured 2026-09-20 before this file existed: all 111 tracked text blobs were ALREADY LF in the
+# index, while the WORKING TREE held 12 CRLF files and 99 LF ones — and which bucket a file was in
+# depended only on whether git had last checked it out (`core.autocrlf=true` in this host's SYSTEM
+# gitconfig converts on checkout; a file written locally stays LF until git touches it). So the same
+# file could be CRLF today and LF tomorrow, with nothing in the repo saying so.
+#
+# That instability is not cosmetic. It silently broke real work: a scripted edit whose pattern
+# contains `\n` matches nothing in a CRLF file, the edit reports success, the build passes — and a
+# MUTATION test that never applied reads exactly like a gate that caught nothing
+# (`cmem/best-practices.md` §8.1b, and six no-op mutations on 2026-09-20).
+#
+# `eol=lf` overrides `core.autocrlf`, so no per-developer git config is needed and none is assumed.
+# Nothing here requires CRLF: there are no `.bat`/`.cmd`/`.ps1`/`.sln` files, the toolchain is Rust +
+# Deno/Bun, and every gate script is TypeScript. If a Windows-only script is ever added, pin it here
+# explicitly rather than relaxing the rule.
+#
+# The gate is `scripts/eol-gate.ts` — it fails if any tracked text file holds a CR.
+
+* text=auto eol=lf
+
+# Binary, or not text we control — never touched.
+*.wasm binary
+*.png binary
+*.pdb binary

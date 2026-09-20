@@ -941,6 +941,11 @@ and **keep the suite green — diff the OUTPUT (N passed / N failed), not exit c
   commits the port was developed against; **nothing reads it.**
 - `scripts/c-gate.ts` — the C-ABI gate (link-completeness 74/74 + `c_smoke` compiled against the shipped
   header). `scripts/miri-gate.ts` — `wasmrt-capi` under Miri (32/32), incl. a lifecycle fuzz.
+- 🔒 `.gitattributes` + `scripts/eol-gate.ts` — **line endings are LF, everywhere** (2026-09-20).
+  `* text=auto eol=lf` overrides `core.autocrlf`; the gate fails on any CR in a tracked text file,
+  working tree or index (`--fix` rewrites them). Measured first: the index was ALREADY all-LF and the
+  working tree held 12 CRLF files purely because git had checked them out — so scripted backslash-n edits
+  silently matched nothing in those twelve. See `design-decisions.md` TOOLING RULES §3.
 - 🆕 **The three sweeps the validator review added (2026-09-20)**, all differential against an outside
   reader and all proved to FAIL by reverting the defect they found:
   - `scripts/feature-gate-sweep.ts` — every proposal, disabled, against a module that uses it; wasmrt

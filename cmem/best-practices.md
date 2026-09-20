@@ -1701,7 +1701,23 @@ statement filed under the wrong heading.
 
 ---
 
-## §8.1b — **LINE ENDINGS ARE NOT UNIFORM WITHIN THIS REPO** (2026-09-19)
+## §8.1b — ~~**LINE ENDINGS ARE NOT UNIFORM WITHIN THIS REPO**~~ → **SETTLED BY A RULE (2026-09-20)**
+
+🔒 **Superseded as a coping rule, kept as the evidence.** Line endings are now **LF everywhere**:
+`.gitattributes` carries `* text=auto eol=lf` (which overrides `core.autocrlf`) and
+`scripts/eol-gate.ts` fails on any CR in a tracked text file, working tree or index. Scripts match
+on `\n` and write `\n`; the "handle both" branch below is no longer needed and should not be
+re-added. Detail and the measurement: `design-decisions.md`, "TOOLING RULES" §3.
+
+🎓 **Why it was worth a rule rather than more care.** The split was never a decision: the index held
+**LF for all 111 text files**, and the working tree's 12 CRLF files were simply the ones git had
+last checked out on a host whose *system* gitconfig sets `core.autocrlf=true`. So the endings of a
+given file changed with history, not with content — the worst shape for a pattern-matching edit,
+because it is invisible and non-reproducible. ⚠️ **The second half of the old rule survives intact:
+every scripted edit still asserts its own application**, since a no-op edit followed by a passing
+test remains indistinguishable from a real one.
+
+*The original entry, and what it cost:*
 
 Three scripted edits in one session silently matched nothing: `crates/wasmrt-core/src/module.rs` is
 **CRLF** and `crates/wasmrt-core/src/wat.rs` is **LF**, and a pattern containing `\n` matches only

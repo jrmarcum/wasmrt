@@ -78,6 +78,41 @@ run the file. Editing source? Prefer the `Edit` tool, which matches exactly and 
 🎓 The cost of ignoring this is not a broken script — it is a script that reports success while
 doing nothing, which is the silent-wrong class this project ranks worst (`best-practices.md` §3.1).
 
+### 3. 🔒 Line endings are **LF**, everywhere, on every machine (owner, 2026-09-20)
+
+*"if CRLF is what git wants, we need a rule for using it versus LF so this is a non issue"* — and the
+measurement said git does **not** want CRLF here.
+
+**What was actually true**, measured before deciding anything: all **111** tracked text blobs were
+already **LF in the index**, while the working tree held **12 CRLF and 99 LF** files. Nothing in the
+repo chose that split. `core.autocrlf=true` lives in this host's **system** gitconfig (the Git for
+Windows installer writes it), so a file becomes CRLF when *git* checks it out and stays LF when a
+tool writes it — which means **the same file has different endings depending on what touched it
+last**, and no file records which.
+
+**The rule, in three parts:**
+
+1. **`.gitattributes`: `* text=auto eol=lf`.** `eol=lf` overrides `core.autocrlf`, so the working
+   tree is LF on every machine with no per-developer git config, assumed or required.
+2. **`scripts/eol-gate.ts`** fails if any tracked text file holds a CR, in the working tree *or* in
+   the index; `--fix` rewrites them. An attribute is enforced by git at checkout and commit and
+   cannot stop an editor from writing CRLF in between — that gap is exactly where the defect lived.
+3. **Scripts match on `\n` and write `\n`.** No CRLF branch, no `\r?\n` defensiveness, no
+   "normalize first" preamble.
+
+⚠️ **Nothing here needs CRLF**: no `.bat`/`.cmd`/`.ps1`/`.sln`, a Rust + Deno/Bun toolchain, all
+gates in TypeScript. A Windows-only script added later gets an explicit `*.bat text eol=crlf` line
+rather than a relaxation of the rule.
+
+🎓 **The cost this pays off.** Six mutation tests in one session silently applied nothing, because
+their `\n` patterns could not match CRLF files — and a mutation that never applied is
+indistinguishable from a gate that caught nothing (`best-practices.md` §8.1b). The old rule was
+"every scripted edit must handle both endings and assert its own application". The second half still
+stands; the first half is now unnecessary, which removes the branch people forget to write.
+
+✅ **Normalizing cost nothing**: `git diff --numstat` was empty for all twelve rewritten files,
+because the index had been LF all along.
+
 ## 🔒 The oracle is RETIRED — wasmrt stands alone (owner, 2026-08-11)
 
 **wasmrt no longer refers back to the `wazmrt` repo.** Through T9 wazmrt was a frozen oracle and
