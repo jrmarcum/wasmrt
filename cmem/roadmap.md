@@ -195,7 +195,13 @@ refused by both / 0 differ**, shipped cdylib **531,968 B**, everything committed
 the runner manufacturing passes, did track A, fixed the cdylib dead-code leak, closed #4, did track P, patched the
 era-pinned threads snapshot (owner-directed) and **finished TRACK D (D1–D4)**.
 
-⚠️⚠️ **THE CONFORMANCE HEADLINE IS IN FLUX — wasmtk is REVERTING the `proposals/threads/` patch and
+✅ **SETTLED: 64,603 / 0 / 0 over 288 files (2026-09-19, late).** wasmtk finished — the fix went into
+**their runner**, and the vendored patch was narrowed: the 5 × "multiple memories" assertions were
+**restored** because upstream still carries them. Those 5 were then ours to answer, and the answer is
+an ERA rule: `features_for_script` disables multi-memory for `proposals/threads/` only, because a
+proposal snapshot must not be given features that postdate it. Measured at every step — wasmtime
+fails the same directive with multi-memory on, and disabling it suite-wide breaks five core files, so
+the exclusion hides nothing (`testing.md`, top). *(The note this replaces:)* ⚠️⚠️ **THE CONFORMANCE HEADLINE WAS IN FLUX — wasmtk was REVERTING the `proposals/threads/` patch and
 re-evaluating (owner, 2026-09-19 late).** Measured before standing down: passes **unchanged at
 64,598**, failures **0 → 5** (a full revert to their HEAD would be 11 in those two files). The engine
 did not move; those are era-pinned assertions the patch had removed, contradicting core `memory.wast`

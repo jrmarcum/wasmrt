@@ -128,7 +128,29 @@ pub fn features_for_script(path: &str) -> Features {
     let mut f = Features::standard();
     if let Some(rest) = path.split("proposals/").nth(1) {
         match rest.split('/').next().unwrap_or("") {
-            "threads" => f.threads = true,
+            // ⚠️⚠️ **A PROPOSAL SNAPSHOT MUST NOT BE GIVEN FEATURES THAT POSTDATE IT.** `threads/`
+            // asserts `(module (memory 0) (memory 0))` INVALID — "multiple memories" — five times,
+            // and under Wasm 3.0 that module is valid, so the file cannot pass with multi-memory
+            // on. It is not a corpus defect: the live `WebAssembly/threads` repo still carries
+            // those assertions, and wasmtk restored them deliberately on 2026-09-19 after removing
+            // them would have diverged from upstream.
+            //
+            // 🔬 MEASURED, not assumed: `wasmtime wast -W threads=y,multi-memory=y` fails the same
+            // directive (line 14, "expected module to fail to build"); with `multi-memory=n` it
+            // gets past all five and stops only on a message-wording mismatch at line 59, which
+            // this runner does not compare. The era feature set is what makes the file coherent —
+            // for wasmtime as much as for us.
+            //
+            // 🔒 Narrow on purpose, and the coverage it leaves behind is MEASURED, not assumed:
+            // disabling multi-memory for the whole suite fails `address0`, `address1`, `align0`,
+            // `binary0`, `data0` and more, so a multi-memory regression still fails loudly in the
+            // CORE files. (⚠️ This corpus has no `proposals/multi-memory/` directory at all — only
+            // custom-descriptors, custom-page-sizes, threads and wide-arithmetic — which is why
+            // the coverage argument has to rest on the core files.)
+            "threads" => {
+                f.threads = true;
+                f.multi_memory = false;
+            }
             "wide-arithmetic" => f.wide_arithmetic = true,
             "custom-page-sizes" => f.custom_page_sizes = true,
             "custom-descriptors" => f.custom_descriptors = true,

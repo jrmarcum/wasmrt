@@ -85,7 +85,28 @@ any step. 503 workspace tests, C-ABI gate PASSED (74 symbols), `.wat` corpus **5
 ✅ **Miri 31/31 PASSED (2026-09-17)** — the `wasmrt-capi` surface, including `lifecycle_fuzz` and `every_entry_point_survives_a_null_pointer`, run under interpretation on the post-`u16` code. ⚠️ **31, not the 28 on record** — the crate gained tests and nobody re-counted.
 Run with `deno run -A scripts/miri-gate.ts` (needs `rustup component add miri`; ~28s).
 
-⚠️⚠️ **THE `0 FAILED` IS PROVISIONAL — THE CORPUS IS BEING EDITED UNDER US (2026-09-19, late).**
+### ✅ 2026-09-19 — SETTLED at **64,603 / 0 / 0**, and the threads contradiction is closed
+
+wasmtk finished: the fix landed in **their runner** (`assert_malformed` must mean a PARSE failure,
+not any failure), and the vendored patch was **narrowed to option 2** — they kept the 3 × "multiple
+tables" and 3 × `assert_malformed` blocks removed, and **RESTORED the 5 × "multiple memories"**,
+because the live `WebAssembly/threads` repo still carries them.
+
+Those 5 then failed here, and they were **ours to answer**: that snapshot predates multi-memory, and
+we ran the directory with Wasm 3.0, where two memories are legal. `features_for_script` now disables
+**multi-memory for `proposals/threads/` only** — a proposal snapshot must not be given features that
+POSTDATE it.
+
+🔬 **Measured, not assumed, at every step:**
+* `wasmtime wast -W threads=y,multi-memory=y` fails the SAME directive (line 14); with
+  `multi-memory=n` it clears all five and stops only on a message-wording mismatch at line 59, which
+  this runner does not compare. The era feature set is what makes the file coherent for wasmtime too.
+* Disabling multi-memory for the WHOLE suite fails `address0`, `address1`, `align0`, `binary0`,
+  `data0` and more — so the exclusion cannot hide a multi-memory regression. ⚠️ This corpus has **no
+  `proposals/multi-memory/` directory**, so that coverage rests entirely on the core files.
+* The per-file gate reports **no file lost a pass** across the change.
+
+*(The provisional note this replaces:)* ⚠️⚠️ **THE `0 FAILED` WAS PROVISIONAL — THE CORPUS WAS BEING EDITED UNDER US (2026-09-19, late).**
 wasmtk is **reverting the owner-directed `proposals/threads/` patch and re-evaluating the issue**, so
 the failure count is a moving target and **must not be quoted** until they finish. Measured before
 standing down (owner: *"they are in process, do not rerun on the wasmtk side"*):
