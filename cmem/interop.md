@@ -519,7 +519,7 @@ wasmrt is pinned by `cli_exit_codes.rs::the_summary_never_calls_an_invalid_modul
 **fails when wazmrt's header wording is injected into wasmrt's summary** (mutation-verified), so it
 checks exactly this.
 
-### 📬 2.5h — HANDOFF TO wazmrt (owner-directed, 2026-09-19)
+### 📬 2.5h — HANDOFF TO wazmrt (owner-directed, 2026-09-19) · ✅ **RELAYED by the owner, 2026-09-19** — Z1–Z3 first, then Z4 with the T9e/T9i items
 
 Owner: *"lets pass all three issues to the wazmrt team."* Passed **through this file**, because §1a
 forbids writing into wazmrt's tree. For wazmrt's own session to adopt in wazmrt's own commit:
@@ -576,7 +576,7 @@ and wasmtime, from the identifiers the text carries) and wazmrt does not.**
 are portable.** A `.wat` pinned under one runtime is refused under the other — which fails CLOSED
 (a denial, not a silent run), so it is an operational break, not a security hole.
 
-📬 **Z4, for wazmrt:** emit the `name` section from the text's identifiers, as wasm-tools does. That
+📬 **Z4, for wazmrt — ✅ RELAYED by the owner, 2026-09-19:** emit the `name` section from the text's identifiers, as wasm-tools does. That
 also matches the owner's standing direction not to throw away information the source carries. Until
 then this row stays ⚠️, and an installer that pins `.wat` must pin per runtime.
 

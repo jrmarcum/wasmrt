@@ -205,8 +205,11 @@ section, wazmrt does not); `.wasm` digests agree exactly.
 🚦 **T13's conformance numbers are at their target, and the last KNOWN format deviations are closed**
 (item 7, 2026-09-19 — three decoder defects, one more than logged). The CLI exit-code breach of the
 contract is closed too, **coordinated** (part 8; `interop.md` §2.3m). What stands between here and
-`1.0.0`: items 1–2 below (not ours to execute), then the `releasing.md` checklist (item 8). 🤝 **wazmrt
-has an unadopted annex and two OWNER DECISIONS to fold in** (§2.3m, §2.4a unknown flags, §2.5 truthful
+`1.0.0`: items 1–2 below (not ours to execute), then the `releasing.md` checklist (item 8). 🤝 **wazmrt is at CONTRACT VERSION 16 and still uncommitted (v14 no "looks like", v15 the single-dash
+narrowing, v16 the required-position rule — wasmrt complies with all three). Relayed and waiting on
+their fold-in: Z4, the pin DB path decision, the §3.7a closure and the §2.1/§2.2 row flips. 🔒 We do
+NOT mirror their v11–v16 until their copy stops moving (§1d).** *(Earlier: wazmrt
+has an unadopted annex and two OWNER DECISIONS to fold in)* (§2.3m, §2.4a unknown flags, §2.5 truthful
 validity claims, and the §2.5h handoff of Z1–Z3). wasmrt complies with all of them already.
 
 **Nothing is half-finished.** Every landing is committed with its own gate run; the working tree is
@@ -307,7 +310,7 @@ spread and nominally the wrong way round.
 🔴 **A FINDING THE GATE PAID FOR: `.wat` DIGESTS ARE NOT PORTABLE.** Comparing `wasmrt pin` with
 `wazmrt pin` over 535 files: **2 agree, 529 differ**, while the same modules as `.wasm` agree exactly.
 Diagnosed: wazmrt's digest is ours **with custom sections stripped** — we emit a `name` section, they
-do not. Only `.wasm` pins are portable today; handed over as **Z4**. 🎓 *§3a said to make this a test
+do not. Only `.wasm` pins are portable today; handed over as **Z4** and ✅ **relayed by the owner the same day**. 🎓 *§3a said to make this a test
 rather than an assumption; the test took one command and the assumption was false.*
 
 564 tests, clippy clean, suite **64,598 / 0 / 0** unchanged, C-ABI PASSED (**75** symbols — the new
