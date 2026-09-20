@@ -1,5 +1,132 @@
 # Known Issues
 
+## ✅ CLOSED 2026-09-20 — a VALIDATOR REVIEW found EIGHT, and two of them were not in the validator
+
+The validator read end to end after the decoder, for the same reason: it is the last thing standing
+between a hostile module and the interpreter. Every finding below was **reproduced against
+wasm-tools 1.259 and (where it has the proposal) wasmtime 48 before anything changed**.
+
+🎓 **The method mattered more than the reading.** Four of the eight were found by *sweeps*, not by
+eyes on code: a per-proposal gate sweep (18 proposals × disabled), a per-instruction 64-bit sweep
+(24 instructions × 2 spellings, validation, then again at run time against wasmtime), and a
+differential fuzz against `wasm-tools smith` (1,325 generated modules, 5,300 single-byte mutations). The spec
+suite is at 64,603 / 0 / 0 and could not see any of them: **a suite written in the text format
+cannot express a table of `i64`, and a suite run with every proposal on cannot test a gate.**
+
+### 🔴 1. A table's ELEMENT TYPE was read as a value type — so a table of `i64` decoded, validated and RAN
+
+§5.3.9 is `tabletype ::= reftype limits`. `read_table_type` called `read_val_type`, nothing in
+`validate` checked it, and **four** text-format sites parsed it the same way. The result:
+
+| | |
+| --- | --- |
+| wasm-tools / wasmtime 48 | `malformed reference type (at offset 0x15)` |
+| wasmrt, before | `validation OK`, and `table.get` returned **-1** — the engine's null sentinel, handed to the guest as an `i64` (as a `v128`: `0xffffffffffffffff`) |
+
+⚠️⚠️ **And `wasmrt wat` EMITTED such modules**: `(module (table 1 i64))` assembled to
+`04 04 01 7e 00 01`, which `wasm-tools` refuses as malformed and whose *source* its parser refuses
+outright. **Eighth instance of the T10a emitter mechanism, and the third time our assembler's output
+is not WebAssembly.**
+
+🎓 The element SEGMENT's type field is the same grammar production and had the identical defect —
+fixed on its own, with a test and a comment quoting this very rule, because that is the one the spec
+suite complained about. **A fix belongs at every site the grammar names, not at the one the failing
+test pointed to** (`best-practices.md` §1.10). Found by the fuzz — the 215th module of a 300-module run, mutated one byte; then a fourth text
+site (`(import "m" "t" (table 1 f32))`) was found by the regression test written for the first three.
+
+### 🔴 2. Every 64-bit TABLE access truncated its index to 32 bits — a call to a function the guest never named
+
+`call_indirect` at index `2^32` on a two-slot 64-bit table **called slot 0 and returned its answer**.
+wasmtime 48 traps: `undefined element: out of bounds table access`. The same truncation was in
+`table.get`, `table.set`, `table.fill`, `table.copy` and `table.init`; `table.size`/`table.grow`
+additionally pushed an `i32` where the validator types an `i64`.
+
+**Memories were correct** — `pop_mem(is64)` has existed since memory64 — and all eleven memory
+instructions passed the same sweep. `Table::is64` was already recorded, *for import matching*, and
+its own doc comment says it "decides what type every `table.get`/`set`/`grow`/`fill` operand has".
+Nothing on the execution path had ever read it. 🎓 **A field recorded for one consumer is not a rule
+the other consumers follow** (§3.14).
+
+### 🔴 3. `return_call_indirect` typed its table index `i32` outright
+
+Both directions of one hardcoded type: the valid `i64` index on a 64-bit table was **refused**, and
+an `i32` index there was **accepted**. It was the only arm of the 24 in the sweep that table64 left
+behind, and no spec-suite file tail-calls through a 64-bit table.
+
+### 🟠 4. A constant expression's operand stack was capped at EIGHT
+
+A number, not a rule. `struct.new` on a nine-field struct, `array.new_fixed` with nine elements and a
+ten-deep extended-const chain are all valid, all were refused, and all were reported as
+`ConstantExpressionRequired` — a wrong *reason* as well as a wrong verdict. The fuzz reproduced it
+within 25 generated modules: ten `i32.const`s in a global initializer is what a constant-folding
+producer emits. The bound is now the expression's own byte length, so it cannot refuse anything a
+valid expression can express while still bounding a hostile one.
+
+### 🟠 5. An uninitialized non-null local could be read in unreachable code
+
+`(func (local (ref func)) unreachable local.get 0 drop)` validated. wasm-tools and wasmtime both
+refuse it — `uninitialized local: 0`, same offset. 🎓 `unreachable` makes the VALUE STACK polymorphic;
+the local-init context is a different context and is not touched. (Three related probes — a set
+inside a block, a set skipped by a `br`, a set in both `if` arms — were measured and wasmrt was
+**already right** on all three, which is why only the exemption moved.)
+
+### 🟠 6. Two proposals were gated at one entry point out of two — X3's shape again
+
+* **table64.** `--features all,-memory64` accepted `(table i64 1 funcref)`; wasm-tools: "memory64
+  must be enabled for 64-bit tables". The gate existed for memories only, and `Feature::Memory64`'s
+  doc still said tables "stay 32-bit by a recorded invariant" — true until table64 landed for T13.
+  🎓 **A doc comment is not a gate, and an invariant that has been lifted has to be lifted everywhere
+  it was written down.**
+* **the table-initializer form.** Found while fixing the first: `(table 1 funcref (ref.null func))`
+  passed with function-references off. wasm-tools: "tables with expression initializers require the
+  function-references proposal".
+
+The other 16 proposals were swept the same way and hold.
+
+### 🟠 7. Export-name uniqueness was O(n²) over a guest-controlled count
+
+A pairwise loop. Measured, before anything ran: **128,000 exports in a 1.1 MB module took 11.9 s**
+against wasm-tools' 0.13 s, with the curve doubling twice per doubling of `n` (64,000 → 3.2 s;
+32,000 → 0.77 s). A denial of service out of an otherwise entirely valid module. Now a `BTreeSet`.
+
+### 🟡 8. `--features` was parsed by the CLI and applied by ONE path of three
+
+`wasmrt --features mvp simd.wasm` printed `validation OK`; `wasmrt run --features mvp simd.wasm f`
+**executed the module and printed 7**. Only `wasmrt wasi` read `flags.features`; `call_export` and
+`print_summary` called `validate()`, which is `Features::all()`.
+
+🎓 §4.10 for the second time in two days: **parsing a flag proves it was ACCEPTED, not APPLIED.** It
+is also a **live swappability break** — measured on the sibling: `wazmrt --features mvp m.wasm f`
+refuses the module, so the same command line ran on one runtime and was refused by the other. The
+contract row (`interop.md` §2.2) said `--features` was DONE and AGREED; it had been verified on
+*parsing* (vocabularies, seeding, layering, position) and never on effect. See §2.2f there.
+
+### Evidence and regression
+
+| finding | pinned by |
+| --- | --- |
+| 1 (decoder) | `tests/decoder-strictness.wast` case 8 — two `assert_malformed`, plus the `funcref` control |
+| 1 (validator) | `validate.rs::a_tables_element_type_must_be_a_reference_type` |
+| 1 (assembler) | `wat.rs::a_table_element_type_must_be_a_reference_type` — 5 refusals, 4 controls |
+| 2, 3 | `tests/table64-operands.wast` (15 assertions) |
+| 4 | `tests/constant-expression-depth.wast` |
+| 5 | `tests/uninitialized-local-in-dead-code.wast` |
+| 6 | `features.rs::the_memory64_flag_refuses_64_bit_tables_as_well_as_64_bit_memories`, `…::a_table_initializer_expression_needs_function_references` |
+| 7 | `validate.rs::many_distinct_exports_are_not_quadratic` (20,000 exports, plus a duplicate) |
+| 8 | `crates/wasmrt/tests/cli_features_are_applied.rs` (3 tests, one per path) |
+
+🔒 **All twelve mutations verified**: each defect was put back, one at a time, and the test that is
+supposed to catch it was confirmed to FAIL. ⚠️ Two of the twelve exposed a *test* defect first — the
+summarize test used a fixture exporting `_start`, so it was silently exercising the WASI path, and
+the table-initializer test used a module already refused for another reason. **A gate whose test
+passes without it is decoration**; both fixtures were narrowed until the mutation fired. ⚠️ The
+mutation script's first run reported six "no defect" results that were really `\n`-vs-CRLF misses —
+*confirm the mutation applied before believing the mutation test* (§8.1).
+
+Conformance **unchanged at 64,603 / 0 / 0** over 288 files; `.wat` corpus 528/532 with all 528
+accepted by wasm-tools; custom-sections 528 agree / 4 refused by both / 0 differ; Miri 32/32; C-ABI
+gate PASSED; clippy clean.
+
 ## ✅ CLOSED 2026-09-19 — a DECODER REVIEW found EIGHT, and the fix for one found a NINTH in the ASSEMBLER
 
 The decoder read end to end after the WASI review, for the same reason: it is the first code to touch

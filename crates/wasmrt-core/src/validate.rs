@@ -23,6 +23,7 @@
 //!
 //! `validate` does not mutate the module; it decodes each body to IR and type-checks it.
 
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -288,6 +289,13 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
         }
     }
     for tt in &module.tables {
+        // §3.2.4: a table type's element type is a REFERENCE type. The decoder refuses a numeric
+        // one as malformed (§5.3.9, `read_table_type`) — this is the second stage, for a [`Module`]
+        // nobody decoded: the fields are public, and a `v128`-element table type-checks its way
+        // through `table.get`/`table.set` and hands the guest the engine's null sentinel.
+        if !tt.element.is_ref() {
+            return Err(ValidateError::TypeMismatch);
+        }
         // Limits are decoded as u64 whatever the index type, so a 32-bit table's bounds must be
         // held to 32 bits here — wasm-tools: "table size must be at most 0xffffffff entries".
         let ceiling = if tt.limits.is64 { u64::MAX } else { u64::from(u32::MAX) };
@@ -338,11 +346,16 @@ pub fn validate_with_features(module: &Module, features: &Features) -> ValidateR
     }
 
     // Export names must be pairwise distinct (§3.4.10).
-    for (i, e) in module.exports.iter().enumerate() {
-        for o in &module.exports[i + 1..] {
-            if e.name == o.name {
-                return Err(ValidateError::DuplicateExport);
-            }
+    //
+    // ⚠️⚠️ Written as a pairwise loop, this is O(n²) over a GUEST-CONTROLLED count, and the cost
+    // is paid before anything executes: a 1.1 MB module with 128,000 exports took **11.9 s** to
+    // validate here against wasm-tools' 0.13 s, and the curve is quadratic (64,000 → 3.2 s). That
+    // is a denial of service reachable from a module that is otherwise entirely valid. A set
+    // makes it O(n log n) — 128,000 exports now costs no more than reading them.
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for e in &module.exports {
+        if !seen.insert(e.name.as_str()) {
+            return Err(ValidateError::DuplicateExport);
         }
     }
 
@@ -807,6 +820,20 @@ fn check_module_features(module: &Module, features: &Features) -> ValidateResult
     }
     for tt in &module.tables {
         gate(table_element_feature(tt.element), features)?;
+        // 🔒 A 64-bit TABLE is memory64's table64 half — wasm-tools: "memory64 must be enabled
+        // for 64-bit tables".
+        //
+        // ⚠️⚠️ This gate existed for memories only, so `--features all,-memory64` accepted
+        // `(table i64 1 funcref)`: the X3 shape again — a proposal gated at one of its two entry
+        // points. A sweep of all 18 proposals against wasm-tools, each with the proposal
+        // disabled, found this one and only this one (`scripts/feature-gate-sweep.ts`).
+        if tt.limits.is64 {
+            gate(Some(Feature::Memory64), features)?;
+        }
+        // A table initializer expression is function-references (`(table 1 funcref (ref.func $f))`).
+        if tt.init.is_some() {
+            gate(Some(Feature::FunctionReferences), features)?;
+        }
     }
 
     // --- globals ---
@@ -859,8 +886,20 @@ fn validate_const_expr(
 ) -> ValidateResult<()> {
     let mut r = Reader::new(expr);
     let mut stack: Vec<V> = Vec::new();
+    // The operand stack is bounded by the expression's own LENGTH: every value on it was pushed
+    // by an instruction, and no instruction is shorter than one byte.
+    //
+    // ⚠️⚠️ This was a flat `8`, which is not a rule about constant expressions — it is a guess.
+    // `(global (ref $s) (struct.new $s …))` on a struct with **nine** fields, `array.new_fixed`
+    // with nine elements, and an extended-const chain nine deep are all valid, all refused, and
+    // all reported as `ConstantExpressionRequired` — a wrong REASON as well as a wrong verdict
+    // (wasm-tools and wasmtime 48 accept every one). A differential fuzz against `wasm-tools
+    // smith` reproduced it on its own within 25 modules. The bound still exists, because a
+    // hostile initializer must not be able to ask for unbounded memory — it is just derived from
+    // the input instead of picked, so it cannot refuse anything a valid expression can express.
+    let ceiling = expr.len();
     let push = |stack: &mut Vec<V>, t: V| -> ValidateResult<()> {
-        if stack.len() >= 8 {
+        if stack.len() >= ceiling {
             return Err(ValidateError::ConstantExpressionRequired);
         }
         stack.push(t);
@@ -1298,10 +1337,6 @@ impl<'a> FuncValidator<'a> {
             return Err(ValidateError::InvalidMemArgOffset);
         }
         Ok(())
-    }
-
-    fn top_unreachable(&self) -> bool {
-        self.ctrls.last().is_some_and(|f| f.is_unreachable)
     }
 
     fn push_ctrl(&mut self, kind: FrameKind, start: Vec<V>, end: Vec<V>) -> ValidateResult<()> {
@@ -1775,7 +1810,13 @@ impl<'a> FuncValidator<'a> {
                     .module
                     .func_sig(ci.type_index)
                     .ok_or(ValidateError::UndefinedType)?;
-                self.pop_expect(V::I32)?;
+                // ⚠️ The TABLE's index type, exactly as in the non-tail twin above. This arm had
+                // `V::I32` written out, so on a 64-bit table it refused the valid `i64` index and
+                // ACCEPTED an `i32` one — both directions of the same defect. `table64` landed
+                // with `table_addr_ty` applied at every other table instruction; a sweep of the
+                // whole 64-bit axis (24 instructions × 2 spellings) shows this was the only arm
+                // left behind, and no spec-suite file tail-calls through a 64-bit table.
+                self.pop_expect(self.table_addr_ty(ci.table))?;
                 self.pop_vals(&ft.params)?;
                 self.check_tail_results(&ft.results)?;
                 self.set_unreachable();
@@ -2553,7 +2594,12 @@ impl<'a> FuncValidator<'a> {
             Op::LocalGet => {
                 let i = expect_local(&instr.imm)?;
                 let t = self.local_at(i)?;
-                if t.is_non_null_ref() && !self.local_init[i as usize] && !self.top_unreachable() {
+                // ⚠️ **No exemption for unreachable code.** `unreachable` makes the value stack
+                // polymorphic; it does not set locals, and §3.3.5's rule reads the local-init
+                // context either way. The `!self.top_unreachable()` clause here accepted
+                // `(func (local (ref func)) unreachable local.get 0 drop)`, which wasm-tools and
+                // wasmtime 48 both refuse — "uninitialized local: 0", at the same offset.
+                if t.is_non_null_ref() && !self.local_init[i as usize] {
                     return Err(ValidateError::UninitializedLocal);
                 }
                 self.push_val_t(t);
@@ -3467,6 +3513,86 @@ mod tests {
         ]);
         let md = decode(&with_mem).unwrap();
         assert_eq!(validate(&md), Ok(()));
+    }
+
+    /// A table type's element type is a REFERENCE type (§3.2.4).
+    ///
+    /// The decoder refuses a numeric one as malformed, which is the right stage and the one that
+    /// matters for a module read off disk (`module.rs`). This is the SECOND stage, and it is not
+    /// redundant: [`Module`]'s fields are public, so an embedder — or one of our own tests — can
+    /// hand `validate` a table type no decoder ever read. A `v128`-element table type-checks its
+    /// way through `table.get`, and the value it hands back is the engine's null sentinel.
+    #[test]
+    fn a_tables_element_type_must_be_a_reference_type() {
+        let mut md = decode(&m(&[
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: [] -> []
+            0x04, 0x04, 0x01, 0x70, 0x00, 0x01, // table: funcref, min 1
+        ]))
+        .expect("the funcref form decodes");
+        assert_eq!(validate(&md), Ok(()), "the control must validate");
+        for numeric in [V::I32, V::I64, V::F64, V::V128] {
+            md.tables[0].element = numeric;
+            assert_eq!(
+                validate(&md),
+                Err(ValidateError::TypeMismatch),
+                "a table of {numeric:?} is not a table"
+            );
+        }
+    }
+
+    /// Export-name uniqueness over a realistic export count.
+    ///
+    /// ⚠️ This was a pairwise loop — O(n²) over a number the MODULE chooses. Measured before the
+    /// fix: 128,000 exports (a 1.1 MB module) took **11.9 s** to validate, against wasm-tools'
+    /// 0.13 s, and the curve doubled four times as `n` doubled twice. That is a denial of service
+    /// paid before anything runs. The count here is deliberately large enough that a return to the
+    /// pairwise loop is impossible to miss.
+    #[test]
+    fn many_distinct_exports_are_not_quadratic() {
+        const N: u32 = 20_000;
+        let mut exports: Vec<u8> = Vec::new();
+        for i in 0..N {
+            let name = alloc::format!("e{i}");
+            exports.push(name.len() as u8);
+            exports.extend_from_slice(name.as_bytes());
+            exports.extend_from_slice(&[0x00, 0x00]); // kind = func, index 0
+        }
+        let mut sec: Vec<u8> = Vec::new();
+        // The export section's own vector length, as a LEB128 u32.
+        let mut n = N;
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            sec.push(if n == 0 { b } else { b | 0x80 });
+            if n == 0 {
+                break;
+            }
+        }
+        sec.extend_from_slice(&exports);
+        let mut body: Vec<u8> = vec![
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type
+            0x03, 0x02, 0x01, 0x00, // func 0
+        ];
+        body.push(0x07);
+        let mut len = sec.len() as u32;
+        loop {
+            let b = (len & 0x7f) as u8;
+            len >>= 7;
+            body.push(if len == 0 { b } else { b | 0x80 });
+            if len == 0 {
+                break;
+            }
+        }
+        body.extend_from_slice(&sec);
+        body.extend_from_slice(&[0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b]); // code
+        let md = decode(&m(&body)).expect("decodes");
+        assert_eq!(md.exports.len(), N as usize);
+        assert_eq!(validate(&md), Ok(()));
+        // …and a duplicate anywhere in that many names is still caught: making it fast must not
+        // make it blind.
+        let mut dup = md.clone();
+        dup.exports[N as usize - 1].name = dup.exports[0].name.clone();
+        assert_eq!(validate(&dup), Err(ValidateError::DuplicateExport));
     }
 
     #[test]

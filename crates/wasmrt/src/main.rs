@@ -14,7 +14,10 @@ use wasmrt_core::types::ValType;
 use wasmrt_core::features::{Feature, Features};
 use wasmrt_core::interp::ResourceLimits;
 use wasmrt_core::pin::{self, Action, Mode};
-use wasmrt_core::validate::{validate, ValidateError};
+// 🔒 `validate` (the `Features::all()` shorthand) is deliberately NOT imported here: every CLI
+// path judges a module under `flags.features`, and an unqualified `validate` is how two of them
+// came to ignore it.
+use wasmrt_core::validate::{validate_with_features, ValidateError};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -853,7 +856,7 @@ fn run_wasi_loaded(loaded: &Loaded, flags: &HostFlags, guest_argv: &[String]) ->
     };
     // `--features` narrows the language this module is judged against.
     let features = flags.features.unwrap_or_else(Features::all);
-    if let Err(e) = wasmrt_core::validate::validate_with_features(&md, &features) {
+    if let Err(e) = validate_with_features(&md, &features) {
         eprintln!("wasmrt: {path}: {}", invalidity_report(&e));
         return ExitCode::FAILURE;
     }
@@ -1052,7 +1055,7 @@ fn run_bare_path(path: &str, rest: &[String], lead: HostFlags) -> ExitCode {
         }
         None if has_start => run_wasi_loaded(&loaded, &flags, &[]),
         // Nothing to execute: inspect it, exactly as before, and do not gate.
-        None => summarize_loaded(&loaded, &md),
+        None => summarize_loaded(&loaded, &md, &flags),
     }
 }
 
@@ -1500,7 +1503,13 @@ fn call_export(loaded: &Loaded, flags: &HostFlags, func: &str, args: &[String]) 
     // validation. This path used to skip it — `wasmrt run` would happily execute an ill-typed
     // module and print a plausible answer, while `wasmrt wasi` next door refused the same bytes.
     // An asymmetry between two entry points of one binary is a bug, not a style difference.
-    if let Err(e) = validate(&module) {
+    //
+    // ⚠️ …and the SAME asymmetry came back in the other dimension: this validated with
+    // `Features::all()` while `wasmrt wasi` used `flags.features`, so `--features mvp` was
+    // accepted here and silently dropped — measured, a SIMD module ran under `mvp` and printed
+    // its answer. **Every path that judges a module judges it under the configured language.**
+    let features = flags.features.unwrap_or_else(Features::all);
+    if let Err(e) = validate_with_features(&module, &features) {
         eprintln!("wasmrt: {path}: {}", invalidity_report(&e));
         return ExitCode::FAILURE;
     }
@@ -1592,8 +1601,8 @@ fn type_name(ty: ValType) -> &'static str {
 }
 
 /// Summarize an already-loaded, already-decoded module — the bare-path form has both in hand.
-fn summarize_loaded(loaded: &Loaded, md: &Module) -> ExitCode {
-    if print_summary(&loaded.path, md) {
+fn summarize_loaded(loaded: &Loaded, md: &Module, flags: &HostFlags) -> ExitCode {
+    if print_summary(&loaded.path, md, &flags.features.unwrap_or_else(Features::all)) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -1602,7 +1611,11 @@ fn summarize_loaded(loaded: &Loaded, md: &Module) -> ExitCode {
 
 
 /// Print the summary and the validation verdict; `true` iff the module VALIDATED.
-fn print_summary(path: &str, m: &Module) -> bool {
+///
+/// 🔒 **Judged under `features`, not under everything wasmrt can do.** This called `validate(m)`
+/// — `Features::all()` — so `wasmrt --features mvp simd.wasm` printed `validation OK` for a
+/// module full of `v128`. §4.10 again: parsing a flag proves it was ACCEPTED, not APPLIED.
+fn print_summary(path: &str, m: &Module, features: &Features) -> bool {
     let defined_funcs = m.functions.len();
     let imported_funcs = m.imported_func_count() as usize;
     println!("{path}: WebAssembly module (version {})", m.version);
@@ -1635,7 +1648,7 @@ fn print_summary(path: &str, m: &Module) -> bool {
             println!("    {kind:<7} {}", e.name);
         }
     }
-    match validate(m) {
+    match validate_with_features(m, features) {
         Ok(()) => {
             println!("  validation OK");
             true

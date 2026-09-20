@@ -1014,6 +1014,18 @@ fn read_limits_flagged(r: &mut Reader) -> DecodeResult<(Limits, Option<u32>)> {
 
 fn read_table_type(r: &mut Reader, kinds: &[CompKind]) -> DecodeResult<TableType> {
     let element = read_val_type(r, kinds)?;
+    // ⚠️⚠️ §5.3.9 spells this field **reftype**: `tabletype ::= reftype limits`. Reading a
+    // valtype here accepted `(table (elem i64) …)`, which decoded, VALIDATED and RAN —
+    // `table.get` handed the guest the engine's null sentinel as an `i64` (`-1`) or a `v128`.
+    // wasm-tools/wasmtime: "malformed reference type".
+    //
+    // 🎓 The element SEGMENT's type field had this exact defect and was fixed on its own
+    // (see `an_element_segments_type_field_must_be_a_reference_type`) — the sibling site was
+    // never swept, because the suite complained about only one of the two. **A fix belongs at
+    // every site the grammar names, not at the one the failing test pointed to.**
+    if !element.is_ref() {
+        return Err(DecodeError::BadValType);
+    }
     let limits = read_limits(r)?;
     // A table may be 64-bit (the table64 half of memory64, in scope since T13) but never
     // shared — there is no `shared` table type in any proposal wasmrt targets.

@@ -2521,6 +2521,28 @@ impl Frame<'_> {
             u64::from(self.pop_i32() as u32)
         }
     }
+    /// Pop a table index/count — the table's index type, exactly as [`Self::pop_mem`] does for a
+    /// memory.
+    ///
+    /// ⚠️⚠️ Every table arm read `pop_i32()` regardless, so on a **64-bit table** the operand was
+    /// TRUNCATED to 32 bits: `call_indirect` at index `2^32` called the function in slot **0**
+    /// instead of trapping (measured — wasmtime 48: "undefined element: out of bounds table
+    /// access"), and `table.get`/`set`/`fill`/`copy`/`init` all addressed the wrong slot the same
+    /// way. `Table::is64` was already recorded — for *import matching* — and its own doc says it
+    /// "decides what type every `table.get`/`set`/`grow`/`fill` operand has"; nothing on the
+    /// execution path had ever read it. 🎓 **A field recorded for one consumer is not a rule the
+    /// other consumers follow.**
+    fn pop_table(&mut self, is64: bool) -> u64 {
+        self.pop_mem(is64)
+    }
+    /// Push a table size / `table.grow` result in the table's own index type.
+    fn push_table_len(&mut self, is64: bool, v: i64) {
+        if is64 {
+            self.push_i64(v);
+        } else {
+            self.push_i32(v as i32);
+        }
+    }
 
     fn stack_base(&self, n: usize) -> Result<usize> {
         self.vstack.len().checked_sub(n).ok_or(Trap::StackUnderflow)
@@ -3381,10 +3403,15 @@ fn run(
                     let Imm::CallIndirect(ci) = &instr.imm else {
                         return Err(Trap::UnsupportedInstruction);
                     };
-                    let slot = frame.pop_i32() as u32 as usize;
+                    let ti = ctx.maps.table(ci.table);
+                    let is64 = store.tables.get(ti).ok_or(Trap::NoTable)?.is64;
+                    // 🔒 The index is the TABLE's, so a 64-bit table's `2^32` is out of bounds and
+                    // must TRAP. Truncating it to 32 bits made it slot 0 — a call to a function
+                    // the guest did not name, which is the silent-wrong-call class.
+                    let slot = table_slot(frame.pop_table(is64))?;
                     let entry = *store
                         .tables
-                        .get(ctx.maps.table(ci.table))
+                        .get(ti)
                         .ok_or(Trap::NoTable)?
                         .entries
                         .get(slot)
@@ -3468,7 +3495,8 @@ fn run(
                 // --- Table access ---
                 Op::TableGet => {
                     let ti = ctx.maps.table(table_imm(instr)?);
-                    let i = frame.pop_i32() as u32 as usize;
+                    let is64 = store.tables.get(ti).ok_or(Trap::NoTable)?.is64;
+                    let i = table_slot(frame.pop_table(is64))?;
                     let v = *store
                         .tables
                         .get(ti)
@@ -3481,8 +3509,9 @@ fn run(
                 }
                 Op::TableSet => {
                     let ti = ctx.maps.table(table_imm(instr)?);
+                    let is64 = store.tables.get(ti).ok_or(Trap::NoTable)?.is64;
                     let v = frame.pop();
-                    let i = frame.pop_i32() as u32 as usize;
+                    let i = table_slot(frame.pop_table(is64))?;
                     let slot = store
                         .tables
                         .get_mut(ti)
@@ -3495,13 +3524,20 @@ fn run(
                 }
                 Op::TableSize => {
                     let ti = ctx.maps.table(table_imm(instr)?);
-                    let len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
-                    frame.push_i32(len as i32);
+                    let t = store.tables.get(ti).ok_or(Trap::NoTable)?;
+                    let (len, is64) = (t.entries.len(), t.is64);
+                    // A 64-bit table's size is an `i64`, which is what the validator typed this
+                    // instruction as — pushing an `i32` leaves the two disagreeing about the value
+                    // on the stack.
+                    frame.push_table_len(is64, len as u64 as i64);
                     pc += 1;
                 }
                 Op::TableGrow => {
                     let ti = ctx.maps.table(table_imm(instr)?);
-                    let delta = frame.pop_i32() as u32 as usize;
+                    let is64 = store.tables.get(ti).ok_or(Trap::NoTable)?.is64;
+                    // A delta wider than `usize` cannot be satisfied; it is a refusal (`-1`), not
+                    // a trap, so it must survive as an unsatisfiable number rather than wrap.
+                    let delta = usize::try_from(frame.pop_table(is64)).unwrap_or(usize::MAX);
                     let init = frame.pop();
                     // Read the ceiling before borrowing the table: `limits` and `tables` are
                     // sibling fields, so taking `&mut` on one would block reading the other.
@@ -3512,17 +3548,18 @@ fn run(
                     match old.checked_add(delta).filter(|&n| n <= limit) {
                         Some(new_len) => {
                             table.entries.resize(new_len, init);
-                            frame.push_i32(old as i32);
+                            frame.push_table_len(is64, old as u64 as i64);
                         }
-                        None => frame.push_i32(-1), // growth refused
+                        None => frame.push_table_len(is64, -1), // growth refused
                     }
                     pc += 1;
                 }
                 Op::TableFill => {
                     let ti = ctx.maps.table(table_imm(instr)?);
-                    let n = frame.pop_i32() as u32 as usize;
+                    let is64 = store.tables.get(ti).ok_or(Trap::NoTable)?.is64;
+                    let n = table_slot(frame.pop_table(is64))?;
                     let val = frame.pop();
-                    let dst = frame.pop_i32() as u32 as usize;
+                    let dst = table_slot(frame.pop_table(is64))?;
                     let table = store.tables.get_mut(ti).ok_or(Trap::NoTable)?;
                     let end = dst.checked_add(n).filter(|&e| e <= table.entries.len());
                     let end = end.ok_or(Trap::TableOutOfBounds)?;
@@ -3535,9 +3572,12 @@ fn run(
                     };
                     let (ei, ti) = (ctx.maps.elem(elem), ctx.maps.table(table));
                     let dropped = *store.elem_dropped.get(ei).ok_or(Trap::UndefinedElement)?;
+                    let is64 = store.tables.get(ti).ok_or(Trap::NoTable)?.is64;
+                    // `n` and the segment offset are i32 whatever the table is — a segment is not
+                    // addressed by the table's index type. Only the DESTINATION is.
                     let n = frame.pop_i32() as u32 as usize;
                     let src = frame.pop_i32() as u32 as usize;
-                    let dst = frame.pop_i32() as u32 as usize;
+                    let dst = table_slot(frame.pop_table(is64))?;
                     let seg_len = if dropped { 0 } else { store.elem_values[ei].len() };
                     let tbl_len = store.tables.get(ti).ok_or(Trap::NoTable)?.entries.len();
                     if src.checked_add(n).is_none_or(|e| e > seg_len)
@@ -3570,9 +3610,13 @@ fn run(
                         return Err(Trap::UnsupportedInstruction);
                     };
                     let (di, si) = (ctx.maps.table(dst), ctx.maps.table(src));
-                    let n = frame.pop_i32() as u32 as usize;
-                    let s = frame.pop_i32() as u32 as usize;
-                    let d = frame.pop_i32() as u32 as usize;
+                    // Each operand takes its OWN table's index type, and `n` the NARROWER of the
+                    // two — the same rule the validator applies, so a 32↔64 copy agrees end to end.
+                    let d64 = store.tables.get(di).ok_or(Trap::NoTable)?.is64;
+                    let s64 = store.tables.get(si).ok_or(Trap::NoTable)?.is64;
+                    let n = table_slot(frame.pop_table(d64 && s64))?;
+                    let s = table_slot(frame.pop_table(s64))?;
+                    let d = table_slot(frame.pop_table(d64))?;
                     let src_len = store.tables.get(si).ok_or(Trap::NoTable)?.entries.len();
                     let dst_len = store.tables.get(di).ok_or(Trap::NoTable)?.entries.len();
                     if s.checked_add(n).is_none_or(|e| e > src_len)
@@ -3992,6 +4036,14 @@ fn block_type(instr: &Instr) -> Result<BlockType> {
         Err(Trap::UnsupportedInstruction)
     }
 }
+/// A table index/count as a host `usize`, or `TableOutOfBounds`.
+///
+/// On a 64-bit table the operand is a full `u64`: anything a `usize` cannot hold is beyond any
+/// table that could exist, so it is out of bounds — never a wrapped, in-range slot.
+fn table_slot(i: u64) -> Result<usize> {
+    usize::try_from(i).map_err(|_| Trap::TableOutOfBounds)
+}
+
 fn tag_imm(instr: &Instr) -> Result<u32> {
     if let Imm::Tag(t) = instr.imm {
         Ok(t)

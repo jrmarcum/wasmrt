@@ -48,3 +48,20 @@
 ;; (⚠️ wasmtime 48 has no custom-descriptors; wasm-tools 1.259 is the outside reader here.)
 (module binary "\00\61\73\6d\01\00\00\00\01\2c\0c\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\4e\02\4d\0c\5f\00\4c\0b\5f\00\06\0b\01\63\0b\00\fb\01\0c\fb\20\0b\0b")
 (module binary "\00\61\73\6d\01\00\00\00\01\2c\0c\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\60\00\00\4e\02\4d\0c\5f\00\4c\0b\5f\00\06\09\01\63\62\0b\00\d0\62\0b\0b")
+
+;; --- 8. a table type's element type is a REFERENCE type (§5.3.9) --------------------------
+;; `tabletype ::= reftype limits`, and `read_table_type` read a VALUE type. So a table of
+;; `i64` (`\7e`) or `v128` (`\7b`) decoded, validated and RAN: `table.get` handed the guest the
+;; engine's null sentinel as a number (measured: -1, and 0xffffffffffffffff for the v128 form).
+;; wasm-tools and wasmtime 48: "malformed reference type".
+;;
+;; 🎓 The element SEGMENT's type field (case 5 above, and the test in `module.rs`) is the SAME
+;; grammar production and was fixed on its own, because that is the one the suite complained
+;; about. Neither the spec suite nor the `.wat` corpus can reach this one — the text format has
+;; no way to spell it, so only a hand-built binary or a differential fuzz finds it. A
+;; wasm-tools-smith fuzz found it in 215 modules.
+(assert_malformed (module binary "\00\61\73\6d\01\00\00\00\01\04\01\60\00\00\03\02\01\00\04\04\01\7e\00\01\07\05\01\01\66\00\00\0a\09\01\07\00\41\00\25\00\1a\0b") "malformed reference type")
+(assert_malformed (module binary "\00\61\73\6d\01\00\00\00\01\04\01\60\00\00\03\02\01\00\04\04\01\7b\00\01\07\05\01\01\66\00\00\0a\09\01\07\00\41\00\25\00\1a\0b") "malformed reference type")
+;; …and the identical module with `funcref` must still decode, validate and run, so this is a
+;; test of the FIELD and not of the surrounding bytes.
+(module binary "\00\61\73\6d\01\00\00\00\01\04\01\60\00\00\03\02\01\00\04\04\01\70\00\01\07\05\01\01\66\00\00\0a\09\01\07\00\41\00\25\00\1a\0b")

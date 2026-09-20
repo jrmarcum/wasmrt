@@ -33,6 +33,41 @@ leads produced by that arrangement** ("the oracle runs this, so our type-checker
 running an entry point that skipped validation, `best-practices.md` §2.3a). Retiring the oracle removes
 the class; do not reintroduce it by reasoning about what wazmrt would do.
 
+## Validator review — day 6 (2026-09-20): the suite found nothing, and three sweeps found eight
+
+**Conformance is unchanged at 64,603 / 0 / 0 over 288 files**, before and after. That is the point of
+the entry: the validator carried eight defects — two of them silent wrong answers at run time — and a
+suite at 100% could not see one of them. What found them:
+
+| method | scale | found |
+| --- | --- | --- |
+| **the 64-bit axis sweep** (`scripts/sweep64.ts` in the session scratch; see below) | 24 table/memory instructions × {i64 spelling must be ACCEPTED, i32 spelling must be REFUSED} | `return_call_indirect` typed its table index `i32` |
+| the same sweep **at run time**, against wasmtime 48, addressing past `2^32` | 18 cases | 6 table instructions truncating a 64-bit index to 32 bits — `call_indirect` at `2^32` **called slot 0** |
+| **the proposal-gate sweep** | 18 proposals, each disabled, judged by wasm-tools with the same proposal disabled | table64 ungated; then the table-initializer form ungated |
+| **differential fuzz** vs `wasm-tools smith` | 1,325 valid-by-construction modules | the constant-expression operand cap (within the first 25) |
+| the same fuzz, **one mutated byte**, kept only when wasm-tools says INVALID | 5,300 mutations | a table whose element type is `i64` — accepted, validated and RUN |
+| reading the arms | — | the uninitialized-local exemption, the O(n²) export check, the CLI feature-gate hole |
+
+⚠️ **Set the outside reader's feature list to ours.** The fuzz's first run reported seven
+"refuse-valid" results that were `-f all` enabling proposals wasmrt does not implement
+(compact-imports). Both sides must be asked the same question before a difference is a finding.
+
+⚠️ **Three probes measured NO defect and that is a result too**: a non-null local set inside a block
+and read after it, a set skipped by a `br`, and a set in both `if` arms are all refused by wasmrt —
+and by wasm-tools, at the same offsets. The conservative "restore the frame's init snapshot at
+`end`" IS the rule; only the unreachable-code exemption was wrong.
+
+**Gates after the review**, all re-run on this host: workspace tests **588**, conformance
+64,603 / 0 / 0 over 288 files, repo `tests/*.wast` **230 / 0 / 0** over 17 files (3 of them new), `.wat` corpus
+**528 / 532** with all 528 accepted by wasm-tools, custom-sections **528 agree / 4 refused by both /
+0 differ**, Miri **32 / 32**, C-ABI gate PASSED, clippy clean.
+
+🔒 **Twelve mutations verified** (each defect put back, one at a time, the test confirmed to FAIL).
+Two of them found a *test* defect rather than a code one — a fixture exporting `_start` made the
+summarize test exercise the WASI path instead, and a table-initializer fixture was already refused
+for an unrelated reason. **A test that passes with the fix reverted is not a gate**, and only a
+mutation run says which one you have.
+
 ## Spec-suite conformance — superseded (2026-08-20, T13 day 2) — **99.8%.** ⚠️ Its 284-file denominator no longer exists; see day 3 below.
 
 🎯 **63,807 passed / 112 failed / 584 skipped** over 284 files. **The 257 CORE spec files are at

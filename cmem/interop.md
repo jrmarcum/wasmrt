@@ -360,6 +360,32 @@ is verified by RUNNING both.
 no `::` **and** the split is not a drive letter. Converging on one spelling would break existing
 invocations of the other, which is the opposite of swappable.
 
+### 📎 2.2f — wasmrt ANNEX (2026-09-20, unnumbered — regime A): **a flag row verified on PARSING is not verified**
+
+Found by a validator review, not by a coordination pass, which is why it is here: the `--features` row
+in §2.2 reads ✅ **DONE · both vocabularies resolve, same seeding, same layering refusals, must come
+BEFORE the module path**. Every word of that is measured and true, and the flag was still **applied by
+one of the three wasmrt paths that judge a module**.
+
+| command | wazmrt (measured 2026-09-20) | wasmrt, before | wasmrt, after |
+| --- | --- | --- | --- |
+| `<rt> --features mvp simd.wasm` (summarize) | refuses: *uses the 'simd' proposal, which --features excludes* | `validation OK` | refuses, naming `simd` |
+| `<rt> --features mvp simd.wasm f` (call an export) | refuses | **ran it and printed `7`** | refuses |
+| `<rt> wasi --features mvp simd.wasm` | refuses | refuses | refuses |
+
+**The break was wasmrt's**, and it was live: the same command line ran on one runtime and was refused by
+the other, which is exactly what §2's working test forbids (*change only the program name and the
+invocation must do the same thing*). Fixed in wasmrt — `call_export` and `print_summary` now judge under
+`flags.features`, like `run_wasi_loaded` always did — and pinned by
+`crates/wasmrt/tests/cli_features_are_applied.rs`, one test per path, mutation-verified.
+
+🔒 **No contract change is proposed.** The row's *content* was right; what failed was its verification.
+The rule this adds is for §4's checks, and it applies to every flag row in §2.2: **verify by asserting
+on what the command DID — the verdict, the exit status, the output — in every position AND on every
+path the flag claims to govern.** §4.10's "test the spellings, not the flag" plus "and test the PATHS".
+⏳ For wazmrt's session: worth re-running §2.2's other rows the same way (`--dir`, `--max-*`,
+`--verify`, `--env`), since a flag that is parsed and dropped looks identical to one that works.
+
 ### 2.3 Exit codes
 
 | behaviour | status |

@@ -56,7 +56,13 @@ pub enum Feature {
     Threads,
     /// More than one memory in a module.
     MultiMemory,
-    /// 64-bit linear memories (`is64` limits). Tables stay 32-bit by a recorded invariant.
+    /// 64-bit linear memories **and 64-bit tables** (`is64` limits), which is table64 — the same
+    /// proposal, and the same flag in wasm-tools ("memory64 must be enabled for 64-bit tables").
+    ///
+    /// ⚠️ This said "Tables stay 32-bit by a recorded invariant", which stopped being true when
+    /// table64 landed for T13; the gate was applied to memories only, so a 64-bit table passed
+    /// with the proposal disabled. **A doc comment is not a gate, and an invariant that has been
+    /// lifted has to be lifted everywhere it was written down.**
     Memory64,
     /// Typed function references: `call_ref`, `return_call_ref`, `ref.as_non_null`,
     /// `br_on_null`/`br_on_non_null`, concrete `(ref $t)` types and non-nullable refs.
@@ -900,6 +906,70 @@ mod tests {
             assert!(crate::validate::validate_with_features(&m, &Features::all()).is_ok());
         }
         let plain = crate::module::decode(&crate::wat::assemble(b"(module (memory 1))").unwrap()).unwrap();
+        assert!(crate::validate::validate_with_features(&plain, &off).is_ok());
+    }
+
+    /// memory64 gates **both** of its halves: a 64-bit memory and a 64-bit TABLE.
+    ///
+    /// ⚠️⚠️ The table half was ungated — `--features all,-memory64` accepted
+    /// `(table i64 1 funcref)`, while wasm-tools says "memory64 must be enabled for 64-bit
+    /// tables". X3's shape exactly: a proposal gated at one of its entry points, found by
+    /// sweeping all eighteen proposals against an outside validator rather than by reading the
+    /// list. The `Feature::Memory64` doc even said tables "stay 32-bit by a recorded invariant",
+    /// which stopped being true when table64 landed — **a doc comment is not a gate.**
+    #[test]
+    fn the_memory64_flag_refuses_64_bit_tables_as_well_as_64_bit_memories() {
+        let mut off = Features::all();
+        off.memory64 = false;
+        for src in [
+            &b"(module (memory i64 1))"[..],
+            b"(module (table i64 1 funcref))",
+            b"(module (table $t i64 1 funcref) (func (result i64) (table.size $t)))",
+        ] {
+            let m = crate::module::decode(&crate::wat::assemble(src).unwrap()).unwrap();
+            assert!(
+                crate::validate::validate_with_features(&m, &Features::all()).is_ok(),
+                "the control must validate with every proposal on"
+            );
+            assert_eq!(
+                crate::validate::validate_with_features(&m, &off),
+                Err(crate::validate::ValidateError::FeatureDisabled(Feature::Memory64)),
+                "memory64 off must refuse this module, naming memory64"
+            );
+        }
+        // …and the 32-bit spellings must not care about the flag.
+        for src in [&b"(module (memory 1))"[..], b"(module (table 1 funcref))"] {
+            let m = crate::module::decode(&crate::wat::assemble(src).unwrap()).unwrap();
+            assert!(crate::validate::validate_with_features(&m, &off).is_ok());
+        }
+    }
+
+    /// A table with an INITIALIZER expression is the function-references `0x40` table form —
+    /// wasm-tools: "tables with expression initializers require the function-references
+    /// proposal". Found while fixing the table64 gate above: the table loop gated the ELEMENT
+    /// TYPE and nothing else, so this form passed with the proposal off.
+    ///
+    /// ⚠️ The first fixture here used `(table 1 funcref (ref.func $f))` with a declare segment —
+    /// and the test passed with the gate REMOVED, because that module is already refused for its
+    /// segment's non-null element type. A gate whose test passes without it is decoration; the
+    /// fixture below needs nothing else from the proposal, so it measures this gate alone.
+    #[test]
+    fn a_table_initializer_expression_needs_function_references() {
+        let src = br#"(module (table 1 funcref (ref.null func)))"#;
+        let m = crate::module::decode(&crate::wat::assemble(src).unwrap()).unwrap();
+        assert!(crate::validate::validate_with_features(&m, &Features::all()).is_ok());
+
+        let mut off = Features::all();
+        off.function_references = false;
+        off.gc = false; // gc is layered on function-references; disabling one disables the other
+        assert_eq!(
+            crate::validate::validate_with_features(&m, &off),
+            Err(crate::validate::ValidateError::FeatureDisabled(Feature::FunctionReferences))
+        );
+        // A table WITHOUT an initializer is unaffected.
+        let plain =
+            crate::module::decode(&crate::wat::assemble(b"(module (table 1 funcref))").unwrap())
+                .unwrap();
         assert!(crate::validate::validate_with_features(&plain, &off).is_ok());
     }
 }

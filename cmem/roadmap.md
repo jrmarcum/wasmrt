@@ -186,6 +186,44 @@ Produced after the **skip census** (`testing.md`) made the skip column attributa
 ⚠️ **The track table was ranked on numbers that could not distinguish a root from its shadow;** these
 are ranked on *assertions unblocked*, which is what the ranking rule above actually asks for.
 
+##### 🚦 HANDOFF — where to pick up (updated 2026-09-20, day 6)
+
+**State: 🎯 64,603 / 0 / 0 over 288 files, unchanged by the day's eight fixes.** **588 workspace tests**,
+clippy clean, C-ABI gate PASSED, Miri **32/32**, `.wat` corpus **528 / 532** (all 528 accepted by
+wasm-tools), custom-sections **528 agree / 4 refused by both / 0 differ**, repo `tests/*.wast`
+**230 / 0 / 0** over 17 files, and three NEW differential gates that each start green and were each
+proved able to fail: `scripts/feature-gate-sweep.ts`, `scripts/index-type-sweep.ts`,
+`scripts/differential-fuzz.ts`.
+
+🔴 **DAY 6 — A VALIDATOR REVIEW FOUND EIGHT, AND TWO OF THEM WERE NOT IN THE VALIDATOR**
+(2026-09-20, `known-issues.md` top). All reproduced against wasm-tools 1.259 and wasmtime 48 before
+anything changed. The two serious ones are silent-wrong-answer defects that **executed**:
+
+* **A table's ELEMENT TYPE was read as a value type** (§5.3.9 says *reftype*). `(table (elem i64))`
+  decoded, validated and RAN — `table.get` returned **-1**, the engine's null sentinel, as an `i64`.
+  ⚠️ And `wasmrt wat` EMITTED such modules: the **eighth** instance of the T10a emitter mechanism and
+  the **third** time our assembler's output is not WebAssembly. 🎓 The element SEGMENT's field is the
+  same grammar production and was fixed on its own, because that is the one the suite complained
+  about — `best-practices.md` §1.10.
+* **Every 64-bit TABLE access truncated its index to 32 bits.** `call_indirect` at `2^32` **called
+  the function in slot 0 and returned its answer**; wasmtime traps. Six instructions, all fixed.
+  `Table::is64` was already recorded — for import matching — and nothing on the execution path read
+  it (§3.14).
+
+Then: `return_call_indirect` typed its table index `i32` (accept-invalid AND refuse-valid); a
+constant expression's operand stack was capped at **8** (so a nine-field `struct.new` initializer was
+refused, with the wrong reason); an uninitialized non-null local was readable in unreachable code;
+**table64 and the table-initializer form were each gated at one entry point of two** (X3's shape,
+third and fourth instances); export-name uniqueness was **O(n²)** — 128,000 exports took **11.9 s**
+against wasm-tools' 0.13 s, a DoS before anything runs; and **`--features` was applied by one CLI
+path of three**, which was a live swappability break (`interop.md` §2.2f — the sibling refuses the
+same command line; no contract change, the row was verified on parsing).
+
+🎓 **Three of the eight came from sweeps and one from a fuzz, not from reading the arm that was
+wrong** (`best-practices.md` §1.11, §1.12). The spec suite was at 64,603 / 0 / 0 throughout and could
+not reach any of them: a suite written in the text format cannot spell `(table 1 i64)`, and a suite
+run with every proposal enabled cannot test a gate.
+
 ##### 🚦 HANDOFF — where to pick up (updated 2026-09-19, day 4)
 
 **State: 🎯 64,603 / 0 / 0 over 288 files — ZERO FAILED, ZERO SKIPPED, ZERO UNRUN.** **580 workspace tests**,

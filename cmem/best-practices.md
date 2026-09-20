@@ -1715,3 +1715,79 @@ no-op means the mutation never happened and the gate never proved anything.
 🔒 The practice that caught all four: **every scripted edit asserts its own application** — the
 replacement throws `MUTATION DID NOT APPLY` when the text did not change, and prints the byte delta
 when it did. Cheap, and it converts a silent wrong result into a loud stop.
+
+## §1.10 — **A GRAMMAR PRODUCTION HAS MORE THAN ONE SITE; THE FAILING TEST NAMES ONE** (2026-09-20)
+
+§5.5.12's element-segment type field and §5.3.9's table-type element field are the same production:
+**reftype**. The first was read as a *valtype*, the spec suite complained, and it was fixed — with a
+test and a comment quoting the rule. The second was read as a valtype for the whole life of the
+project, because nothing complained: the text format cannot spell `(table 1 i64)`, so no `.wast` file
+and no corpus `.wat` can reach it. It decoded, validated and RAN, handing the guest the engine's
+null sentinel as an integer — and wasmrt's own assembler emitted such modules.
+
+🔒 The practice: when a fix lands on a grammar production, **grep for every call of the reader it
+replaced** and decide each one on the grammar, not on whether a test is failing there. Six
+`read_val_type` call sites; one was wrong. The sweep costs one command.
+
+🎓 Its twin: the text-format side had **four** copies of the same position (table field, inline-`elem`
+table field, element segment, import field). Three were fixed from reading; the fourth was found by
+the regression test written for the first three. **Write the test as a table of spellings, not as one
+case** — the fourth site is the one you did not know about.
+
+## §3.14 — **A FIELD RECORDED FOR ONE CONSUMER IS NOT A RULE THE OTHER CONSUMERS FOLLOW** (2026-09-20)
+
+`Table::is64` was added for **import matching** — a 64-bit table must not satisfy a 32-bit import —
+and its doc comment says it "decides what type every `table.get`/`set`/`grow`/`fill` operand has".
+That sentence was true of the spec and false of our code: every table arm in the interpreter popped
+an `i32` regardless, so a 64-bit index was truncated and `call_indirect` at `2^32` **called slot 0**.
+
+The memory side had `pop_mem(is64)` from the day memory64 landed and was correct at all eleven
+instructions. The difference is not care: memory64 arrived as a feature with its own operand rule,
+table64 arrived as a *type-level* change and the operand rule was assumed to follow.
+
+🎓 When a type gains a discriminant, the question is not "is it stored?" but **"which code reads it,
+and which code should?"** A discriminant with exactly one reader is a lead, not a design.
+
+## §1.11 — **SWEEP THE AXIS, NOT THE ARM** (2026-09-20)
+
+Three of this review's findings came from two mechanical sweeps, and none of them from reading the
+arm that was wrong:
+
+* **the 64-bit axis** — 24 table/memory instructions × the i64 spelling (both engines must ACCEPT)
+  and the i32 spelling (both must REFUSE). One arm differed: `return_call_indirect`. The same 18
+  cases re-run at RUN time against wasmtime, addressing past `2^32`, showed six more.
+* **the proposal axis** — all 18 proposals, each disabled, against a module that uses it, judged by
+  wasm-tools with the same proposal disabled. One hole: table64.
+
+A sweep has a property a reading does not: **the control arm**. Every row asserts the *positive*
+case too, so a probe that fails for an unrelated reason cannot read as a working gate — which is
+exactly how a `(table 1 funcref (ref.func $f))` fixture nearly certified a gate it never exercised.
+
+🔒 And a sweep is a table of *spellings*: the instruction list is enumerable, the proposal list is
+enumerable, the 256 opcodes are enumerable (§3.13), the 64 one-byte value types are enumerable
+(§1.8). Prefer an enumeration you can generate over a list you can write down.
+
+## §1.12 — **A DIFFERENTIAL FUZZ REACHES WHAT THE SUITE STRUCTURALLY CANNOT** (2026-09-20)
+
+`wasm-tools smith` generates a module that is valid **by construction**; anything wasmrt refuses is a
+refuse-valid defect, and it needs no oracle beyond the exit status. 1,325 generated modules found the
+constant-expression cap in the first 25. A single mutated byte, kept only when wasm-tools then says
+INVALID, is the other direction: 5,300 mutations found one accept-invalid — the `i64` table — which
+is the one class the spec suite can never reach, because the suite is written in the text format and
+the text format cannot spell it.
+
+⚠️ **Set the outside reader's feature list to OURS.** The first run reported seven refuse-valid
+"defects" that were `-f all` enabling proposals wasmrt does not implement (compact-imports).
+A differential result is only a result when both sides were asked the same question.
+
+## §4.11 — **A CONTRACT ROW VERIFIED ON PARSING IS NOT VERIFIED** (2026-09-20)
+
+`interop.md`'s `--features` row read *DONE · both vocabularies resolve, same seeding, same layering
+refusals, must come before the module path*. Every word of that was measured and true. The flag was
+nevertheless **applied by one of the three CLI paths that judge a module**: `wasmrt run --features mvp
+simd.wasm f` ran the module and printed its answer, while the sibling runtime refused the identical
+command line. The row was verified on how the flag PARSES, which is the half that is easy to compare.
+
+🔒 Verify a flag row by asserting on **what the command did** — the verdict, the exit status, the
+output — in every position and on every path the flag claims to govern. §4.10 said *test the
+spellings*; this adds: **and test the PATHS**.

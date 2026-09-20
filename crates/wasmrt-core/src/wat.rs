@@ -936,6 +936,22 @@ fn heap_type_to_val_type(s: &Sexpr, nullable: bool, type_names: &[Option<String>
     Ok(if nullable { pair.0 } else { pair.1 })
 }
 
+/// Parse a **reference** type — the grammar's `reftype`, where a numeric or vector type is not
+/// merely ill-typed but unspellable (§6.4.2).
+///
+/// ⚠️⚠️ The table element position used [`parse_val_type`], so `(module (table 1 i64))` assembled
+/// to a table whose element type byte is `0x7e`: bytes `wasm-tools` refuses as **malformed
+/// reference type**, and which wasmrt itself then decoded, validated and ran. The eighth instance
+/// of the emitter mechanism (T10a), and the third where our assembler's output is not
+/// WebAssembly — wasm-tools refuses the same SOURCE at its parser.
+fn parse_ref_type(s: &Sexpr, type_names: &[Option<String>]) -> Result<V> {
+    let t = parse_val_type(s, type_names)?;
+    if !t.is_ref() {
+        return Err(Error::BadValType);
+    }
+    Ok(t)
+}
+
 /// Parse a value type: a bare keyword, or the list form `(ref null? ht)`.
 fn parse_val_type(s: &Sexpr, type_names: &[Option<String>]) -> Result<V> {
     if let Some(l) = s.as_list() {
@@ -2514,7 +2530,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         // Absolute, because `parse_table_index_type` may advance `j` past an `i64`/`i32`.
         let elem_at = j + pos;
         let is64 = parse_table_index_type(items, &mut j);
-        let elem_type = parse_val_type(nth(items, j)?, &b.type_names)?;
+        let elem_type = parse_ref_type(nth(items, j)?, &b.type_names)?;
         let entries: Vec<Vec<Sexpr>> = want_list(&items[elem_at])?[1..]
             .iter()
             .map(|s| {
@@ -2575,7 +2591,7 @@ fn parse_table_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
     }
 
     let (min, max, is64) = parse_table_limits(items, &mut j)?;
-    let elem = parse_val_type(nth(items, j)?, &b.type_names)?;
+    let elem = parse_ref_type(nth(items, j)?, &b.type_names)?;
     // Anything after the element type is the initializer expression (function-references).
     // Reading it is what stops the assembler emitting a table of nulls for
     // `(table 3 funcref (ref.func $f))`.
@@ -2728,7 +2744,11 @@ fn parse_import_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         }
         "table" => {
             let (min, max, is64) = parse_table_limits(desc, &mut j)?;
-            let elem = parse_val_type(nth(desc, j)?, &b.type_names)?;
+            // The FOURTH copy of the table element position, and it had the same defect as the
+            // other three — found by the test above rather than by reading, because
+            // `(import "m" "t" (table 1 f32))` takes this parser and `(table (import …) 1 f32)`
+            // takes `parse_table_field`.
+            let elem = parse_ref_type(nth(desc, j)?, &b.type_names)?;
             b.table_imports.push(ImportedTable {
                 r,
                 t: TableDef {
@@ -2788,7 +2808,7 @@ fn parse_elem_field(items: &[Sexpr], b: &mut ModuleBuild) -> Result<()> {
         // type position, and must reach `parse_val_type` to be refused there. Routing it onward
         // makes it a funcidx, and the error becomes `BadNumber`.
         if s.as_atom().is_some_and(is_type_keyword) || is_ref_type_form(s) {
-            elem_type = parse_val_type(s, &b.type_names)?;
+            elem_type = parse_ref_type(s, &b.type_names)?;
             j += 1;
         }
     }
@@ -5961,6 +5981,35 @@ mod tests {
             r#"(module (table 4 funcref))"#,
             r#"(module (func (result funcref) (ref.null func)))"#,
             r#"(module (type $t (func)) (func (param (ref null $t))))"#,
+        ] {
+            assert!(asm(src).is_ok(), "must still assemble: {src}");
+        }
+    }
+
+    /// A table's element type is a REFERENCE type, in the text format too (§6.4.2).
+    ///
+    /// ⚠️⚠️ The element position was parsed with `parse_val_type`, so `(module (table 1 i64))`
+    /// ASSEMBLED — to `04 04 01 7e 00 01`, bytes `wasm-tools` refuses as "malformed reference
+    /// type" and its own parser refuses as source. That is the eighth instance of the T10a
+    /// emitter mechanism and the third time wasmrt's assembler has emitted something that is not
+    /// WebAssembly; the other half of it, the decoder ACCEPTING those bytes, is pinned in
+    /// `tests/decoder-strictness.wast`.
+    #[test]
+    fn a_table_element_type_must_be_a_reference_type() {
+        for src in [
+            r#"(module (table 1 i64))"#,
+            r#"(module (table 1 v128))"#,
+            r#"(module (import "m" "t" (table 1 f32)))"#,
+            r#"(module (table 1 i32 (elem)))"#,
+            r#"(module (func $f) (table 1 funcref) (elem (i32.const 0) i64 (ref.func $f)))"#,
+        ] {
+            assert_eq!(asm(src), Err(Error::BadValType), "must be refused: {src}");
+        }
+        for src in [
+            r#"(module (table 1 funcref))"#,
+            r#"(module (table 1 externref))"#,
+            r#"(module (type $t (func)) (table 1 (ref null $t)))"#,
+            r#"(module (func $f) (table 1 funcref) (elem (i32.const 0) funcref (ref.func $f)))"#,
         ] {
             assert!(asm(src).is_ok(), "must still assemble: {src}");
         }
